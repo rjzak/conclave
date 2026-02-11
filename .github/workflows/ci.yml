@@ -1,0 +1,24 @@
+name: Test
+on: [push, pull_request]
+permissions:
+  contents: read
+
+jobs:
+  fmt_clippy_test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: cargo fmt
+        run: cargo fmt -- --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-features -- -D warnings
+      - name: cargo test
+        run: cargo test --workspace --all-features
+
+  check-spdx-headers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: enarx/spdx@b5bfdd4410071bf058c8333d0e70020001524b6b # master
+        with:
+          licenses: Apache-2.0

@@ -1,0 +1,12 @@
+[package]
+name = "conclave-common"
+description = "Common data structures for the Conclave communications environment"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+semver = { workspace = true, features = ["serde", "std"] }
+serde = { workspace = true, features = ["alloc", "derive", "std"] }

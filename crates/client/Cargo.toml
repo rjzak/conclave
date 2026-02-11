@@ -1,0 +1,15 @@
+[package]
+name = "conclave-client"
+build = "../../build.rs"
+description = "Client application for the Conclave communications environment"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+clap = { workspace = true, features = ["color", "derive", "std", "suggestions"] }
+
+[build-dependencies]
+chrono = { workspace = true, features = ["now"] }
