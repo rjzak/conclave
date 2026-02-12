@@ -8,5 +8,16 @@ repository.workspace = true
 version.workspace = true
 
 [dependencies]
+anyhow = { workspace = true, features = ["std"] }
+chacha20poly1305 = { workspace = true, features = ["alloc", "getrandom"] }
+ed25519-dalek = { workspace = true }
+hkdf = { workspace = true, features = ["std"] }
+rand = { workspace = true, features = ["getrandom", "std_rng"] }
 semver = { workspace = true, features = ["serde", "std"] }
 serde = { workspace = true, features = ["alloc", "derive", "std"] }
+sha2 = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["net", "io-util"] }
+x25519-dalek = { workspace = true, features = ["zeroize"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

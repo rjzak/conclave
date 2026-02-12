@@ -10,6 +10,9 @@
 /// Data structures for communicating with the tracker
 pub mod tracker;
 
+/// Networking utilities
+pub mod net;
+
 /// Protocol magic
 pub const HELLO: &[u8] = b"HELLO CONCLAVE!";
 
