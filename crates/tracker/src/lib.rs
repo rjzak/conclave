@@ -7,23 +7,24 @@
 #![deny(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
-use conclave_common::tracker::{Advertise, TrackerProtocol};
+use conclave_common::tracker::{Advertise, SERVER_EXPIRATION, TrackerProtocol};
 
-use std::collections::HashSet;
+use std::fmt::{Debug, Display};
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use anyhow::Result;
 use bytes::Bytes;
+use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 /// Tracker state
 pub struct State {
     /// List of servers advertised by the tracker
-    pub servers: Arc<RwLock<HashSet<Advertise>>>,
+    servers: Arc<DashMap<Advertise, SystemTime>>,
 
     /// IP Address and port to listen on
     ip: IpAddr,
@@ -37,7 +38,7 @@ impl State {
     #[must_use]
     pub fn new(ip: IpAddr, port: u16) -> Self {
         Self {
-            servers: Arc::new(RwLock::new(HashSet::new())),
+            servers: Arc::new(DashMap::new()),
             ip,
             port,
         }
@@ -48,15 +49,31 @@ impl State {
     /// # Errors
     ///
     /// Errors result if there's a network problem
+    #[tracing::instrument]
     pub async fn serve(self) -> Result<()> {
         let listener = TcpListener::bind((self.ip, self.port)).await?;
-        let servers = self.servers;
+        let servers = self.servers.clone();
 
         loop {
             let (socket, client) = listener.accept().await?;
+            let servers = servers.clone();
 
-            let servers_clone = servers.clone();
             tokio::spawn(async move {
+                let mut to_remove = Vec::new();
+
+                for entry in servers.clone().iter() {
+                    if let Ok(duration) = entry.value().elapsed()
+                        && duration >= SERVER_EXPIRATION
+                    {
+                        tracing::info!("Removing expired server: {}", entry.key().name);
+                        to_remove.push(entry.key().clone());
+                    }
+                }
+
+                for server in to_remove {
+                    servers.remove(&server);
+                }
+
                 let mut framed = Framed::new(socket, LengthDelimitedCodec::new());
 
                 while let Some(result) = framed.next().await {
@@ -65,8 +82,11 @@ impl State {
                             if let Ok(proto) = postcard::from_bytes(&bytes) {
                                 match proto {
                                     TrackerProtocol::GetServers => {
-                                        let servers = servers_clone.read().await;
-                                        let servers = servers.iter().cloned().collect();
+                                        let servers = servers
+                                            .clone()
+                                            .iter()
+                                            .map(|e| e.key().clone())
+                                            .collect::<Vec<_>>();
                                         let response = TrackerProtocol::ServersList(servers);
                                         let response = match postcard::to_allocvec(&response) {
                                             Ok(b) => b,
@@ -80,8 +100,7 @@ impl State {
                                         }
                                     }
                                     TrackerProtocol::AdvertiseServer(server) => {
-                                        let mut servers = servers_clone.write().await;
-                                        servers.insert(server);
+                                        servers.clone().insert(server, SystemTime::now());
                                     }
                                     TrackerProtocol::ServersList(_) => {}
                                 }
@@ -94,5 +113,23 @@ impl State {
                 }
             });
         }
+    }
+}
+
+impl Debug for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Tracker:{}", self.servers.len())
+    }
+}
+
+impl Display for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Conclave Tracker advertising {} servers on {}:{}",
+            self.servers.len(),
+            self.ip,
+            self.port
+        )
     }
 }

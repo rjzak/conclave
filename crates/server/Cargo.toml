@@ -27,3 +27,4 @@ chrono = { workspace = true, features = ["now"] }
 
 [dev-dependencies]
 conclave-tracker = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
