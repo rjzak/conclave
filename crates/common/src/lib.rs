@@ -13,6 +13,9 @@ pub mod tracker;
 /// Networking utilities
 pub mod net;
 
+/// Data structures for communicating with the server
+pub mod server;
+
 /// Protocol magic
 pub const HELLO: &[u8] = b"HELLO CONCLAVE!";
 
