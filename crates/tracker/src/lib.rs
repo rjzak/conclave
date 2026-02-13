@@ -12,6 +12,7 @@ use conclave_common::tracker::{Advertise, SERVER_EXPIRATION, TrackerProtocol};
 use std::fmt::{Debug, Display};
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::SystemTime;
 
 use anyhow::Result;
@@ -31,6 +32,9 @@ pub struct State {
 
     /// Port to listen on
     port: u16,
+
+    /// Number of times the tracker has been asked for a server listing
+    queries: Arc<AtomicU32>,
 }
 
 impl State {
@@ -41,6 +45,7 @@ impl State {
             servers: Arc::new(DashMap::new()),
             ip,
             port,
+            queries: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -50,13 +55,15 @@ impl State {
     ///
     /// Errors result if there's a network problem
     #[tracing::instrument]
-    pub async fn serve(self) -> Result<()> {
+    pub async fn serve(&self) -> Result<()> {
         let listener = TcpListener::bind((self.ip, self.port)).await?;
         let servers = self.servers.clone();
+        let counter = self.queries.clone();
 
         loop {
             let (socket, client) = listener.accept().await?;
             let servers = servers.clone();
+            let counter = counter.clone();
 
             tokio::spawn(async move {
                 let mut to_remove = Vec::new();
@@ -97,9 +104,21 @@ impl State {
                                         };
                                         if let Err(e) = framed.send(Bytes::from(response)).await {
                                             tracing::error!("Response error: {e}");
+                                        } else {
+                                            counter.fetch_add(1, Ordering::Relaxed);
                                         }
                                     }
                                     TrackerProtocol::AdvertiseServer(server) => {
+                                        let server = if server.url.contains("0.0.0.0") {
+                                            let mut fixed = server.clone();
+                                            fixed.url = fixed.url.replace(
+                                                "0.0.0.0",
+                                                client.ip().to_string().as_str(),
+                                            );
+                                            fixed
+                                        } else {
+                                            server
+                                        };
                                         servers.clone().insert(server, SystemTime::now());
                                     }
                                     TrackerProtocol::ServersList(_) => {}
@@ -113,6 +132,12 @@ impl State {
                 }
             });
         }
+    }
+
+    /// Number of queries received by the tracker
+    #[must_use]
+    pub fn queries(&self) -> u32 {
+        self.queries.load(Ordering::Relaxed)
     }
 }
 

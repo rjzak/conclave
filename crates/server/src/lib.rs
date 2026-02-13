@@ -86,6 +86,8 @@ mod tests {
                 description: "Testing".to_string(),
                 version,
                 anonymous: false,
+                users_connected: 0,
+                uptime: Duration::from_secs(0),
                 url: String::new(),
                 key: server_verifying,
             });

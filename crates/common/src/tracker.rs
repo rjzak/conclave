@@ -6,6 +6,9 @@ use ed25519_dalek::VerifyingKey;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
+/// Response to protocol handshake
+pub const RESPONSE: &[u8] = b"Tracker";
+
 /// One-minute expiration for a server's advertisement on a tracker.
 pub const SERVER_EXPIRATION: Duration = Duration::from_secs(60);
 
@@ -23,6 +26,12 @@ pub struct Advertise {
 
     /// Whether the server allows guest users
     pub anonymous: bool,
+
+    /// Number of users currently connected to the server
+    pub users_connected: u32,
+
+    /// For how long the server has been running
+    pub uptime: Duration,
 
     /// URL of the server as advertised
     pub url: String,
