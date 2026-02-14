@@ -46,11 +46,12 @@ mod tests {
         TRACING.call_once(init_tracing);
 
         let version = env!("CARGO_PKG_VERSION").parse().unwrap();
+        let state = conclave_tracker::State::new(IpAddr::V4(Ipv4Addr::LOCALHOST), PORT);
         let (_server_signing, server_verifying) = random_server_keys();
 
+        let state_clone = state.clone();
         let tracker = tokio::spawn(async move {
-            let state = conclave_tracker::State::new(IpAddr::V4(Ipv4Addr::LOCALHOST), PORT);
-            state.serve().await.expect("Failed to start tracker");
+            state_clone.serve().await.expect("Failed to start tracker");
         });
         assert!(!tracker.is_finished());
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -115,6 +116,7 @@ mod tests {
                 }
             }
         }
+        assert_eq!(state.servers().len(), 1);
 
         tokio::time::sleep(conclave_common::tracker::SERVER_EXPIRATION).await;
 
@@ -137,6 +139,7 @@ mod tests {
                 }
             }
         }
+        assert!(state.servers().is_empty());
 
         tracker.abort();
     }

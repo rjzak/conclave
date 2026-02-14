@@ -12,7 +12,7 @@ use conclave_common::tracker::{Advertise, SERVER_EXPIRATION, TrackerProtocol};
 use std::fmt::{Debug, Display};
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::SystemTime;
 
 use anyhow::Result;
@@ -35,6 +35,21 @@ pub struct State {
 
     /// Number of times the tracker has been asked for a server listing
     queries: Arc<AtomicU32>,
+
+    /// Whether the tracker is currently serving requests
+    serving: Arc<AtomicBool>,
+}
+
+impl Clone for State {
+    fn clone(&self) -> Self {
+        Self {
+            servers: self.servers.clone(),
+            ip: self.ip,
+            port: self.port,
+            queries: self.queries.clone(),
+            serving: self.serving.clone(),
+        }
+    }
 }
 
 impl State {
@@ -46,6 +61,7 @@ impl State {
             ip,
             port,
             queries: Arc::new(AtomicU32::new(0)),
+            serving: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -57,30 +73,16 @@ impl State {
     #[tracing::instrument]
     pub async fn serve(&self) -> Result<()> {
         let listener = TcpListener::bind((self.ip, self.port)).await?;
-        let servers = self.servers.clone();
-        let counter = self.queries.clone();
+        self.serving.store(true, Ordering::Relaxed);
 
         loop {
-            let (socket, client) = listener.accept().await?;
-            let servers = servers.clone();
-            let counter = counter.clone();
+            let (socket, client) = listener.accept().await.inspect_err(|e| {
+                tracing::error!("Error accepting connection: {e}");
+                self.serving.store(false, Ordering::Relaxed);
+            })?;
+            let self_clone = self.clone();
 
             tokio::spawn(async move {
-                let mut to_remove = Vec::new();
-
-                for entry in servers.clone().iter() {
-                    if let Ok(duration) = entry.value().elapsed()
-                        && duration >= SERVER_EXPIRATION
-                    {
-                        tracing::info!("Removing expired server: {}", entry.key().name);
-                        to_remove.push(entry.key().clone());
-                    }
-                }
-
-                for server in to_remove {
-                    servers.remove(&server);
-                }
-
                 let mut framed = Framed::new(socket, LengthDelimitedCodec::new());
 
                 while let Some(result) = framed.next().await {
@@ -89,12 +91,8 @@ impl State {
                             if let Ok(proto) = postcard::from_bytes(&bytes) {
                                 match proto {
                                     TrackerProtocol::GetServers => {
-                                        let servers = servers
-                                            .clone()
-                                            .iter()
-                                            .map(|e| e.key().clone())
-                                            .collect::<Vec<_>>();
-                                        let response = TrackerProtocol::ServersList(servers);
+                                        let response =
+                                            TrackerProtocol::ServersList(self_clone.servers());
                                         let response = match postcard::to_allocvec(&response) {
                                             Ok(b) => b,
                                             Err(e) => {
@@ -105,7 +103,7 @@ impl State {
                                         if let Err(e) = framed.send(Bytes::from(response)).await {
                                             tracing::error!("Response error: {e}");
                                         } else {
-                                            counter.fetch_add(1, Ordering::Relaxed);
+                                            self_clone.queries.fetch_add(1, Ordering::Relaxed);
                                         }
                                     }
                                     TrackerProtocol::AdvertiseServer(server) => {
@@ -119,7 +117,7 @@ impl State {
                                         } else {
                                             server
                                         };
-                                        servers.clone().insert(server, SystemTime::now());
+                                        self_clone.servers.insert(server, SystemTime::now());
                                     }
                                     TrackerProtocol::ServersList(_) => {}
                                 }
@@ -138,6 +136,36 @@ impl State {
     #[must_use]
     pub fn queries(&self) -> u32 {
         self.queries.load(Ordering::Relaxed)
+    }
+
+    /// Whether the tracker is currently serving requests
+    #[must_use]
+    pub fn serving(&self) -> bool {
+        self.serving.load(Ordering::Relaxed)
+    }
+
+    /// List of servers advertised by the tracker, and expire old ones
+    #[must_use]
+    pub fn servers(&self) -> Vec<Advertise> {
+        let mut to_remove = Vec::new();
+
+        for entry in self.servers.iter() {
+            if let Ok(duration) = entry.value().elapsed()
+                && duration >= SERVER_EXPIRATION
+            {
+                tracing::info!("Removing expired server: {}", entry.key().name);
+                to_remove.push(entry.key().clone());
+            }
+        }
+
+        for server in to_remove {
+            self.servers.remove(&server);
+        }
+
+        self.servers
+            .iter()
+            .map(|e| e.key().clone())
+            .collect::<Vec<_>>()
     }
 }
 

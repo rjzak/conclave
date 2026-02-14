@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use ed25519_dalek::VerifyingKey;
@@ -13,7 +14,7 @@ pub const RESPONSE: &[u8] = b"Tracker";
 pub const SERVER_EXPIRATION: Duration = Duration::from_secs(60);
 
 /// Tracker advertisement
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Advertise {
     /// Name of the server
     pub name: String,
@@ -38,6 +39,17 @@ pub struct Advertise {
 
     /// Server's public key
     pub key: VerifyingKey,
+}
+
+impl Hash for Advertise {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Only some fields should be considered for hashing, so that small changes do trigger
+        // a replacement in the tracker's hashmap
+        self.name.hash(state);
+        self.version.hash(state);
+        self.url.hash(state);
+        self.key.hash(state);
+    }
 }
 
 /// Tracker protocol messages
