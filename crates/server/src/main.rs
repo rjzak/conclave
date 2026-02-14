@@ -6,8 +6,12 @@
 #![forbid(unsafe_code)]
 
 use std::net::IpAddr;
+use std::path::PathBuf;
+use std::process::ExitCode;
 
+use anyhow::Result;
 use clap::Parser;
+use conclave_server::State;
 
 pub const VERSION: &str = concat!(env!("CONCLAVE_VERSION"), " ", env!("CONCLAVE_BUILD_DATE"));
 
@@ -16,7 +20,7 @@ pub const VERSION: &str = concat!(env!("CONCLAVE_VERSION"), " ", env!("CONCLAVE_
 #[command(author, about, version = VERSION)]
 struct Args {
     /// IP Address to listen on
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "127.0.0.1")]
     ip: IpAddr,
 
     /// Advertised domain
@@ -26,11 +30,30 @@ struct Args {
     /// Port to listen on
     #[arg(short, long)]
     port: u16,
+
+    /// Database file path
+    #[arg(short, long, default_value = "server.db")]
+    config: PathBuf,
 }
 
-fn main() {
-    let _args = Args::parse();
-    println!("Hello, server!");
+#[tokio::main]
+async fn main() -> Result<ExitCode> {
+    let args = Args::parse();
+    let state = if args.config.exists() {
+        State::load(args.ip, args.port, &args.config)
+    } else {
+        State::new(
+            "Conclave".into(),
+            "Conclave server".into(),
+            args.ip,
+            args.port,
+            args.config,
+        )
+    }?;
+    state.advertise_trackers()?;
+    state.serve()?;
+
+    Ok(ExitCode::SUCCESS)
 }
 
 #[test]
