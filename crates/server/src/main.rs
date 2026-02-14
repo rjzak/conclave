@@ -51,7 +51,7 @@ async fn main() -> Result<ExitCode> {
         )
     }?;
     state.advertise_trackers()?;
-    state.serve()?;
+    state.serve().await?;
 
     Ok(ExitCode::SUCCESS)
 }

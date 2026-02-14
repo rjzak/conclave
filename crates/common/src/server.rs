@@ -11,14 +11,49 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// Response to protocol handshake
 pub const RESPONSE: &[u8] = b"Server";
 
-/// Server messages for unencrypted connections
+/// Messages sent to the server from the client
 #[derive(Debug, Deserialize, Serialize)]
-pub enum ServerProtocolUnencrypted {
+#[allow(clippy::large_enum_variant)]
+pub enum ServerMessages {
+    /// Messages for establishing the encryption connection
+    Unencrypted(ServerMessagesUnencrypted),
+
+    /// Messages once the encryption connection is established
+    Encrypted(ServerMessagesEncrypted),
+}
+
+/// Messages back to the client from the server
+#[derive(Debug, Deserialize, Serialize)]
+pub enum ClientMessages {
+    /// Messages for establishing the encryption connection
+    Unencrypted(ClientMessagesUnencrypted),
+
+    /// Messages once the encryption connection is established
+    Encrypted(ClientMessagesEncrypted),
+}
+
+/// Client to Server messages for unencrypted connections
+#[derive(Debug, Deserialize, Serialize)]
+pub enum ServerMessagesUnencrypted {
     /// Ask the server for its public key
     KeyRequest,
 
+    /// Switch to encrypted connection
+    SwitchToEncrypted,
+
+    /// Drop the connection.
+    Disconnect,
+}
+
+/// Server to Client messages for unencrypted connections
+
+#[derive(Debug, Deserialize, Serialize)]
+pub enum ClientMessagesUnencrypted {
     /// Server's response with the public key
     KeyResponse(VerifyingKey),
+
+    /// Drop the connection.
+    Disconnect,
 }
 
 /// Server's information response, also used by the client to keep track
@@ -64,7 +99,7 @@ impl Debug for UserAuthentication {
 }
 
 /// Information about a connected user
-#[derive(Debug, Hash, Deserialize, Serialize)]
+#[derive(Clone, Debug, Hash, Deserialize, Serialize)]
 pub struct ConnectedUser {
     /// Display name of the user which might be different from their username
     pub display_name: String,
@@ -79,15 +114,13 @@ pub struct ConnectedUser {
     pub connected_since: Duration,
 }
 
-/// Server messages for encrypted connections
+/// Client to Server messages for encrypted connections
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Deserialize, Serialize)]
-pub enum ServerProtocolEncrypted {
+#[non_exhaustive]
+pub enum ServerMessagesEncrypted {
     /// Ask the server for information about itself
     ServerInformationRequest,
-
-    /// Server's response with information about itself
-    ServerInformationResponse(ServerInformation),
 
     /// User tries to authenticate
     ServerAuthenticationRequest(UserAuthentication),
@@ -95,6 +128,27 @@ pub enum ServerProtocolEncrypted {
     /// Ask the server for a list of connected users
     ListConnectedUsersRequest,
 
+    /// Do nothing message to keep the connection alive.
+    KeepAlive,
+
+    /// Drop the connection.
+    Disconnect,
+}
+
+/// Server to Client messages for encrypted connections
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Deserialize, Serialize)]
+#[non_exhaustive]
+pub enum ClientMessagesEncrypted {
+    /// Server's response with information about itself
+    ServerInformationResponse(ServerInformation),
+
     /// Receive a list of connected users
     ListConnectedUsersResponse(Vec<ConnectedUser>),
+
+    /// Do nothing message to keep the connection alive.
+    KeepAlive,
+
+    /// Drop the connection.
+    Disconnect,
 }

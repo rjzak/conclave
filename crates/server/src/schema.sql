@@ -5,7 +5,7 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE SERVER_CONFIG (
     name text NOT NULL,
     description text NOT NULL,
-    key text NOT NULL,
+    key text NOT NULL, -- hex: secret and public keys
     version text NOT NULL,
     trackers text
 );

@@ -8,10 +8,17 @@
 #![forbid(unsafe_code)]
 
 use conclave_common::URL_PROTOCOL;
+use conclave_common::net::{EncryptedStream, random_server_keys};
+use conclave_common::server::{
+    ClientMessages, ClientMessagesEncrypted, ClientMessagesUnencrypted, ConnectedUser,
+    ServerMessages, ServerMessagesEncrypted, ServerMessagesUnencrypted,
+};
+use conclave_common::tracker::Advertise;
+use conclave_common::tracker::TrackerProtocol::AdvertiseServer;
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime};
 
@@ -20,21 +27,48 @@ use async_sqlite::rusqlite::fallible_iterator::FallibleIterator;
 use async_sqlite::rusqlite::{Batch, Connection};
 use async_sqlite::{Client, ClientBuilder, JournalMode};
 use bytes::Bytes;
-use conclave_common::net::random_server_keys;
-use conclave_common::tracker::Advertise;
-use conclave_common::tracker::TrackerProtocol::AdvertiseServer;
+use dashmap::DashSet;
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use futures::SinkExt;
+use futures::{SinkExt, StreamExt};
 use semver::Version;
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 const SCHEMA: &str = include_str!("schema.sql");
 
 static VERSION_SEMVER: LazyLock<Version> =
     LazyLock::new(|| Version::parse(env!("CARGO_PKG_VERSION")).unwrap());
+
+/// Client connection
+struct ClientConnection {
+    /// Encrypted connection to the client
+    conn: Arc<RwLock<EncryptedStream>>,
+
+    /// User information
+    user: Arc<ConnectedUser>,
+
+    /// Client's address
+    addr: Arc<SocketAddr>,
+}
+
+impl Clone for ClientConnection {
+    fn clone(&self) -> Self {
+        Self {
+            conn: self.conn.clone(),
+            user: self.user.clone(),
+            addr: self.addr.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for ClientConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let user = (*self.user).clone().display_name;
+        write!(f, "ClientConnection: {user}@{:?}", self.addr)
+    }
+}
 
 /// Server state
 #[derive(Clone)]
@@ -48,6 +82,12 @@ pub struct State {
 
     /// Advertised URL
     url: String,
+
+    /// Listening IP
+    ip: IpAddr,
+
+    /// Server port
+    port: u16,
 
     /// When the server started
     started: SystemTime,
@@ -66,6 +106,27 @@ pub struct State {
 
     /// Whether the tracker advertisements should be running
     tracker_advertise: Arc<AtomicBool>,
+
+    /// Active connections
+    connections: Arc<RwLock<Vec<ClientConnection>>>,
+
+    /// Total visitors
+    total_visits: Arc<AtomicU32>,
+
+    /// Whether the server is currently serving requests
+    serving: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Conclave Server: {}", self.name)
+    }
+}
+
+impl std::fmt::Display for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Conclave Server: {}", self.name)
+    }
 }
 
 impl State {
@@ -118,12 +179,17 @@ impl State {
             name,
             description,
             url: format!("{URL_PROTOCOL}{ip}:{port}"),
+            ip,
+            port,
             started: SystemTime::now(),
             public_key,
             private_key,
             sqlite,
             trackers: Arc::new(RwLock::new(Vec::new())),
             tracker_advertise: Arc::new(AtomicBool::new(false)),
+            connections: Arc::new(RwLock::new(Vec::new())),
+            total_visits: Arc::new(AtomicU32::new(0)),
+            serving: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -213,12 +279,17 @@ impl State {
             name,
             description,
             url: format!("{URL_PROTOCOL}{ip}:{port}"),
+            ip,
+            port,
             started: SystemTime::now(),
             public_key,
             private_key,
             sqlite,
             trackers: Arc::new(RwLock::new(trackers)),
             tracker_advertise: Arc::new(AtomicBool::new(false)),
+            connections: Arc::new(RwLock::new(Vec::new())),
+            total_visits: Arc::new(AtomicU32::new(0)),
+            serving: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -305,18 +376,183 @@ impl State {
         Ok(())
     }
 
-    /// Run the server logic
+    /// Run the server logic, does not return.
     ///
     /// # Errors
     ///
     /// An error returns if there's a network or database problem.
-    pub fn serve(&self) -> Result<()> {
-        todo!()
+    #[tracing::instrument]
+    pub async fn serve(&self) -> Result<()> {
+        let listener = TcpListener::bind((self.ip, self.port)).await?;
+        self.serving.store(true, Ordering::Relaxed);
+        let self_clone = self.clone();
+
+        tokio::spawn(async move {
+            self_clone.serve_encrypted().await;
+        });
+
+        let go_encrypted = DashSet::new();
+
+        loop {
+            let (socket, client) = listener.accept().await.inspect_err(|e| {
+                error!("Error accepting connection: {e}");
+                self.serving.store(false, Ordering::Relaxed);
+            })?;
+            let self_clone = self.clone();
+
+            if go_encrypted.contains(&client) {
+                let mut encrypted_connection =
+                    EncryptedStream::accept(socket, &self_clone.private_key).await?;
+
+                if let Ok(user_info_bytes) = encrypted_connection.recv().await
+                    && let Ok(user_info) = postcard::from_bytes::<ConnectedUser>(&user_info_bytes)
+                {
+                    info!("New connection from {client}: {}", user_info.display_name);
+                    let conn = ClientConnection {
+                        conn: Arc::new(RwLock::new(encrypted_connection)),
+                        user: Arc::new(user_info),
+                        addr: Arc::new(client),
+                    };
+                    self.connections.write().await.push(conn);
+                    self.total_visits.fetch_add(1, Ordering::Relaxed);
+                }
+
+                continue;
+            }
+
+            let go_encrypted_clone = go_encrypted.clone();
+
+            tokio::spawn(async move {
+                let mut framed = Framed::new(socket, LengthDelimitedCodec::new());
+
+                while let Some(result) = framed.next().await {
+                    match result {
+                        Ok(bytes) => {
+                            if let Ok(proto) = postcard::from_bytes(&bytes) {
+                                match proto {
+                                    ServerMessages::Unencrypted(
+                                        ServerMessagesUnencrypted::KeyRequest,
+                                    ) => {
+                                        let response = ClientMessages::Unencrypted(
+                                            ClientMessagesUnencrypted::KeyResponse(
+                                                self_clone.public_key,
+                                            ),
+                                        );
+                                        let response = match postcard::to_allocvec(&response) {
+                                            Ok(bytes) => bytes,
+                                            Err(e) => {
+                                                error!("Failed to serialize key response: {e}");
+                                                continue;
+                                            }
+                                        };
+                                        if let Err(e) = framed.send(Bytes::from(response)).await {
+                                            error!("Failed to send key response: {e}");
+                                        }
+                                    }
+                                    ServerMessages::Unencrypted(
+                                        ServerMessagesUnencrypted::Disconnect,
+                                    ) => {
+                                        if let Err(e) = framed.close().await {
+                                            error!("Failed to close connection: {e}");
+                                        }
+                                        break;
+                                    }
+                                    ServerMessages::Unencrypted(
+                                        ServerMessagesUnencrypted::SwitchToEncrypted,
+                                    ) => {
+                                        go_encrypted_clone.insert(client);
+                                    }
+                                    x => {
+                                        error!("Received unexpected message: {x:?}");
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Error decoding message from {client}: {e}");
+                        }
+                    }
+                }
+            });
+        }
+
+        #[allow(unreachable_code)]
+        self.serving.store(false, Ordering::Relaxed);
+    }
+
+    async fn serve_encrypted(&self) {
+        let keep_alive_bytes = postcard::to_stdvec(&ServerMessagesEncrypted::KeepAlive).unwrap();
+
+        loop {
+            let mut to_disconnect = Vec::new();
+            for (index, client) in self.connections.read().await.iter().enumerate() {
+                let mut conn = client.conn.write().await;
+                let Ok(message) = conn.recv().await else {
+                    continue;
+                };
+                match postcard::from_bytes::<ServerMessagesEncrypted>(&message) {
+                    Ok(ServerMessagesEncrypted::KeepAlive) => {
+                        if let Err(e) = conn.send(&keep_alive_bytes).await {
+                            error!("Failed to send keep alive: {e}");
+                        }
+                    }
+
+                    Ok(ServerMessagesEncrypted::Disconnect) => {
+                        to_disconnect.push(index);
+                    }
+
+                    Ok(ServerMessagesEncrypted::ListConnectedUsersRequest) => {
+                        let connected_users = self.connected_users().await;
+                        let response =
+                            ClientMessagesEncrypted::ListConnectedUsersResponse(connected_users);
+                        let response = match postcard::to_stdvec(&response) {
+                            Ok(bytes) => bytes,
+                            Err(e) => {
+                                error!("Failed to serialize list connected users response: {e}");
+                                continue;
+                            }
+                        };
+                        if let Err(e) = conn.send(&response).await {
+                            error!("Failed to send list connected users response: {e}");
+                        }
+                    }
+
+                    Ok(x) => {
+                        error!("Unexpected message from {client:?}: {x:?}");
+                        break;
+                    }
+                    Err(e) => {
+                        error!("Error decoding message from {client:?}: {e}");
+                        break;
+                    }
+                }
+            }
+
+            if !to_disconnect.is_empty() {
+                let mut connections = self.connections.write().await;
+                to_disconnect.sort_unstable();
+                to_disconnect.reverse();
+                for index in to_disconnect {
+                    connections.remove(index);
+                }
+            }
+        }
+    }
+
+    /// Get a list of connected users
+    pub async fn connected_users(&self) -> Vec<ConnectedUser> {
+        let connections = self.connections.read().await;
+        connections
+            .iter()
+            .map(|conn| (*conn.user).clone())
+            .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     use conclave_common::net::random_server_keys;
     use conclave_common::tracker::TrackerProtocol::AdvertiseServer;
     use conclave_common::tracker::{Advertise, TrackerProtocol};
@@ -438,5 +674,30 @@ mod tests {
         assert!(state.servers().is_empty());
 
         tracker.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn client_server() {
+        const PORT: u16 = 8090;
+        const LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        const DB_FILE: &str = "testing_server.db";
+
+        if Path::new(DB_FILE).exists() {
+            std::fs::remove_file(DB_FILE).unwrap();
+        }
+
+        let state = State::new(
+            "Conclave Server".into(),
+            "Description".into(),
+            LOCALHOST,
+            PORT,
+            DB_FILE,
+        )
+        .unwrap();
+        tokio::spawn(async move {
+            state.serve().await.unwrap();
+        });
+
+        std::fs::remove_file(DB_FILE).unwrap();
     }
 }

@@ -4,7 +4,9 @@ resolver = "3"
 
 [workspace.dependencies]
 # Internal
+conclave-client = { path = "crates/client", default-features = false }
 conclave-common = { path = "crates/common", default-features = false }
+conclave-server = { path = "crates/server", default-features = false }
 conclave-tracker = { path = "crates/tracker", default-features = false }
 
 # External
