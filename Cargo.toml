@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "testing"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -26,10 +26,12 @@ rand = { version = "0.8.5", default-features = false }
 semver = { version = "1.0.27", default-features = false }
 serde = { version = "1.0.228", default-features = false }
 sha2 = { version = "0.10.9", default-features = false }
+tempdir = { version = "0.3.7", default-features = false }
 tokio = { version = "1.49.0", default-features = false }
 tokio-util = { version = "0.7.18", default-features = false }
 tracing = { version = "0.1.44", default-features = false }
 tracing-subscriber = { version = "0.3.22", default-features = false }
+uuid = { version = "1.21.0", default-features = false }
 x25519-dalek = { version = "2.0.1", default-features = false }
 zeroize = { version = "1.8.2", default-features = false }
 

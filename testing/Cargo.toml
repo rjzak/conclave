@@ -1,0 +1,18 @@
+[package]
+name = "conclave-testing"
+description = "Integration testing for Conclave"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+publish = false
+
+[dev-dependencies]
+conclave-client = { workspace = true }
+conclave-common = { workspace = true }
+conclave-server = { workspace = true }
+conclave-tracker = { workspace = true }
+tempdir = { workspace = true }
+tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
+uuid = { workspace = true, features = ["std", "v4"] }

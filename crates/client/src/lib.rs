@@ -7,29 +7,35 @@
 #![deny(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
-use std::collections::HashSet;
 use conclave_common::net::EncryptedStream;
+use conclave_common::server::{
+    ClientMessagesUnencrypted, ConnectedUser, ServerInformation, ServerMessagesEncrypted,
+    ServerMessagesUnencrypted, UserAuthentication, VerifyingKey,
+};
+use conclave_common::tracker::{Advertise, TrackerProtocol};
 
-use std::path::Path;
-use std::sync::Arc;
-
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use async_sqlite::rusqlite::fallible_iterator::FallibleIterator;
 use async_sqlite::rusqlite::{Batch, Connection, params};
 use async_sqlite::{ClientBuilder, JournalMode};
 use bytes::Bytes;
 use dashmap::DashSet;
 use futures::{SinkExt, StreamExt};
+use std::collections::HashSet;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpStream;
+use tokio::sync::RwLock;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
-use conclave_common::tracker::{Advertise, TrackerProtocol};
+use tracing::{info, trace};
 
 const SCHEMA: &str = include_str!("schema.sql");
 
 /// Conclave client
 pub struct Client {
     /// Active connections to various services
-    connection: Vec<ConclaveConnection>,
+    connection: Arc<RwLock<Vec<ConclaveConnection>>>,
 
     /// Trackers, domain or IP and port
     trackers: Arc<DashSet<(String, u16)>>,
@@ -40,18 +46,13 @@ pub struct Client {
 
 impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Conclave Client: {} connections", self.connection.len())
+        write!(f, "Conclave Client")
     }
 }
 
 impl std::fmt::Display for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Conclave Client: {} connections", self.connection.len())?;
-        for connection in &self.connection {
-            writeln!(f, "\t{connection}")?;
-        }
-
-        Ok(())
+        write!(f, "Conclave Client")
     }
 }
 
@@ -101,7 +102,7 @@ impl Client {
             .open_blocking()?;
 
         Ok(Self {
-            connection: Vec::new(),
+            connection: Arc::new(RwLock::new(Vec::new())),
             sqlite,
             trackers: Arc::new(trackers),
         })
@@ -117,6 +118,10 @@ impl Client {
             .trackers
             .insert((String::from(tracker_name), tracker_port))
         {
+            trace!(
+                "Adding tracker {}:{} to database",
+                tracker_name, tracker_port
+            );
             let tracker_name = String::from(tracker_name);
             self.sqlite
                 .conn(move |conn| {
@@ -126,6 +131,8 @@ impl Client {
                     )
                 })
                 .await?;
+        } else {
+            trace!("Tracker {}:{} already known", tracker_name, tracker_port);
         }
 
         Ok(())
@@ -141,6 +148,10 @@ impl Client {
             .remove(&(String::from(tracker_name), tracker_port));
 
         let tracker_name = String::from(tracker_name);
+        trace!(
+            "Removing tracker {}:{} from database",
+            tracker_name, tracker_port
+        );
         self.sqlite
             .conn(move |conn| {
                 conn.execute(
@@ -162,9 +173,13 @@ impl Client {
         let mut servers_set = HashSet::new();
         let get_servers_bytes = postcard::to_stdvec(&TrackerProtocol::GetServers)?;
 
+        info!(
+            "Requesting servers list from {} trackers",
+            self.trackers.len()
+        );
         for tracker in self.trackers.iter() {
-            let stream = TcpStream::connect(format!("{}:{}", tracker.0, tracker.1))
-                .await?;
+            info!("Connecting to tracker {}:{}", tracker.0, tracker.1);
+            let stream = TcpStream::connect(format!("{}:{}", tracker.0, tracker.1)).await?;
             let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
 
             framed.send(Bytes::from(get_servers_bytes.clone())).await?;
@@ -172,12 +187,98 @@ impl Client {
                 let bytes = res_result?;
                 let resp: TrackerProtocol = postcard::from_bytes(&bytes)?;
                 if let TrackerProtocol::ServersList(servers) = resp {
+                    info!(
+                        "Received {} servers list from tracker {}:{}: {:?}",
+                        servers.len(),
+                        tracker.0,
+                        tracker.1,
+                        servers
+                    );
                     servers_set.extend(servers.into_iter());
                 }
             }
         }
 
         Ok(servers_set.into_iter().collect())
+    }
+
+    /// Connect to a server
+    ///
+    /// # Errors
+    ///
+    /// Networking errors may result
+    pub async fn connect(
+        &self,
+        server: &str,
+        port: u16,
+        display_name: &str,
+        _auth: Option<UserAuthentication>,
+        key: Option<VerifyingKey>,
+    ) -> Result<()> {
+        let key = if let Some(key) = key {
+            key
+        } else {
+            let stream = TcpStream::connect(format!("{server}:{port}")).await?;
+            let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+
+            // Request key from the server
+            eprintln!("Requesting key from server");
+            let key_request = ServerMessagesUnencrypted::KeyRequest;
+            let key_request = postcard::to_stdvec(&key_request)?;
+            framed.send(Bytes::from(key_request)).await?;
+
+            let key = if let Some(result) = framed.next().await {
+                eprintln!("Received key bytes from server");
+                let result = result?;
+                match postcard::from_bytes::<ClientMessagesUnencrypted>(&result) {
+                    Ok(ClientMessagesUnencrypted::KeyResponse(key)) => key,
+                    Ok(x) => return Err(anyhow!("Unexpected message from server: {x:?}")),
+                    Err(e) => return Err(e.into()),
+                }
+            } else {
+                return Err(anyhow!("Server did not respond with key"));
+            };
+
+            info!("Received key from server: {key:?}");
+
+            let to_enc = postcard::to_stdvec(&ServerMessagesUnencrypted::SwitchToEncrypted)?;
+            framed.send(Bytes::from(to_enc)).await?;
+            key
+        };
+
+        eprintln!("Re-connecting to the server");
+        let stream = TcpStream::connect(format!("{server}:{port}")).await?;
+        eprintln!("Creating encrypted stream to server");
+        let mut encrypted_stream = EncryptedStream::connect(stream, &key).await?;
+
+        let auth_req = ConnectedUser {
+            display_name: display_name.to_string(),
+            authenticated: false,
+            admin: false,
+            connected_since: Duration::default(),
+        };
+        encrypted_stream
+            .send(&postcard::to_stdvec(&auth_req)?)
+            .await?;
+
+        eprintln!("Sending server information request");
+        let info_request = ServerMessagesEncrypted::ServerInformationRequest;
+        let info_request = postcard::to_stdvec(&info_request)?;
+        encrypted_stream.send(&info_request).await?;
+
+        eprintln!("Received server information");
+        let info_response = encrypted_stream.recv().await?;
+        eprintln!("Parsing server info");
+        let info_response = postcard::from_bytes::<ServerInformation>(&info_response)?;
+
+        let conn = ConclaveConnection {
+            connection: encrypted_stream,
+            display_name: display_name.to_string(),
+            server_name: info_response.name,
+        };
+
+        self.connection.write().await.push(conn);
+        Ok(())
     }
 }
 

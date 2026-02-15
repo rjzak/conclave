@@ -38,6 +38,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<ExitCode> {
+    conclave_common::init_tracing();
     let args = Args::parse();
     let state = if args.config.exists() {
         State::load(args.ip, args.port, &args.config)
@@ -50,7 +51,6 @@ async fn main() -> Result<ExitCode> {
             args.config,
         )
     }?;
-    state.advertise_trackers()?;
     state.serve().await?;
 
     Ok(ExitCode::SUCCESS)

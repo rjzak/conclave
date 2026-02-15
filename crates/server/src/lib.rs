@@ -10,8 +10,8 @@
 use conclave_common::URL_PROTOCOL;
 use conclave_common::net::{EncryptedStream, random_server_keys};
 use conclave_common::server::{
-    ClientMessages, ClientMessagesEncrypted, ClientMessagesUnencrypted, ConnectedUser,
-    ServerMessages, ServerMessagesEncrypted, ServerMessagesUnencrypted,
+    ClientMessagesEncrypted, ClientMessagesUnencrypted, ConnectedUser, ServerInformation,
+    ServerMessagesEncrypted, ServerMessagesUnencrypted,
 };
 use conclave_common::tracker::Advertise;
 use conclave_common::tracker::TrackerProtocol::AdvertiseServer;
@@ -322,7 +322,7 @@ impl State {
     /// # Errors
     ///
     /// Returns an error if there's a network problem.
-    pub fn advertise_trackers(&self) -> Result<()> {
+    fn advertise_trackers(&self) -> Result<()> {
         if self.tracker_advertise.load(Ordering::Relaxed) {
             bail!("Already advertising to trackers");
         }
@@ -383,6 +383,7 @@ impl State {
     /// An error returns if there's a network or database problem.
     #[tracing::instrument]
     pub async fn serve(&self) -> Result<()> {
+        self.advertise_trackers()?;
         let listener = TcpListener::bind((self.ip, self.port)).await?;
         self.serving.store(true, Ordering::Relaxed);
         let self_clone = self.clone();
@@ -407,7 +408,10 @@ impl State {
                 if let Ok(user_info_bytes) = encrypted_connection.recv().await
                     && let Ok(user_info) = postcard::from_bytes::<ConnectedUser>(&user_info_bytes)
                 {
-                    info!("New connection from {client}: {}", user_info.display_name);
+                    info!(
+                        "New encrypted connection from {client}: {}",
+                        user_info.display_name
+                    );
                     let conn = ClientConnection {
                         conn: Arc::new(RwLock::new(encrypted_connection)),
                         user: Arc::new(user_info),
@@ -430,15 +434,11 @@ impl State {
                         Ok(bytes) => {
                             if let Ok(proto) = postcard::from_bytes(&bytes) {
                                 match proto {
-                                    ServerMessages::Unencrypted(
-                                        ServerMessagesUnencrypted::KeyRequest,
-                                    ) => {
-                                        let response = ClientMessages::Unencrypted(
-                                            ClientMessagesUnencrypted::KeyResponse(
-                                                self_clone.public_key,
-                                            ),
+                                    ServerMessagesUnencrypted::KeyRequest => {
+                                        let response = ClientMessagesUnencrypted::KeyResponse(
+                                            self_clone.public_key,
                                         );
-                                        let response = match postcard::to_allocvec(&response) {
+                                        let response = match postcard::to_stdvec(&response) {
                                             Ok(bytes) => bytes,
                                             Err(e) => {
                                                 error!("Failed to serialize key response: {e}");
@@ -449,22 +449,18 @@ impl State {
                                             error!("Failed to send key response: {e}");
                                         }
                                     }
-                                    ServerMessages::Unencrypted(
-                                        ServerMessagesUnencrypted::Disconnect,
-                                    ) => {
+                                    ServerMessagesUnencrypted::Disconnect => {
                                         if let Err(e) = framed.close().await {
                                             error!("Failed to close connection: {e}");
                                         }
                                         break;
                                     }
-                                    ServerMessages::Unencrypted(
-                                        ServerMessagesUnencrypted::SwitchToEncrypted,
-                                    ) => {
+                                    ServerMessagesUnencrypted::SwitchToEncrypted => {
+                                        info!("Switching to encrypted connection from {client}");
                                         go_encrypted_clone.insert(client);
-                                    }
-                                    x => {
-                                        error!("Received unexpected message: {x:?}");
-                                    }
+                                    } //x => {
+                                      //    error!("Received unexpected message: {x:?}");
+                                      //}
                                 }
                             }
                         }
@@ -494,6 +490,29 @@ impl State {
                     Ok(ServerMessagesEncrypted::KeepAlive) => {
                         if let Err(e) = conn.send(&keep_alive_bytes).await {
                             error!("Failed to send keep alive: {e}");
+                        }
+                    }
+
+                    Ok(ServerMessagesEncrypted::ServerInformationRequest) => {
+                        let connections = self.connections.read().await;
+                        let info = ServerInformation {
+                            name: self.name.clone(),
+                            description: self.description.clone(),
+                            url: self.url.clone(),
+                            key: self.public_key,
+                            version: VERSION_SEMVER.clone(),
+                            anonymous: false,
+                            users_connected: u32::try_from(connections.len()).unwrap_or_default(),
+                        };
+                        let response = match postcard::to_stdvec(&info) {
+                            Ok(bytes) => bytes,
+                            Err(e) => {
+                                error!("Failed to serialize server info: {e}");
+                                continue;
+                            }
+                        };
+                        if let Err(e) = conn.send(&response).await {
+                            error!("Failed to send server info response: {e}");
                         }
                     }
 
@@ -542,6 +561,7 @@ impl State {
     /// Get a list of connected users
     pub async fn connected_users(&self) -> Vec<ConnectedUser> {
         let connections = self.connections.read().await;
+        info!("Server: got read lock on connections");
         connections
             .iter()
             .map(|conn| (*conn.user).clone())
@@ -551,14 +571,11 @@ impl State {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use conclave_common::net::random_server_keys;
     use conclave_common::tracker::TrackerProtocol::AdvertiseServer;
     use conclave_common::tracker::{Advertise, TrackerProtocol};
 
     use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::Once;
     use std::time::Duration;
 
     use bytes::Bytes;
@@ -566,16 +583,11 @@ mod tests {
     use tokio::net::TcpStream;
     use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-    fn init_tracing() {
-        tracing_subscriber::fmt::init();
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn advertise() {
         const PORT: u16 = 8080;
 
-        static TRACING: Once = Once::new();
-        TRACING.call_once(init_tracing);
+        conclave_common::init_tracing();
 
         let version = env!("CARGO_PKG_VERSION").parse().unwrap();
         let state = conclave_tracker::State::new(IpAddr::V4(Ipv4Addr::LOCALHOST), PORT);
@@ -674,30 +686,5 @@ mod tests {
         assert!(state.servers().is_empty());
 
         tracker.abort();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
-    async fn client_server() {
-        const PORT: u16 = 8090;
-        const LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
-        const DB_FILE: &str = "testing_server.db";
-
-        if Path::new(DB_FILE).exists() {
-            std::fs::remove_file(DB_FILE).unwrap();
-        }
-
-        let state = State::new(
-            "Conclave Server".into(),
-            "Description".into(),
-            LOCALHOST,
-            PORT,
-            DB_FILE,
-        )
-        .unwrap();
-        tokio::spawn(async move {
-            state.serve().await.unwrap();
-        });
-
-        std::fs::remove_file(DB_FILE).unwrap();
     }
 }

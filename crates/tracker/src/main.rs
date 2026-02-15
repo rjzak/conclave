@@ -26,6 +26,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<ExitCode> {
+    conclave_common::init_tracing();
     let args = Args::parse();
     let tracker = conclave_tracker::State::new(args.ip, args.port);
     println!("Listening on {}:{}", args.ip, args.port);

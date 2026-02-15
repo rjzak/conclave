@@ -3,34 +3,13 @@
 use std::fmt::Debug;
 use std::time::Duration;
 
-use ed25519_dalek::VerifyingKey;
+pub use ed25519_dalek::VerifyingKey;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Response to protocol handshake
 pub const RESPONSE: &[u8] = b"Server";
-
-/// Messages sent to the server from the client
-#[derive(Debug, Deserialize, Serialize)]
-#[allow(clippy::large_enum_variant)]
-pub enum ServerMessages {
-    /// Messages for establishing the encryption connection
-    Unencrypted(ServerMessagesUnencrypted),
-
-    /// Messages once the encryption connection is established
-    Encrypted(ServerMessagesEncrypted),
-}
-
-/// Messages back to the client from the server
-#[derive(Debug, Deserialize, Serialize)]
-pub enum ClientMessages {
-    /// Messages for establishing the encryption connection
-    Unencrypted(ClientMessagesUnencrypted),
-
-    /// Messages once the encryption connection is established
-    Encrypted(ClientMessagesEncrypted),
-}
 
 /// Client to Server messages for unencrypted connections
 #[derive(Debug, Deserialize, Serialize)]

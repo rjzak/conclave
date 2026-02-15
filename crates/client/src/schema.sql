@@ -3,7 +3,8 @@
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE CLIENT_CONFIG (
-   version text NOT NULL
+    default_display_name TEXT NOT NULL DEFAULT 'Unnamed',
+    version text NOT NULL
 );
 
 CREATE UNIQUE INDEX server_one_row_index ON CLIENT_CONFIG (( true ));
@@ -20,5 +21,6 @@ CREATE TABLE server_bookmarks (
     server_url TEXT NOT NULL,
     username TEXT,
     password TEXT,
-    server_key TEXT -- hex encoded public key
+    server_key TEXT, -- hex encoded public key
+    added DEFAULT CURRENT_TIMESTAMP
 );

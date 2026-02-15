@@ -24,6 +24,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() {
+    conclave_common::init_tracing();
     let args = Args::parse();
     let _client = Client::new(args.config).unwrap();
 }

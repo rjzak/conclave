@@ -21,3 +21,12 @@ pub const HELLO: &[u8] = b"HELLO CONCLAVE!";
 
 /// URL protocol
 pub const URL_PROTOCOL: &str = "conclave://";
+
+/// Initialize tracing
+pub fn init_tracing() {
+    use std::sync::Once;
+
+    // Useful currently for testing
+    static TRACING: Once = Once::new();
+    TRACING.call_once(tracing_subscriber::fmt::init);
+}
