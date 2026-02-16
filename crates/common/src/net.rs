@@ -2,7 +2,7 @@
 
 use anyhow::{Result, anyhow};
 use chacha20poly1305::{
-    ChaCha20Poly1305, Key, Nonce,
+    Key, XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit},
 };
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -14,18 +14,24 @@ use tokio::{
     net::TcpStream,
 };
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519Public};
+use zeroize::ZeroizeOnDrop;
 
 /// Encrypted socket
+#[derive(ZeroizeOnDrop)]
 pub struct EncryptedStream {
+    #[zeroize(skip)]
     stream: TcpStream,
-    cipher: ChaCha20Poly1305,
-    send_nonce: u64,
-    recv_nonce: u64,
+    cipher: XChaCha20Poly1305,
+    current_key: [u8; 32],
+    record_count: u16,
 }
 
 impl EncryptedStream {
     /// Protocol version
     const VERSION: u8 = 1;
+
+    /// Number of exchanges before rekeying
+    const REKEY_INTERVAL: u16 = 1_000;
 
     /// Client: Create an encrypted stream for connecting to a server
     ///
@@ -67,9 +73,9 @@ impl EncryptedStream {
 
         Ok(Self {
             stream,
-            cipher: ChaCha20Poly1305::new(Key::from_slice(&key)),
-            send_nonce: 0,
-            recv_nonce: 0,
+            cipher: XChaCha20Poly1305::new(Key::from_slice(&key)),
+            current_key: key,
+            record_count: 0,
         })
     }
 
@@ -108,9 +114,9 @@ impl EncryptedStream {
 
         Ok(Self {
             stream,
-            cipher: ChaCha20Poly1305::new(Key::from_slice(&key)),
-            send_nonce: 0,
-            recv_nonce: 0,
+            cipher: XChaCha20Poly1305::new(Key::from_slice(&key)),
+            current_key: key,
+            record_count: 0,
         })
     }
 
@@ -120,19 +126,27 @@ impl EncryptedStream {
     ///
     /// Networking errors may result
     pub async fn send(&mut self, data: &[u8]) -> Result<()> {
-        let mut nonce_bytes = [0u8; 12];
-        nonce_bytes[4..].copy_from_slice(&self.send_nonce.to_be_bytes());
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        use rand::RngCore;
 
-        // Ciphertext length = plaintext length + 16-byte Poly1305 tag
-        let len = u32::try_from(data.len() + 16)?;
+        // Rekey if needed
+        if self.record_count >= Self::REKEY_INTERVAL {
+            self.rekey()?;
+        }
 
-        // Prepare AAD = version || len (big endian)
-        let mut aad = [0u8; 5];
-        aad[0] = Self::VERSION;
-        aad[1..].copy_from_slice(&len.to_be_bytes());
+        // Generate random 192-bit nonce
+        let mut nonce_bytes = [0u8; 24];
+        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = XNonce::from_slice(&nonce_bytes);
 
-        // Encrypt with AAD = version || length
+        // Ciphertext length = nonce (24) + plaintext + 16-byte tag
+        let len = u32::try_from(24 + data.len() + 16)?;
+
+        // AAD = version || len || nonce
+        let mut aad = Vec::with_capacity(1 + 4 + 24);
+        aad.push(Self::VERSION);
+        aad.extend_from_slice(&len.to_be_bytes());
+        aad.extend_from_slice(&nonce_bytes);
+
         let encrypted = self
             .cipher
             .encrypt(
@@ -144,13 +158,12 @@ impl EncryptedStream {
             )
             .map_err(|e| anyhow!("Encryption failed: {e}"))?;
 
-        // Write version + length + ciphertext
         self.stream.write_u8(Self::VERSION).await?;
         self.stream.write_u32(len).await?;
+        self.stream.write_all(&nonce_bytes).await?;
         self.stream.write_all(&encrypted).await?;
 
-        self.send_nonce += 1;
-
+        self.record_count += 1;
         Ok(())
     }
 
@@ -160,38 +173,62 @@ impl EncryptedStream {
     ///
     /// Networking errors may result
     pub async fn recv(&mut self) -> Result<Vec<u8>> {
+        if self.record_count >= Self::REKEY_INTERVAL {
+            self.rekey()?;
+        }
+
         let version = self.stream.read_u8().await?;
         if version != Self::VERSION {
             return Err(anyhow!("Unsupported protocol version: {version}"));
         }
 
         let len = self.stream.read_u32().await?;
-        let mut buf = vec![0u8; len as usize]; // TODO: consider buffer reuse
+        if len < 24 + 16 {
+            return Err(anyhow!("Invalid record length"));
+        }
+
+        let mut nonce_bytes = [0u8; 24];
+        self.stream.read_exact(&mut nonce_bytes).await?;
+        let nonce = XNonce::from_slice(&nonce_bytes);
+
+        let ciphertext_len = len as usize - 24;
+        let mut buf = vec![0u8; ciphertext_len];
         self.stream.read_exact(&mut buf).await?;
 
-        let mut nonce_bytes = [0u8; 12];
-        nonce_bytes[4..].copy_from_slice(&self.recv_nonce.to_be_bytes());
-        let nonce = Nonce::from_slice(&nonce_bytes);
-
-        // AAD = version || len
-        let mut aad = [0u8; 5];
-        aad[0] = version;
-        aad[1..].copy_from_slice(&len.to_be_bytes());
+        // AAD = version || len || nonce
+        let mut aad = Vec::with_capacity(1 + 4 + 24);
+        aad.push(version);
+        aad.extend_from_slice(&len.to_be_bytes());
+        aad.extend_from_slice(&nonce_bytes);
 
         let plaintext = self
             .cipher
             .decrypt(
                 nonce,
                 chacha20poly1305::aead::Payload {
-                    msg: buf.as_ref(),
+                    msg: &buf,
                     aad: &aad,
                 },
             )
             .map_err(|e| anyhow!("Decryption failed: {e}"))?;
 
-        self.recv_nonce += 1;
-
+        self.record_count += 1;
         Ok(plaintext)
+    }
+
+    fn rekey(&mut self) -> Result<()> {
+        // Derive the new key from the current key
+        let hk = Hkdf::<Sha256>::new(None, &self.current_key);
+        let mut new_key = [0u8; 32];
+        hk.expand(b"secure-stream-rekey", &mut new_key)
+            .map_err(|_| anyhow!("Rekey failed"))?;
+
+        // Use the new key
+        self.cipher = XChaCha20Poly1305::new(Key::from_slice(&new_key));
+        self.current_key = new_key;
+
+        self.record_count = 0;
+        Ok(())
     }
 }
 
@@ -219,6 +256,7 @@ pub fn random_server_keys() -> (SigningKey, VerifyingKey) {
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+    use uuid::Uuid;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn crypto_socket() {
@@ -233,13 +271,15 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let mut link = EncryptedStream::accept(stream, &server_signing)
                 .await
-                .unwrap();
-            println!("EncryptedStream: accept() created, waiting for data");
-            let msg = link.recv().await.unwrap();
-            assert_eq!(msg, b"Hello server");
-            println!("Received: {msg:?}");
-
-            link.send(b"Hello client").await.unwrap();
+                .expect("Server Accept failed");
+            loop {
+                println!("EncryptedStream: accept() created, waiting for data");
+                let mut msg = link.recv().await.expect("Server Receive failed");
+                println!("Server Received: {msg:?}");
+                msg.reverse();
+                println!("Server Sending: {msg:?}");
+                link.send(&msg).await.expect("Server Send failed");
+            }
         });
         assert!(!handle.is_finished());
         eprintln!("Server process created.");
@@ -249,12 +289,22 @@ mod tests {
             .unwrap();
         let mut link = EncryptedStream::connect(stream, &server_verifying)
             .await
-            .unwrap();
+            .expect("Client Connect failed");
         println!("EncryptedStream: connect() created, sending data");
-        link.send(b"Hello server").await.unwrap();
-        let msg = link.recv().await.unwrap();
-        println!("Received: {msg:?}");
-        assert_eq!(msg, b"Hello client");
+
+        for _ in 0..EncryptedStream::REKEY_INTERVAL * 3 {
+            let uuid = Uuid::new_v4().to_string();
+            let uuid_bytes = uuid.as_bytes();
+            println!("Client Sending: {uuid_bytes:?}");
+            link.send(uuid_bytes).await.expect("Client Send failed");
+            let mut msg = link.recv().await.expect("Client Receive failed");
+            println!("Client Received: {msg:?}");
+            msg.reverse();
+            assert_eq!(msg, uuid_bytes);
+        }
+
+        // We would rekey on the next exchange.
+        assert_eq!(link.record_count, EncryptedStream::REKEY_INTERVAL);
 
         handle.abort();
     }
