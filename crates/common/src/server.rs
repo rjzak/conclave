@@ -14,11 +14,8 @@ pub const RESPONSE: &[u8] = b"Server";
 /// Client to Server messages for unencrypted connections
 #[derive(Debug, Deserialize, Serialize)]
 pub enum ServerMessagesUnencrypted {
-    /// Ask the server for its public key
+    /// Ask the server for its public key and port
     KeyRequest,
-
-    /// Switch to encrypted connection
-    SwitchToEncrypted,
 
     /// Drop the connection.
     Disconnect,
@@ -28,8 +25,8 @@ pub enum ServerMessagesUnencrypted {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub enum ClientMessagesUnencrypted {
-    /// Server's response with the public key
-    KeyResponse(VerifyingKey),
+    /// Server's response with the server's port and public key for encryption.
+    KeyResponse((u16, VerifyingKey)),
 
     /// Drop the connection.
     Disconnect,
@@ -102,7 +99,7 @@ pub enum ServerMessagesEncrypted {
     ServerInformationRequest,
 
     /// User tries to authenticate
-    ServerAuthenticationRequest(UserAuthentication),
+    ServerAuthenticationRequest(Option<UserAuthentication>),
 
     /// Ask the server for a list of connected users
     ListConnectedUsersRequest,

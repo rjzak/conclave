@@ -40,6 +40,7 @@ async fn integration() {
             "Description".into(),
             LOCALHOST,
             SERVER_PORT,
+            SERVER_PORT + 1,
             server_db,
         )
         .unwrap(),
@@ -66,16 +67,16 @@ async fn integration() {
     eprintln!("Server: querying for connected user(s)");
     assert!(server.connected_users().await.is_empty());
 
-    /*client
-    .connect(
-        LOCALHOST.to_string().as_str(),
-        SERVER_PORT,
-        "Unnamed",
-        None,
-        None,
-    )
-    .await
-    .unwrap();*/
+    client
+        .connect(
+            LOCALHOST.to_string().as_str(),
+            SERVER_PORT,
+            "Unnamed",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
     // Cleanup
     tracker_process.abort();

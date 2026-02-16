@@ -27,9 +27,13 @@ struct Args {
     #[arg(short, long)]
     domain: Option<String>,
 
-    /// Port to listen on
+    /// Port to listen on for unencrypted connections
     #[arg(short, long)]
-    port: u16,
+    unc_port: u16,
+
+    /// Port to listen on for encrypted connections, for use the unencrypted port plus one
+    #[arg(short, long)]
+    enc_port: Option<u16>,
 
     /// Database file path
     #[arg(short, long, default_value = "server.db")]
@@ -40,14 +44,18 @@ struct Args {
 async fn main() -> Result<ExitCode> {
     conclave_common::init_tracing();
     let args = Args::parse();
+
+    let enc_port = args.enc_port.unwrap_or(args.unc_port + 1);
+
     let state = if args.config.exists() {
-        State::load(args.ip, args.port, &args.config)
+        State::load(args.ip, enc_port, args.unc_port, &args.config)
     } else {
         State::new(
             "Conclave".into(),
             "Conclave server".into(),
             args.ip,
-            args.port,
+            enc_port,
+            args.unc_port,
             args.config,
         )
     }?;

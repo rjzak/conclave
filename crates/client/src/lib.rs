@@ -9,10 +9,14 @@
 
 use conclave_common::net::EncryptedStream;
 use conclave_common::server::{
-    ClientMessagesUnencrypted, ConnectedUser, ServerInformation, ServerMessagesEncrypted,
+    ClientMessagesUnencrypted, ServerInformation, ServerMessagesEncrypted,
     ServerMessagesUnencrypted, UserAuthentication, VerifyingKey,
 };
 use conclave_common::tracker::{Advertise, TrackerProtocol};
+
+use std::collections::HashSet;
+use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use async_sqlite::rusqlite::fallible_iterator::FallibleIterator;
@@ -21,10 +25,6 @@ use async_sqlite::{ClientBuilder, JournalMode};
 use bytes::Bytes;
 use dashmap::DashSet;
 use futures::{SinkExt, StreamExt};
-use std::collections::HashSet;
-use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
@@ -212,11 +212,11 @@ impl Client {
         server: &str,
         port: u16,
         display_name: &str,
-        _auth: Option<UserAuthentication>,
+        auth: Option<UserAuthentication>,
         key: Option<VerifyingKey>,
     ) -> Result<()> {
-        let key = if let Some(key) = key {
-            key
+        let (port, key) = if let Some(key) = key {
+            (port, key)
         } else {
             let stream = TcpStream::connect(format!("{server}:{port}")).await?;
             let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
@@ -227,7 +227,7 @@ impl Client {
             let key_request = postcard::to_stdvec(&key_request)?;
             framed.send(Bytes::from(key_request)).await?;
 
-            let key = if let Some(result) = framed.next().await {
+            let (port, key) = if let Some(result) = framed.next().await {
                 eprintln!("Received key bytes from server");
                 let result = result?;
                 match postcard::from_bytes::<ClientMessagesUnencrypted>(&result) {
@@ -240,41 +240,28 @@ impl Client {
             };
 
             info!("Received key from server: {key:?}");
-
-            let to_enc = postcard::to_stdvec(&ServerMessagesUnencrypted::SwitchToEncrypted)?;
-            framed.send(Bytes::from(to_enc)).await?;
-            key
+            (port, key)
         };
 
-        eprintln!("Re-connecting to the server");
+        eprintln!("Re-connecting to the server on port {port}");
         let stream = TcpStream::connect(format!("{server}:{port}")).await?;
         eprintln!("Creating encrypted stream to server");
         let mut encrypted_stream = EncryptedStream::connect(stream, &key).await?;
+        eprintln!("Client: EncryptedStream created");
 
-        let auth_req = ConnectedUser {
-            display_name: display_name.to_string(),
-            authenticated: false,
-            admin: false,
-            connected_since: Duration::default(),
-        };
-        encrypted_stream
-            .send(&postcard::to_stdvec(&auth_req)?)
-            .await?;
+        let login =
+            postcard::to_stdvec(&ServerMessagesEncrypted::ServerAuthenticationRequest(auth))?;
+        encrypted_stream.send(&login).await?;
 
-        eprintln!("Sending server information request");
-        let info_request = ServerMessagesEncrypted::ServerInformationRequest;
-        let info_request = postcard::to_stdvec(&info_request)?;
-        encrypted_stream.send(&info_request).await?;
+        eprintln!("Expecting information request");
+        let server_info = encrypted_stream.recv().await?;
+        let server_info = postcard::from_bytes::<ServerInformation>(&server_info)?;
 
         eprintln!("Received server information");
-        let info_response = encrypted_stream.recv().await?;
-        eprintln!("Parsing server info");
-        let info_response = postcard::from_bytes::<ServerInformation>(&info_response)?;
-
         let conn = ConclaveConnection {
             connection: encrypted_stream,
             display_name: display_name.to_string(),
-            server_name: info_response.name,
+            server_name: server_info.name,
         };
 
         self.connection.write().await.push(conn);
@@ -283,6 +270,7 @@ impl Client {
 }
 
 /// Connection information
+#[allow(dead_code)]
 struct ConclaveConnection {
     /// Encrypted connection to a server
     connection: EncryptedStream,
@@ -296,6 +284,6 @@ struct ConclaveConnection {
 
 impl std::fmt::Display for ConclaveConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.server_name)
+        write!(f, "{} on {}", self.display_name, self.server_name)
     }
 }
