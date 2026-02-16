@@ -124,26 +124,15 @@ impl EncryptedStream {
         nonce_bytes[4..].copy_from_slice(&self.send_nonce.to_be_bytes());
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        // Encrypt with AAD = version || length
-        let encrypted = self
-            .cipher
-            .encrypt(
-                nonce,
-                chacha20poly1305::aead::Payload {
-                    msg: data,
-                    aad: &[],
-                },
-            )
-            .map_err(|e| anyhow!("Encryption failed: {e}"))?;
-
-        let len = u32::try_from(encrypted.len())?;
+        // Ciphertext length = plaintext length + 16-byte Poly1305 tag
+        let len = u32::try_from(data.len() + 16)?;
 
         // Prepare AAD = version || len (big endian)
         let mut aad = [0u8; 5];
         aad[0] = Self::VERSION;
         aad[1..].copy_from_slice(&len.to_be_bytes());
 
-        // Re-encrypt with proper AAD
+        // Encrypt with AAD = version || length
         let encrypted = self
             .cipher
             .encrypt(
@@ -177,7 +166,7 @@ impl EncryptedStream {
         }
 
         let len = self.stream.read_u32().await?;
-        let mut buf = vec![0u8; len as usize];
+        let mut buf = vec![0u8; len as usize]; // TODO: consider buffer reuse
         self.stream.read_exact(&mut buf).await?;
 
         let mut nonce_bytes = [0u8; 12];
