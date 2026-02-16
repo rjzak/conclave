@@ -1,0 +1,14 @@
+# Goals: Boost performance if we can
+# Concerns: don't depend on the lastest and greatest, support older 64-bit hardware
+
+[target.'cfg(target_arch = "aarch64")']
+rustflags = ["-C", "target-feature=+aes,+crc,+neon,+sha2"]
+
+[target.'cfg(target_arch = "powerpc64")']
+rustflags = ["-C", "target-feature=+power8-crypto,+vsx"]
+
+[target.'cfg(target_arch = "powerpc64le")']
+rustflags = ["-C", "target-feature=+power8-crypto,+vsx"]
+
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-feature=+aes,+fma,+sse4.2,+popcnt"]
