@@ -24,6 +24,9 @@ pub struct EncryptedStream {
 }
 
 impl EncryptedStream {
+    /// Protocol version
+    const VERSION: u8 = 1;
+
     /// Client: Create an encrypted stream for connecting to a server
     ///
     /// # Errors
@@ -119,17 +122,42 @@ impl EncryptedStream {
     pub async fn send(&mut self, data: &[u8]) -> Result<()> {
         let mut nonce_bytes = [0u8; 12];
         nonce_bytes[4..].copy_from_slice(&self.send_nonce.to_be_bytes());
-
         let nonce = Nonce::from_slice(&nonce_bytes);
 
+        // Encrypt with AAD = version || length
         let encrypted = self
             .cipher
-            .encrypt(nonce, data)
+            .encrypt(
+                nonce,
+                chacha20poly1305::aead::Payload {
+                    msg: data,
+                    aad: &[],
+                },
+            )
             .map_err(|e| anyhow!("Encryption failed: {e}"))?;
 
-        self.stream
-            .write_u32(u32::try_from(encrypted.len())?)
-            .await?;
+        let len = u32::try_from(encrypted.len())?;
+
+        // Prepare AAD = version || len (big endian)
+        let mut aad = [0u8; 5];
+        aad[0] = Self::VERSION;
+        aad[1..].copy_from_slice(&len.to_be_bytes());
+
+        // Re-encrypt with proper AAD
+        let encrypted = self
+            .cipher
+            .encrypt(
+                nonce,
+                chacha20poly1305::aead::Payload {
+                    msg: data,
+                    aad: &aad,
+                },
+            )
+            .map_err(|e| anyhow!("Encryption failed: {e}"))?;
+
+        // Write version + length + ciphertext
+        self.stream.write_u8(Self::VERSION).await?;
+        self.stream.write_u32(len).await?;
         self.stream.write_all(&encrypted).await?;
 
         self.send_nonce += 1;
@@ -143,19 +171,33 @@ impl EncryptedStream {
     ///
     /// Networking errors may result
     pub async fn recv(&mut self) -> Result<Vec<u8>> {
-        let len = self.stream.read_u32().await?;
+        let version = self.stream.read_u8().await?;
+        if version != Self::VERSION {
+            return Err(anyhow!("Unsupported protocol version: {version}"));
+        }
 
+        let len = self.stream.read_u32().await?;
         let mut buf = vec![0u8; len as usize];
         self.stream.read_exact(&mut buf).await?;
 
         let mut nonce_bytes = [0u8; 12];
         nonce_bytes[4..].copy_from_slice(&self.recv_nonce.to_be_bytes());
-
         let nonce = Nonce::from_slice(&nonce_bytes);
+
+        // AAD = version || len
+        let mut aad = [0u8; 5];
+        aad[0] = version;
+        aad[1..].copy_from_slice(&len.to_be_bytes());
 
         let plaintext = self
             .cipher
-            .decrypt(nonce, buf.as_ref())
+            .decrypt(
+                nonce,
+                chacha20poly1305::aead::Payload {
+                    msg: buf.as_ref(),
+                    aad: &aad,
+                },
+            )
             .map_err(|e| anyhow!("Decryption failed: {e}"))?;
 
         self.recv_nonce += 1;
