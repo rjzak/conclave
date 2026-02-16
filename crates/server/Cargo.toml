@@ -26,7 +26,6 @@ semver = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
 tokio-util = { workspace = true, features = ["codec"] }
 tracing = { workspace = true, features = ["attributes", "max_level_info", "std"] }
-tracing-subscriber = { workspace = true, features = ["alloc", "fmt", "std"] }
 
 [build-dependencies]
 chrono = { workspace = true, features = ["now"] }
