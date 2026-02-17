@@ -18,6 +18,7 @@ bytes = { workspace = true, features = ["std"] }
 clap = { workspace = true, features = ["color", "derive", "help", "std", "suggestions"] }
 dashmap = { workspace = true, features = ["inline"] }
 futures = { workspace = true, features = ["alloc", "std"] }
+home = { workspace = true }
 postcard = { workspace = true, features = ["alloc", "use-std"] }
 serde = { workspace = true, features = ["alloc", "derive", "std"] }
 serde_json = { workspace = true, features = ["std"] }

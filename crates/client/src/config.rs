@@ -2,10 +2,30 @@
 
 use conclave_common::server::VerifyingKey;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+
+const DEFAULT_CLIENT_FILE: &str = "conclave.toml";
+
+/// Find a conf file, either in the home directory or in the current directory.
+///
+/// # Errors
+///
+/// Filesystem errors are possible.
+pub fn default_config_path() -> Result<PathBuf> {
+    if let Some(mut home_config) = home::home_dir() {
+        home_config.push(".config");
+        if !home_config.exists() {
+            std::fs::create_dir_all(&home_config)?;
+        }
+        home_config.push(DEFAULT_CLIENT_FILE);
+        Ok(home_config)
+    } else {
+        Ok(PathBuf::from(DEFAULT_CLIENT_FILE))
+    }
+}
 
 /// Client configuration
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
