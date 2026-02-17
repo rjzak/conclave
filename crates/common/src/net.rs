@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::io;
+use std::time::Duration;
+
 use anyhow::{Result, anyhow};
 use chacha20poly1305::{
     Key, XChaCha20Poly1305, XNonce,
@@ -9,6 +12,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use rand::Rng;
 use sha2::Sha256;
+use tokio::io::{Interest, Ready};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -216,6 +220,78 @@ impl EncryptedStream {
         Ok(plaintext)
     }
 
+    /// Close the connection
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible
+    pub async fn shutdown(&mut self) -> io::Result<()> {
+        self.stream.shutdown().await
+    }
+
+    /// Check on socket's readiness
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible
+    pub async fn ready(&self, interest: Interest) -> io::Result<Ready> {
+        self.stream.ready(interest).await
+    }
+
+    /// Get the peer address
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible but improbable.
+    pub fn peer_addr(&self) -> io::Result<std::net::SocketAddr> {
+        self.stream.peer_addr()
+    }
+
+    /// Reads the linger duration for the socket
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible but improbable.
+    pub fn linger(&self) -> io::Result<Option<Duration>> {
+        self.stream.linger()
+    }
+
+    /// Wait for the socket to become readable
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn readable(&self) -> io::Result<()> {
+        self.stream.readable().await
+    }
+
+    /// Wait for the socket to become readable
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn writable(&self) -> io::Result<()> {
+        self.stream.writable().await
+    }
+
+    /// Get the `TCP_NODELAY` option on the socket.
+    ///
+    /// # Errors
+    ///
+    /// Errors shouldn't happen.
+    pub fn nodelay(&self) -> io::Result<bool> {
+        self.stream.nodelay()
+    }
+
+    /// Set the `TCP_NODELAY` option on the socket
+    ///
+    /// # Errors
+    ///
+    /// Shouldn't be any errors
+    pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
+        self.stream.set_nodelay(nodelay)
+    }
+
     fn rekey(&mut self) -> Result<()> {
         // Derive the new key from the current key
         let hk = Hkdf::<Sha256>::new(None, &self.current_key);
@@ -229,6 +305,16 @@ impl EncryptedStream {
 
         self.record_count = 0;
         Ok(())
+    }
+}
+
+impl std::fmt::Debug for EncryptedStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Ok(addr) = self.peer_addr() {
+            write!(f, "EncryptedStream to {addr}")
+        } else {
+            write!(f, "EncryptedStream")
+        }
     }
 }
 

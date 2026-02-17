@@ -10,7 +10,11 @@
 /// Client configuration file data structures and I/O functions.
 pub mod config;
 
+/// Server connection management and protocol handling.
+pub mod conn;
+
 use crate::config::{ClientConfig, Tracker};
+use crate::conn::ConclaveConnection;
 use conclave_common::net::EncryptedStream;
 use conclave_common::server::{
     ClientMessagesUnencrypted, ServerInformation, ServerMessagesEncrypted,
@@ -239,32 +243,8 @@ impl Client {
         let server_info = postcard::from_bytes::<ServerInformation>(&server_info)?;
 
         eprintln!("Received server information");
-        let conn = ConclaveConnection {
-            connection: encrypted_stream,
-            display_name: display_name.to_string(),
-            server_name: server_info.name,
-        };
-
+        let conn = ConclaveConnection::new(encrypted_stream, server_info, display_name);
         self.connection.write().await.push(conn);
         Ok(())
-    }
-}
-
-/// Connection information
-#[allow(dead_code)]
-struct ConclaveConnection {
-    /// Encrypted connection to a server
-    connection: EncryptedStream,
-
-    /// Display name shown for the user on this server
-    display_name: String,
-
-    /// Name of the server
-    server_name: String,
-}
-
-impl std::fmt::Display for ConclaveConnection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} on {}", self.display_name, self.server_name)
     }
 }
