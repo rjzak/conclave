@@ -20,7 +20,7 @@ async fn integration() {
         .join(format!("testing_server_{}.db", Uuid::new_v4()));
     let client_db = tempdir
         .path()
-        .join(format!("testing_client_{}.db", Uuid::new_v4()));
+        .join(format!("testing_client_{}.toml", Uuid::new_v4()));
 
     // Create the client
     let client = conclave_client::Client::new(client_db).unwrap();

@@ -7,6 +7,10 @@
 #![deny(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
+/// Client configuration file data structures and I/O functions.
+pub mod config;
+
+use crate::config::{ClientConfig, Tracker};
 use conclave_common::net::EncryptedStream;
 use conclave_common::server::{
     ClientMessagesUnencrypted, ServerInformation, ServerMessagesEncrypted,
@@ -15,13 +19,10 @@ use conclave_common::server::{
 use conclave_common::tracker::{Advertise, TrackerProtocol};
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use async_sqlite::rusqlite::fallible_iterator::FallibleIterator;
-use async_sqlite::rusqlite::{Batch, Connection, params};
-use async_sqlite::{ClientBuilder, JournalMode};
 use bytes::Bytes;
 use dashmap::DashSet;
 use futures::{SinkExt, StreamExt};
@@ -29,8 +30,6 @@ use tokio::net::TcpStream;
 use tokio::sync::RwLock;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::{info, trace};
-
-const SCHEMA: &str = include_str!("schema.sql");
 
 /// Conclave client
 pub struct Client {
@@ -41,7 +40,10 @@ pub struct Client {
     trackers: Arc<DashSet<(String, u16)>>,
 
     /// SQL Lite client
-    sqlite: async_sqlite::Client,
+    config_file: PathBuf,
+
+    /// Client's config
+    config: Arc<RwLock<ClientConfig>>,
 }
 
 impl std::fmt::Debug for Client {
@@ -63,48 +65,33 @@ impl Default for Client {
 }
 
 impl Client {
-    /// Create a client
+    /// Create a client from a path to a config file. If the file doesn't exist,
+    /// a default config will be created and saved to the path.
     ///
     /// # Errors
     ///
     /// An error may result if a config file can't be created.
-    pub fn new<P: AsRef<Path>>(sqlite_path: P) -> Result<Self> {
-        let trackers = if sqlite_path.as_ref().exists() {
-            let conn = Connection::open(&sqlite_path)?;
-            let mut stmt = conn.prepare("SELECT server, port FROM trackers")?;
-
-            let rows = stmt.query_map([], |row| {
-                let server: String = row.get(0)?;
-                let port: u16 = row.get(1)?;
-                Ok((server, port))
-            })?;
-
-            let trackers = rows.flatten().collect::<Vec<_>>();
-            DashSet::from_iter(trackers)
+    pub fn new<P: AsRef<Path>>(config: P) -> Result<Self> {
+        let path = PathBuf::from(config.as_ref());
+        let config = if path.exists() {
+            ClientConfig::load(&path)?
         } else {
-            let conn = Connection::open(&sqlite_path)?;
-            let mut batch = Batch::new(&conn, SCHEMA);
-            while let Some(mut stmt) = batch.next()? {
-                stmt.execute([])?;
-            }
-
-            conn.execute(
-                "INSERT INTO CLIENT_CONFIG(version) VALUES(?1)",
-                [env!("CARGO_PKG_VERSION")],
-            )?;
-
-            DashSet::new()
+            let conf = ClientConfig::default();
+            conf.save(&path)?;
+            conf
         };
-
-        let sqlite = ClientBuilder::new()
-            .journal_mode(JournalMode::Wal)
-            .path(sqlite_path)
-            .open_blocking()?;
 
         Ok(Self {
             connection: Arc::new(RwLock::new(Vec::new())),
-            sqlite,
-            trackers: Arc::new(trackers),
+            trackers: Arc::new(
+                config
+                    .trackers
+                    .iter()
+                    .map(|t| (t.server.clone(), t.port))
+                    .collect(),
+            ),
+            config_file: path,
+            config: Arc::new(RwLock::new(config)),
         })
     }
 
@@ -122,15 +109,11 @@ impl Client {
                 "Adding tracker {}:{} to database",
                 tracker_name, tracker_port
             );
-            let tracker_name = String::from(tracker_name);
-            self.sqlite
-                .conn(move |conn| {
-                    conn.execute(
-                        "insert into trackers(server, port) values(?1, ?2)",
-                        params![tracker_name, tracker_port],
-                    )
-                })
-                .await?;
+            self.config.write().await.trackers.push(Tracker {
+                server: tracker_name.to_string(),
+                port: tracker_port,
+            });
+            self.config.read().await.save(&self.config_file)?;
         } else {
             trace!("Tracker {}:{} already known", tracker_name, tracker_port);
         }
@@ -152,14 +135,12 @@ impl Client {
             "Removing tracker {}:{} from database",
             tracker_name, tracker_port
         );
-        self.sqlite
-            .conn(move |conn| {
-                conn.execute(
-                    "delete from trackers where server = ?1 and port = ?2",
-                    params![tracker_name, tracker_port],
-                )
-            })
-            .await?;
+        self.config
+            .write()
+            .await
+            .trackers
+            .retain(|t| t.server != tracker_name || t.port != tracker_port);
+        self.config.read().await.save(&self.config_file)?;
 
         Ok(())
     }

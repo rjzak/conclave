@@ -14,14 +14,16 @@ conclave-common = { workspace = true }
 
 # External
 anyhow = { workspace = true, features = ["std"] }
-async-sqlite = { workspace = true, features = ["bundled", "fallible_uint"] }
 bytes = { workspace = true, features = ["std"] }
-clap = { workspace = true, features = ["color", "derive", "std", "suggestions"] }
+clap = { workspace = true, features = ["color", "derive", "help", "std", "suggestions"] }
 dashmap = { workspace = true, features = ["inline"] }
 futures = { workspace = true, features = ["alloc", "std"] }
 postcard = { workspace = true, features = ["alloc", "use-std"] }
+serde = { workspace = true, features = ["alloc", "derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-util = { workspace = true, features = ["codec"] }
+toml = { workspace = true, features = ["default", "parse"] }
 tracing = { workspace = true, features = ["attributes", "max_level_info", "std"] }
 
 [build-dependencies]

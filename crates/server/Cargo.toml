@@ -16,7 +16,7 @@ conclave-common = { workspace = true }
 anyhow = { workspace = true, features = ["std"] }
 async-sqlite = { workspace = true, features = ["bundled", "fallible_uint"] }
 bytes = { workspace = true, features = ["std"] }
-clap = { workspace = true, features = ["color", "derive", "std", "suggestions"] }
+clap = { workspace = true, features = ["color", "derive", "help", "std", "suggestions"] }
 dashmap = { workspace = true, features = ["inline"] }
 ed25519-dalek = { workspace = true, features = ["serde"] }
 futures = { workspace = true, features = ["alloc", "std"] }

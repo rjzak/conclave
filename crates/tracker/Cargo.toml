@@ -15,7 +15,7 @@ conclave-common = { workspace = true }
 # External
 anyhow = { workspace = true, features = ["std"] }
 bytes = { workspace = true, features = ["std"] }
-clap = { workspace = true, features = ["color", "derive", "std", "suggestions"] }
+clap = { workspace = true, features = ["color", "derive", "help", "std", "suggestions"] }
 dashmap = { workspace = true, features = ["inline"] }
 futures = { workspace = true, features = ["alloc", "std"] }
 postcard = { workspace = true, features = ["alloc", "use-std"] }
