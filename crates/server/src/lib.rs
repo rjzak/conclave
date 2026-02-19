@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 
 use conclave_common::URL_PROTOCOL;
-use conclave_common::net::{EncryptedStream, random_server_keys};
+use conclave_common::net::{DefaultEncryptedStream, random_server_keys};
 use conclave_common::server::{
     ClientMessagesEncrypted, ClientMessagesUnencrypted, ConnectedUser, ServerInformation,
     ServerMessagesEncrypted, ServerMessagesUnencrypted,
@@ -43,7 +43,7 @@ static VERSION_SEMVER: LazyLock<Version> =
 /// Client connection
 struct ClientConnection {
     /// Encrypted connection to the client
-    conn: Arc<RwLock<EncryptedStream>>,
+    conn: Arc<RwLock<DefaultEncryptedStream>>,
 
     /// User information
     user: Arc<ConnectedUser>,
@@ -414,7 +414,7 @@ impl State {
             loop {
                 match unc_listener.accept().await {
                     Ok((socket, client)) => {
-                        match EncryptedStream::accept(socket, &enc_clone.private_key).await {
+                        match DefaultEncryptedStream::accept(socket, &enc_clone.private_key).await {
                             Ok(mut stream) => {
                                 match stream.recv().await {
                                     Ok(bytes) => {

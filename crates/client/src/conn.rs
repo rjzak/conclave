@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use conclave_common::net::EncryptedStream;
+use conclave_common::net::DefaultEncryptedStream;
 use conclave_common::server::{ConnectedUser, ServerInformation, ServerMessagesEncrypted};
+
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -11,7 +12,7 @@ use tokio::sync::RwLock;
 #[allow(dead_code)]
 pub struct ConclaveConnection {
     /// Encrypted connection to a server
-    pub(crate) connection: Arc<RwLock<EncryptedStream>>,
+    pub(crate) connection: Arc<RwLock<DefaultEncryptedStream>>,
 
     /// Server information
     pub(crate) server_info: Arc<RwLock<ServerInformation>>,
@@ -22,7 +23,7 @@ pub struct ConclaveConnection {
 
 impl ConclaveConnection {
     /// Create a connection object
-    pub fn new(conn: EncryptedStream, info: ServerInformation, display_name: &str) -> Self {
+    pub fn new(conn: DefaultEncryptedStream, info: ServerInformation, display_name: &str) -> Self {
         ConclaveConnection {
             connection: Arc::new(RwLock::new(conn)),
             server_info: Arc::new(RwLock::new(info)),
