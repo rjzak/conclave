@@ -1,33 +1,75 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use conclave_common::net::DefaultEncryptedStream;
-use conclave_common::server::{ConnectedUser, ServerInformation, ServerMessagesEncrypted};
+use conclave_common::net::{DefaultEncryptedStream, EncryptedWrite};
+use conclave_common::server::{
+    ClientMessagesEncrypted, ServerInformation, ServerMessagesEncrypted,
+};
 
 use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
 
 /// Connection information
 #[allow(dead_code)]
 pub struct ConclaveConnection {
     /// Encrypted connection to a server
-    pub(crate) connection: Arc<RwLock<DefaultEncryptedStream>>,
+    pub(crate) connection: Arc<RwLock<EncryptedWrite<1000>>>,
 
     /// Server information
     pub(crate) server_info: Arc<RwLock<ServerInformation>>,
 
     /// Display name shown for the user on this server
     pub(crate) display_name: Arc<RwLock<String>>,
+
+    /// Join handle for the task which listens for messages from the server
+    pub(crate) listen_handle: JoinHandle<()>,
 }
 
 impl ConclaveConnection {
     /// Create a connection object
     pub fn new(conn: DefaultEncryptedStream, info: ServerInformation, display_name: &str) -> Self {
+        let (mut read, write) = conn.into_split();
+        let server_info = Arc::new(RwLock::new(info));
+
+        // TODO: This will need to be a function so the task may access the whole struct
+        let server_info_clone = server_info.clone();
+        let reader = tokio::spawn(async move {
+            loop {
+                let data = match read.recv().await {
+                    Ok(data) => data,
+                    Err(e) => {
+                        tracing::error!("Error reading from encrypted stream: {e:?}");
+                        continue;
+                    }
+                };
+
+                let protocol: ClientMessagesEncrypted = match postcard::from_bytes(&data) {
+                    Ok(protocol) => protocol,
+                    Err(e) => {
+                        tracing::error!("Error decoding encrypted message: {e:?}");
+                        continue;
+                    }
+                };
+                tracing::trace!("Received encrypted message: {:?}", protocol);
+
+                match protocol {
+                    ClientMessagesEncrypted::KeepAlive => (),
+                    ClientMessagesEncrypted::Disconnect => break,
+                    ClientMessagesEncrypted::ServerInformationResponse(info) => {
+                        server_info_clone.write().await.clone_from(&info);
+                    }
+                    _ => tracing::warn!("Received unexpected encrypted message: {:?}", protocol),
+                }
+            }
+        });
+
         ConclaveConnection {
-            connection: Arc::new(RwLock::new(conn)),
-            server_info: Arc::new(RwLock::new(info)),
+            connection: Arc::new(RwLock::new(write)),
+            server_info,
             display_name: Arc::new(RwLock::new(display_name.to_string())),
+            listen_handle: reader,
         }
     }
 
@@ -36,15 +78,10 @@ impl ConclaveConnection {
     /// # Errors
     ///
     /// Network errors are possible
-    pub async fn server_info(&self) -> Result<ServerInformation> {
+    pub async fn server_info(&self) -> Result<()> {
         let request = postcard::to_stdvec(&ServerMessagesEncrypted::ServerInformationRequest)?;
         self.connection.write().await.send(&request).await?;
-
-        let server_info = self.connection.write().await.recv().await?;
-        let server_info = postcard::from_bytes::<ServerInformation>(&server_info)?;
-        self.server_info.write().await.clone_from(&server_info);
-
-        Ok(server_info)
+        Ok(())
     }
 
     /// Get users connected to the server
@@ -52,13 +89,10 @@ impl ConclaveConnection {
     /// # Errors
     ///
     /// Network errors are possible
-    pub async fn connected_users(&self) -> Result<Vec<ConnectedUser>> {
+    pub async fn connected_users(&self) -> Result<()> {
         let request = postcard::to_stdvec(&ServerMessagesEncrypted::ListConnectedUsersRequest)?;
         self.connection.write().await.send(&request).await?;
-
-        let users = self.connection.write().await.recv().await?;
-        let users = postcard::from_bytes::<Vec<ConnectedUser>>(&users)?;
-        Ok(users)
+        Ok(())
     }
 
     /// Send a keep-alive message to the server
@@ -80,7 +114,7 @@ impl ConclaveConnection {
     pub async fn disconnect(&self) -> Result<()> {
         let request = postcard::to_stdvec(&ServerMessagesEncrypted::Disconnect)?;
         self.connection.write().await.send(&request).await?;
-        self.connection.write().await.shutdown().await?;
+        self.listen_handle.abort();
         Ok(())
     }
 }
