@@ -18,6 +18,7 @@ chrono = { version = "0.4.43", default-features = false }
 clap = { version = "4.5.60", default-features = false }
 dashmap = { version = "6.1.0", default-features = false }
 ed25519-dalek = { version = "2.2.0", default-features = false }
+eframe = { version = "0.33.3", default-features = false }
 futures = { version = "0.3.32", default-features = false }
 hex = { version = "0.4.3", default-features = false }
 hkdf = { version = "0.12.4", default-features = false }
@@ -35,6 +36,7 @@ toml = { version = "1.0.3", default-features = false }
 tracing = { version = "0.1.44", default-features = false }
 tracing-subscriber = { version = "0.3.22", default-features = false }
 uuid = { version = "1.21.0", default-features = false }
+wgpu = { version = "27", default-features = false } # Needs to be the same version used by egui
 x25519-dalek = { version = "2.0.1", default-features = false }
 zeroize = { version = "1.8.2", default-features = false }
 

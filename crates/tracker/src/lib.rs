@@ -186,3 +186,15 @@ impl Display for State {
         )
     }
 }
+
+#[cfg(feature = "gui")]
+impl eframe::App for State {
+    fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
+        ctx.request_repaint();
+
+        eframe::egui::CentralPanel::default().show(ctx, |ui| {
+            ui.label(format!("Servers: {}", self.servers.len()));
+            ui.label(format!("Queries: {}", self.queries()));
+        });
+    }
+}
