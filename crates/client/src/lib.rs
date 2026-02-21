@@ -35,6 +35,9 @@ use tokio::sync::RwLock;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::{info, trace};
 
+/// Default config file name.
+pub const DEFAULT_FILE: &str = "client.toml";
+
 /// Conclave client
 pub struct Client {
     /// Active connections to various services
@@ -43,7 +46,7 @@ pub struct Client {
     /// Trackers, domain or IP and port
     trackers: Arc<DashSet<(String, u16)>>,
 
-    /// SQL Lite client
+    /// Config file path
     config_file: PathBuf,
 
     /// Client's config
@@ -64,7 +67,7 @@ impl std::fmt::Display for Client {
 
 impl Default for Client {
     fn default() -> Self {
-        Self::new("conclave_client.db").unwrap()
+        Self::new(DEFAULT_FILE).unwrap()
     }
 }
 
@@ -154,7 +157,7 @@ impl Client {
     /// # Errors
     ///
     /// Errors may arise from network problems.
-    pub async fn list_servers(&self) -> Result<Vec<Advertise>> {
+    pub async fn list_servers(&self) -> Result<HashSet<Advertise>> {
         let mut servers_set = HashSet::new();
         let get_servers_bytes = postcard::to_stdvec(&TrackerProtocol::GetServers)?;
 
@@ -184,7 +187,7 @@ impl Client {
             }
         }
 
-        Ok(servers_set.into_iter().collect())
+        Ok(servers_set)
     }
 
     /// Connect to a server

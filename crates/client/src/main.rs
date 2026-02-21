@@ -5,7 +5,7 @@
 #![deny(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
-use conclave_client::Client;
+use conclave_client::{Client, DEFAULT_FILE};
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -20,7 +20,7 @@ pub const VERSION: &str = concat!(env!("CONCLAVE_VERSION"), " ", env!("CONCLAVE_
 #[command(author, about, version = VERSION)]
 struct Args {
     /// Config file path
-    #[arg(short, long, default_value = "client.toml")]
+    #[arg(short, long, default_value = DEFAULT_FILE)]
     config: PathBuf,
 }
 

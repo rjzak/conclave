@@ -2,7 +2,7 @@
 
 use conclave_common::net::{DefaultEncryptedStream, EncryptedWrite};
 use conclave_common::server::{
-    ClientMessagesEncrypted, ServerInformation, ServerMessagesEncrypted,
+    ClientMessagesEncrypted, ConnectedUser, ServerInformation, ServerMessagesEncrypted,
 };
 
 use std::sync::Arc;
@@ -21,6 +21,9 @@ pub struct ConclaveConnection {
     /// Server information
     pub(crate) server_info: Arc<RwLock<ServerInformation>>,
 
+    /// List of connected users
+    pub(crate) connected_users: Arc<RwLock<Vec<ConnectedUser>>>,
+
     /// Display name shown for the user on this server
     pub(crate) display_name: Arc<RwLock<String>>,
 
@@ -33,12 +36,16 @@ impl ConclaveConnection {
     pub fn new(conn: DefaultEncryptedStream, info: ServerInformation, display_name: &str) -> Self {
         let (mut read, write) = conn.into_split();
         let server_info = Arc::new(RwLock::new(info));
+        let connected_users = Arc::new(RwLock::new(Vec::new()));
 
         let mut conn = ConclaveConnection {
             connection: Arc::new(RwLock::new(write)),
             server_info: server_info.clone(),
+            connected_users: connected_users.clone(),
             display_name: Arc::new(RwLock::new(display_name.to_string())),
-            listen_handle: Arc::new(tokio::spawn(tokio::time::sleep(tokio::time::Duration::from_millis(1)))),
+            listen_handle: Arc::new(tokio::spawn(tokio::time::sleep(
+                tokio::time::Duration::from_millis(1),
+            ))),
         };
 
         let conn_clone = conn.clone();
@@ -67,7 +74,10 @@ impl ConclaveConnection {
                     ClientMessagesEncrypted::ServerInformationResponse(info) => {
                         conn_clone.server_info.write().await.clone_from(&info);
                     }
-                    _ => tracing::warn!("Received unexpected encrypted message: {:?}", protocol),
+                    ClientMessagesEncrypted::ListConnectedUsersResponse(users) => {
+                        conn_clone.connected_users.write().await.clone_from(&users);
+                    }
+                    x => tracing::warn!("Received unexpected encrypted message: {x:?}"),
                 }
             }
         });
@@ -76,15 +86,20 @@ impl ConclaveConnection {
         conn
     }
 
-    /// Update server information locally and return the data
+    /// Update server information
     ///
     /// # Errors
     ///
     /// Network errors are possible
-    pub async fn server_info(&self) -> Result<()> {
+    pub async fn update_server_info(&self) -> Result<()> {
         let request = postcard::to_stdvec(&ServerMessagesEncrypted::ServerInformationRequest)?;
         self.connection.write().await.send(&request).await?;
         Ok(())
+    }
+
+    /// Get a copy of the server information
+    pub async fn server_info(&self) -> ServerInformation {
+        self.server_info.read().await.clone()
     }
 
     /// Get users connected to the server
@@ -92,10 +107,15 @@ impl ConclaveConnection {
     /// # Errors
     ///
     /// Network errors are possible
-    pub async fn connected_users(&self) -> Result<()> {
+    pub async fn update_connected_users(&self) -> Result<()> {
         let request = postcard::to_stdvec(&ServerMessagesEncrypted::ListConnectedUsersRequest)?;
         self.connection.write().await.send(&request).await?;
         Ok(())
+    }
+
+    /// Get a copy of the connected users
+    pub async fn get_connected_users(&self) -> Vec<ConnectedUser> {
+        self.connected_users.read().await.clone()
     }
 
     /// Send a keep-alive message to the server
@@ -103,7 +123,7 @@ impl ConclaveConnection {
     /// # Errors
     ///
     /// Network errors are possible
-    pub async fn keep_alive(&self) -> Result<()> {
+    pub async fn send_keep_alive(&self) -> Result<()> {
         let request = postcard::to_stdvec(&ServerMessagesEncrypted::KeepAlive)?;
         self.connection.write().await.send(&request).await?;
         Ok(())
