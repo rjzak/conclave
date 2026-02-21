@@ -5,7 +5,15 @@ permissions:
 
 jobs:
   fmt_clippy_test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - runner: ubuntu-latest
+          - runner: ubuntu-24.04-arm
+          - runner: macos-15
+          - runner: windows-latest
+          - runner: windows-11-arm
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: cargo fmt
