@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 
 /// Connection information
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct ConclaveConnection {
     /// Encrypted connection to a server
     pub(crate) connection: Arc<RwLock<EncryptedWrite<1000>>>,
@@ -24,7 +25,7 @@ pub struct ConclaveConnection {
     pub(crate) display_name: Arc<RwLock<String>>,
 
     /// Join handle for the task which listens for messages from the server
-    pub(crate) listen_handle: JoinHandle<()>,
+    pub(crate) listen_handle: Arc<JoinHandle<()>>,
 }
 
 impl ConclaveConnection {
@@ -33,8 +34,14 @@ impl ConclaveConnection {
         let (mut read, write) = conn.into_split();
         let server_info = Arc::new(RwLock::new(info));
 
-        // TODO: This will need to be a function so the task may access the whole struct
-        let server_info_clone = server_info.clone();
+        let mut conn = ConclaveConnection {
+            connection: Arc::new(RwLock::new(write)),
+            server_info: server_info.clone(),
+            display_name: Arc::new(RwLock::new(display_name.to_string())),
+            listen_handle: Arc::new(tokio::spawn(tokio::time::sleep(tokio::time::Duration::from_millis(1)))),
+        };
+
+        let conn_clone = conn.clone();
         let reader = tokio::spawn(async move {
             loop {
                 let data = match read.recv().await {
@@ -58,19 +65,15 @@ impl ConclaveConnection {
                     ClientMessagesEncrypted::KeepAlive => (),
                     ClientMessagesEncrypted::Disconnect => break,
                     ClientMessagesEncrypted::ServerInformationResponse(info) => {
-                        server_info_clone.write().await.clone_from(&info);
+                        conn_clone.server_info.write().await.clone_from(&info);
                     }
                     _ => tracing::warn!("Received unexpected encrypted message: {:?}", protocol),
                 }
             }
         });
 
-        ConclaveConnection {
-            connection: Arc::new(RwLock::new(write)),
-            server_info,
-            display_name: Arc::new(RwLock::new(display_name.to_string())),
-            listen_handle: reader,
-        }
+        conn.listen_handle = Arc::new(reader);
+        conn
     }
 
     /// Update server information locally and return the data
