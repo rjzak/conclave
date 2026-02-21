@@ -22,5 +22,5 @@ x25519-dalek = { workspace = true, features = ["zeroize"] }
 zeroize = { workspace = true, features = ["aarch64", "derive", "serde"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 uuid = { workspace = true, features = ["v4"] }

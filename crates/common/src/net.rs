@@ -463,6 +463,7 @@ mod tests {
                 link.send(&msg).await.expect("Server Send failed");
             }
         });
+        tokio::time::sleep(Duration::from_secs(1)).await; // Required by Linux
         assert!(!handle.is_finished());
         eprintln!("Server process created.");
 
@@ -515,6 +516,7 @@ mod tests {
                 link.send(&msg).await.expect("Server Send failed");
             }
         });
+        tokio::time::sleep(Duration::from_secs(1)).await; // Required by Linux
         assert!(!handle.is_finished());
         eprintln!("Server process created.");
 
