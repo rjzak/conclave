@@ -34,17 +34,16 @@ async fn integration() {
     });
 
     // Set up the server
-    let server = Arc::new(
-        conclave_server::State::new(
-            "Conclave Server".into(),
-            "Description".into(),
-            LOCALHOST,
-            SERVER_PORT,
-            SERVER_PORT + 1,
-            server_db,
-        )
-        .unwrap(),
-    );
+    let (server, _password) = conclave_server::State::new(
+        "Conclave Server".into(),
+        "Description".into(),
+        LOCALHOST,
+        SERVER_PORT,
+        SERVER_PORT + 1,
+        server_db,
+    )
+    .unwrap();
+    let server = Arc::new(server);
     server.add_tracker(LOCALHOST, TRACKER_PORT).await.unwrap();
     let server_clone = server.clone();
     let server_process = tokio::spawn(async move {
@@ -52,6 +51,10 @@ async fn integration() {
         server_clone.serve().await.unwrap();
     });
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    assert!(server.create_user("admin".into(), "admin").await.is_err());
+    //server.create_user("user".into(), "user").await.unwrap();
+    //server.disable_user("user".into()).await.unwrap();
 
     client
         .add_tracker(LOCALHOST.to_string().as_str(), TRACKER_PORT)
@@ -77,6 +80,9 @@ async fn integration() {
         )
         .await
         .unwrap();
+
+    let users = server.connected_users().await;
+    assert_eq!(users.len(), 1);
 
     // Cleanup
     tracker_process.abort();

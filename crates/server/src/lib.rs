@@ -23,6 +23,8 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, anyhow, bail, ensure};
+use argon2::password_hash::{SaltString, rand_core::OsRng};
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use async_sqlite::rusqlite::fallible_iterator::FallibleIterator;
 use async_sqlite::rusqlite::{Batch, Connection};
 use async_sqlite::{Client, ClientBuilder, JournalMode};
@@ -34,6 +36,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::{error, info, warn};
+use uuid::Uuid;
+
+/// Default config file name.
+pub const DEFAULT_DATABASE: &str = "server.db";
 
 const SCHEMA: &str = include_str!("schema.sql");
 
@@ -132,7 +138,7 @@ impl std::fmt::Display for State {
 }
 
 impl State {
-    /// Create a new server state
+    /// Create a new server state and also return the new admin password.
     ///
     /// # Errors
     ///
@@ -144,12 +150,13 @@ impl State {
         unc_port: u16,
         enc_port: u16,
         sqlite_path: P,
-    ) -> Result<Self> {
+    ) -> Result<(Self, String)> {
         ensure!(
             !sqlite_path.as_ref().exists(),
             "Database path already exists"
         );
         let (private_key, public_key) = random_server_keys();
+        let new_admin_password = Uuid::new_v4().to_string();
 
         {
             let conn = Connection::open(&sqlite_path)?;
@@ -171,6 +178,12 @@ impl State {
                     env!("CARGO_PKG_VERSION"),
                 ],
             )?;
+
+            let hashed = hash_password(&new_admin_password);
+            conn.execute(
+                "UPDATE USER SET password = ?1 WHERE username = 'admin'",
+                [hashed],
+            )?;
         }
 
         let sqlite = ClientBuilder::new()
@@ -178,23 +191,26 @@ impl State {
             .path(sqlite_path)
             .open_blocking()?;
 
-        Ok(Self {
-            name,
-            description,
-            url: format!("{URL_PROTOCOL}{ip}:{unc_port}"),
-            ip,
-            enc_port,
-            unc_port,
-            started: SystemTime::now(),
-            public_key,
-            private_key,
-            sqlite,
-            trackers: Arc::new(RwLock::new(Vec::new())),
-            tracker_advertise: Arc::new(AtomicBool::new(false)),
-            connections: Arc::new(RwLock::new(Vec::new())),
-            total_visits: Arc::new(AtomicU32::new(0)),
-            serving: Arc::new(AtomicBool::new(false)),
-        })
+        Ok((
+            Self {
+                name,
+                description,
+                url: format!("{URL_PROTOCOL}{ip}:{unc_port}"),
+                ip,
+                enc_port,
+                unc_port,
+                started: SystemTime::now(),
+                public_key,
+                private_key,
+                sqlite,
+                trackers: Arc::new(RwLock::new(Vec::new())),
+                tracker_advertise: Arc::new(AtomicBool::new(false)),
+                connections: Arc::new(RwLock::new(Vec::new())),
+                total_visits: Arc::new(AtomicU32::new(0)),
+                serving: Arc::new(AtomicBool::new(false)),
+            },
+            new_admin_password,
+        ))
     }
 
     /// Load a server from an existing database
@@ -301,6 +317,105 @@ impl State {
             total_visits: Arc::new(AtomicU32::new(0)),
             serving: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Reset the admin password
+    ///
+    /// # Errors
+    ///
+    /// Might return an SQL error if the database update fails.
+    pub async fn reset_admin_password(&self, new_password: &str) -> Result<()> {
+        let hashed = hash_password(new_password);
+        self.sqlite
+            .conn(move |conn| {
+                conn.execute(
+                    "UPDATE USER SET password = ?1 WHERE username = 'admin'",
+                    [hashed],
+                )
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Authenticate a user, returns the user's ID if authenticated
+    ///
+    /// # Errors
+    ///
+    /// Errors result if the password is incorrect, of the user doesn't have a password or doesn't exist,
+    /// or if there's a database error.
+    pub async fn authenticate_user(&self, username: String, password: &str) -> Result<u32> {
+        let (id, db_password) = self
+            .sqlite
+            .conn(move |conn| {
+                conn.query_one(
+                    "SELECT id, password FROM USER WHERE username = '?1'",
+                    [username],
+                    |row| {
+                        let id: i32 = row.get(0)?;
+                        let password: String = row.get(1)?;
+                        Ok((id, password))
+                    },
+                )
+            })
+            .await?;
+
+        let password_hashed = PasswordHash::new(&db_password)?;
+        Argon2::default().verify_password(password.as_ref(), &password_hashed)?;
+
+        Ok(u32::try_from(id)?)
+    }
+
+    /// Create a new user
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the username already exists or if there's a database error.
+    pub async fn create_user(&self, username: String, password: &str) -> Result<()> {
+        let username_clone = username.clone();
+        let user_id = self
+            .sqlite
+            .conn(move |conn| {
+                conn.query_one(
+                    "SELECT id from USER where username = ?1;",
+                    [username_clone],
+                    |row| {
+                        let id: Option<i32> = row.get(0)?;
+                        Ok(id)
+                    },
+                )
+            })
+            .await?;
+
+        ensure!(user_id.is_none(), "User already exists");
+
+        let hashed_password = hash_password(password);
+        self.sqlite
+            .conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO USER(username, password) VALUES(?1, ?2);",
+                    [username, hashed_password],
+                )
+            })
+            .await?;
+
+        Ok(())
+    }
+
+    /// Disable a user's account. Re-enabling requires a password reset.
+    ///
+    /// # Errors
+    ///
+    /// Invalid username results in an error.
+    pub async fn disable_user(&self, username: String) -> Result<()> {
+        self.sqlite
+            .conn(move |conn| {
+                conn.execute(
+                    "UPDATE USER SET PASSWORD = NULL WHERE username = ?1;",
+                    [username],
+                )
+            })
+            .await?;
+        Ok(())
     }
 
     /// Add a tracker to the server configuration
@@ -614,6 +729,15 @@ impl State {
             .map(|conn| (*conn.user).clone())
             .collect()
     }
+}
+
+fn hash_password(password: &str) -> String {
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    argon2
+        .hash_password(password.as_bytes(), &salt)
+        .unwrap()
+        .to_string()
 }
 
 #[cfg(test)]

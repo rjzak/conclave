@@ -14,10 +14,12 @@ conclave-common = { workspace = true }
 
 # External
 anyhow = { workspace = true, features = ["std"] }
+argon2 = { workspace = true, features = ["alloc", "password-hash", "std"] }
 async-sqlite = { workspace = true, features = ["bundled", "fallible_uint"] }
 bytes = { workspace = true, features = ["std"] }
 clap = { workspace = true, features = ["color", "derive", "help", "std", "suggestions"] }
 dashmap = { workspace = true, features = ["inline"] }
+dialoguer = { workspace = true, features = ["password"] }
 ed25519-dalek = { workspace = true, features = ["serde"] }
 futures = { workspace = true, features = ["alloc", "std"] }
 hex = { workspace = true, features = ["alloc", "std"] }
@@ -26,6 +28,7 @@ semver = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
 tokio-util = { workspace = true, features = ["codec"] }
 tracing = { workspace = true, features = ["attributes", "max_level_info", "std"] }
+uuid = { workspace = true, features = ["v4"] }
 
 [build-dependencies]
 chrono = { workspace = true, features = ["now"] }
