@@ -1,6 +1,6 @@
 [package]
 name = "conclave-tracker"
-build = "../../build.rs"
+build = "build.rs"
 description = "Tracker for the Conclave communications environment, so clients may find servers"
 authors.workspace = true
 edition.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "conclave-server"
-build = "../../build.rs"
+build = "build.rs"
 description = "Server application and library for the Conclave communications environment"
 authors.workspace = true
 edition.workspace = true
