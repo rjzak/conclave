@@ -26,7 +26,7 @@ use anyhow::{Result, anyhow, bail, ensure};
 use argon2::password_hash::{SaltString, rand_core::OsRng};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use async_sqlite::rusqlite::fallible_iterator::FallibleIterator;
-use async_sqlite::rusqlite::{Batch, Connection};
+use async_sqlite::rusqlite::{Batch, Connection, OptionalExtension};
 use async_sqlite::{Client, ClientBuilder, JournalMode};
 use bytes::Bytes;
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -348,7 +348,7 @@ impl State {
             .sqlite
             .conn(move |conn| {
                 conn.query_one(
-                    "SELECT id, password FROM USER WHERE username = '?1'",
+                    "SELECT id, password FROM USER WHERE username = ?1;",
                     [username],
                     |row| {
                         let id: i32 = row.get(0)?;
@@ -383,6 +383,7 @@ impl State {
                         Ok(id)
                     },
                 )
+                .optional()
             })
             .await?;
 

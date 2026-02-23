@@ -53,8 +53,21 @@ async fn integration() {
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     assert!(server.create_user("admin".into(), "admin").await.is_err());
-    //server.create_user("user".into(), "user").await.unwrap();
-    //server.disable_user("user".into()).await.unwrap();
+    server
+        .create_user("user".into(), "user12345")
+        .await
+        .unwrap();
+    server
+        .authenticate_user("user".into(), "user12345")
+        .await
+        .unwrap();
+    assert!(
+        server
+            .authenticate_user("user".into(), "user1dsfsfslkfjsl")
+            .await
+            .is_err()
+    );
+    server.disable_user("user".into()).await.unwrap();
 
     client
         .add_tracker(LOCALHOST.to_string().as_str(), TRACKER_PORT)
