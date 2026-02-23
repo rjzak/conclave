@@ -9,7 +9,6 @@ use conclave_server::{DEFAULT_DATABASE, State};
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
-use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -67,11 +66,8 @@ struct Run {
     config: PathBuf,
 }
 
-#[tokio::main]
-async fn main() -> Result<ExitCode> {
-    conclave_common::init_tracing();
-
-    let run = match Args::parse() {
+async fn common_main(args: Args) -> Result<State> {
+    let run = match args {
         Args::Admin(admin) => {
             // These ports don't matter as we won't use them
             let state = State::load(IpAddr::V4(Ipv4Addr::LOCALHOST), 9998, 9999, &admin.config)?;
@@ -84,14 +80,14 @@ async fn main() -> Result<ExitCode> {
                     state.reset_admin_password(&password).await?;
                 }
             }
-            return Ok(ExitCode::SUCCESS);
+            std::process::exit(0);
         }
         Args::Run(run) => run,
     };
 
     let enc_port = run.enc_port.unwrap_or(run.unc_port + 1);
 
-    let state = if run.config.exists() {
+    Ok(if run.config.exists() {
         State::load(run.ip, enc_port, run.unc_port, &run.config)?
     } else {
         let (state, password) = State::new(
@@ -105,10 +101,55 @@ async fn main() -> Result<ExitCode> {
 
         println!("Admin password: {password}\nThis will only appears this first time.");
         state
-    };
-    state.serve().await?;
+    })
+}
 
-    Ok(ExitCode::SUCCESS)
+#[cfg(not(feature = "gui"))]
+#[tokio::main]
+async fn main() -> Result<std::process::ExitCode> {
+    conclave_common::init_tracing();
+    let state = common_main(Args::parse()).await?;
+    state.serve().await?;
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+#[allow(unused_variables)]
+#[cfg(feature = "gui")]
+fn main() -> eframe::Result {
+    conclave_common::init_tracing();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_io()
+        .build()
+        .unwrap();
+
+    let state = rt
+        .block_on(common_main(Args::parse()))
+        .expect("Failed to load server state from provided arguments or database file.");
+
+    let state_copy = state.clone();
+    rt.spawn(async move {
+        if let Err(e) = state_copy.serve().await {
+            eprintln!("Server error: {e}");
+        }
+    });
+
+    let wgpu = wgpu::Instance::enabled_backend_features();
+    #[cfg(debug_assertions)]
+    eprintln!("WGPU Features: {wgpu:?}");
+
+    let options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_inner_size([240.0, 85.0])
+            .with_resizable(false),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "Conclave Server",
+        options,
+        Box::new(|_cc| Ok(Box::new(state))),
+    )
 }
 
 #[test]

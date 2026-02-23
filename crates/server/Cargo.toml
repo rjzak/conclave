@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 version.workspace = true
 
+[features]
+default = []
+gui = ["dep:eframe", "dep:wgpu"]
+
 [dependencies]
 # Internal
 conclave-common = { workspace = true }
@@ -21,7 +25,8 @@ clap = { workspace = true, features = ["color", "derive", "help", "std", "sugges
 dashmap = { workspace = true, features = ["inline"] }
 dialoguer = { workspace = true, features = ["password"] }
 ed25519-dalek = { workspace = true, features = ["serde"] }
-futures = { workspace = true, features = ["alloc", "std"] }
+eframe = { workspace = true, features = ["accesskit", "default_fonts", "wayland", "wgpu", "x11"], optional = true }
+futures = { workspace = true, features = ["alloc", "executor", "std"] }
 hex = { workspace = true, features = ["alloc", "std"] }
 postcard = { workspace = true, features = ["alloc", "use-std"] }
 semver = { workspace = true }
@@ -29,6 +34,13 @@ tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "tim
 tokio-util = { workspace = true, features = ["codec"] }
 tracing = { workspace = true, features = ["attributes", "max_level_info", "std"] }
 uuid = { workspace = true, features = ["v4"] }
+wgpu = { workspace = true, features = ["std", "vulkan"], optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { workspace = true, features = ["metal", "vulkan-portability"], optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wgpu = { workspace = true, features = ["dx12"], optional = true }
 
 [build-dependencies]
 chrono = { workspace = true, features = ["now"] }

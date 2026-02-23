@@ -133,7 +133,12 @@ impl std::fmt::Debug for State {
 
 impl std::fmt::Display for State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Conclave Server: {}", self.name)
+        let connections = futures::executor::block_on(self.connections.read()).len();
+        write!(
+            f,
+            "Conclave Server {} with {connections} connections",
+            self.name
+        )
     }
 }
 
@@ -729,6 +734,22 @@ impl State {
             .iter()
             .map(|conn| (*conn.user).clone())
             .collect()
+    }
+}
+
+#[cfg(feature = "gui")]
+impl eframe::App for State {
+    fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
+        ctx.request_repaint();
+
+        let connections = futures::executor::block_on(self.connections.read()).len();
+        eframe::egui::CentralPanel::default().show(ctx, |ui| {
+            ui.label(format!("Current clients: {connections}"));
+            ui.label(format!(
+                "Total connections: {}",
+                self.total_visits.load(Ordering::Relaxed)
+            ));
+        });
     }
 }
 

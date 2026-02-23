@@ -48,7 +48,7 @@ fn main() -> eframe::Result {
     let tracker_copy = tracker.clone();
     rt.spawn(async move {
         if let Err(e) = tracker_copy.serve().await {
-            eprintln!("Server error: {e}");
+            eprintln!("Tracker error: {e}");
         }
     });
 
@@ -57,7 +57,9 @@ fn main() -> eframe::Result {
     eprintln!("WGPU Features: {wgpu:?}");
 
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([240.0, 85.0]),
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_inner_size([240.0, 85.0])
+            .with_resizable(false),
         ..Default::default()
     };
 
