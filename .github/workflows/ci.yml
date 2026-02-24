@@ -4,9 +4,10 @@ permissions:
   contents: read
 
 jobs:
-  fmt_clippy_test:
+  test:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
+      fail-fast: false
       matrix:
         platform:
           - runner: ubuntu-latest
@@ -16,12 +17,19 @@ jobs:
           - runner: windows-11-arm
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: rui314/setup-mold@725a8794d15fc7563f59595bd9556495c0564878 #v1
+      - name: cargo test
+        run: cargo test --workspace --all-features
+
+  fmt_clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: rui314/setup-mold@725a8794d15fc7563f59595bd9556495c0564878 #v1
       - name: cargo fmt
         run: cargo fmt -- --check
       - name: cargo clippy
-        run: cargo clippy --workspace --all-features -- -D warnings
-      - name: cargo test
-        run: cargo test --workspace --all-features
+        run: cargo clippy --workspace --all-features --tests -- -D warnings
 
   check-spdx-headers:
     runs-on: ubuntu-latest
