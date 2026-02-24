@@ -77,7 +77,6 @@ impl std::fmt::Debug for ClientConnection {
 
 /// Server state
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct State {
     /// Server name
     name: String,
@@ -123,6 +122,18 @@ pub struct State {
 
     /// Whether the server is currently serving requests
     serving: Arc<AtomicBool>,
+
+    /// Show the log window
+    #[cfg(feature = "gui")]
+    log: bool,
+
+    /// Initial password
+    #[cfg(feature = "gui")]
+    password: Option<String>,
+
+    /// Whether the password has been acknowledged
+    #[cfg(feature = "gui")]
+    password_acknowledged: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for State {
@@ -213,6 +224,12 @@ impl State {
                 connections: Arc::new(RwLock::new(Vec::new())),
                 total_visits: Arc::new(AtomicU32::new(0)),
                 serving: Arc::new(AtomicBool::new(false)),
+                #[cfg(feature = "gui")]
+                log: false,
+                #[cfg(feature = "gui")]
+                password: Some(new_admin_password.clone()),
+                #[cfg(feature = "gui")]
+                password_acknowledged: Arc::new(AtomicBool::new(false)),
             },
             new_admin_password,
         ))
@@ -321,7 +338,27 @@ impl State {
             connections: Arc::new(RwLock::new(Vec::new())),
             total_visits: Arc::new(AtomicU32::new(0)),
             serving: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "gui")]
+            log: false,
+            #[cfg(feature = "gui")]
+            password: None,
+            #[cfg(feature = "gui")]
+            password_acknowledged: Arc::new(AtomicBool::new(true)),
         })
+    }
+
+    /// Returns the number of total visitors
+    #[inline]
+    #[must_use]
+    pub fn visitors(&self) -> u32 {
+        self.total_visits.load(Ordering::Relaxed)
+    }
+
+    /// Returns duration since the server started
+    #[inline]
+    #[must_use]
+    pub fn since(&self) -> Duration {
+        self.started.elapsed().unwrap_or_default()
     }
 
     /// Reset the admin password
@@ -471,7 +508,7 @@ impl State {
                     anonymous: false,
                     users_connected: u32::try_from(self_clone.connected_users().await.len())
                         .unwrap_or_default(),
-                    uptime: self_clone.started.elapsed().unwrap_or_default(),
+                    uptime: self_clone.since(),
                     url: self_clone.url.clone(),
                     key: self_clone.public_key,
                 });
@@ -749,10 +786,55 @@ impl eframe::App for State {
                 "Total connections: {}",
                 self.total_visits.load(Ordering::Relaxed)
             ));
+            ui.checkbox(&mut self.log, "Log window");
+
+            if let Some(password) = &self.password
+                && !self.password_acknowledged.load(Ordering::Relaxed)
+            {
+                let text_buff = password.clone();
+                let acknowledged = self.password_acknowledged.clone();
+                ctx.show_viewport_deferred(
+                    eframe::egui::ViewportId::from_hash_of("conclave_server_admin_password"),
+                    eframe::egui::ViewportBuilder::default()
+                        .with_title("Conclave Server Admin Password")
+                        .with_resizable(false)
+                        .with_close_button(false)
+                        .with_inner_size([320.0, 100.0]),
+                    move |context, _class| {
+                        let mut text_buff = text_buff.clone();
+                        eframe::egui::CentralPanel::default().show(context, |inner_ui| {
+                            inner_ui.label("Below is the initial admin password for this server.");
+                            inner_ui.text_edit_singleline(&mut text_buff);
+
+                            if inner_ui.button("Confirm").clicked() {
+                                acknowledged.store(true, Ordering::Relaxed);
+                            }
+                        });
+                    },
+                );
+            }
+
+            if self.log {
+                ctx.show_viewport_deferred(
+                    eframe::egui::ViewportId::from_hash_of("conclave_server_log"),
+                    eframe::egui::ViewportBuilder::default()
+                        .with_title("Conclave Server Log")
+                        .with_resizable(true)
+                        .with_clamp_size_to_monitor_size(true)
+                        .with_close_button(false)
+                        .with_inner_size([200.0, 100.0]),
+                    |context, _class| {
+                        eframe::egui::CentralPanel::default().show(context, |inner_ui| {
+                            inner_ui.label("Log will go here");
+                        });
+                    },
+                );
+            }
         });
     }
 }
 
+#[track_caller]
 fn hash_password(password: &str) -> String {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
