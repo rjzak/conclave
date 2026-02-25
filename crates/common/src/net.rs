@@ -440,6 +440,7 @@ mod tests {
     use tokio::net::TcpListener;
     use uuid::Uuid;
 
+    /// Ensure basic `EncryptedStream` functionality.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn crypto_socket() {
         const PORT: u16 = 12345;
@@ -492,7 +493,9 @@ mod tests {
         handle.abort();
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    /// Split the `EncryptedStream` into separate read and write halves. Ensure that this works,
+    /// and that both halves rekey correctly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn crypto_socket_split() {
         const PORT: u16 = 12399;
 
@@ -555,6 +558,92 @@ mod tests {
         assert_eq!(write.crypto.read().await.record_count, write.interval());
 
         read_process.abort();
+        handle.abort();
+    }
+
+    /// Ensure that `EncryptedStream` fails to connect if the server isn't using the correct key.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wrong_key() {
+        const PORT: u16 = 12444;
+        let (server_signing, _) = random_server_keys();
+        let (_, server_verifying) = random_server_keys();
+
+        let handle = tokio::spawn(async move {
+            let listener = TcpListener::bind(format!("127.0.0.1:{PORT}"))
+                .await
+                .unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut link = EncryptedStream::<100>::accept(stream, &server_signing)
+                .await
+                .expect("Server Accept failed");
+            loop {
+                let mut msg = link.recv().await.expect("Server Receive failed");
+                msg.reverse();
+                link.send(&msg).await.expect("Server Send failed");
+            }
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await; // Required by Linux
+        assert!(!handle.is_finished());
+
+        let stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
+            .await
+            .unwrap();
+        let link_result = EncryptedStream::<100>::connect(stream, &server_verifying).await;
+        println!("EncryptedStream: connect() with wrong key: {link_result:?}");
+        assert!(
+            link_result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Failed to verify signature: signature error")
+        );
+
+        handle.abort();
+    }
+
+    /// Make sure the `EncryptedStream` fails if one side rekeys when it's not supposed to.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn incorrect_rekey() {
+        const PORT: u16 = 12434;
+        let (server_signing, server_verifying) = random_server_keys();
+
+        let handle = tokio::spawn(async move {
+            let listener = TcpListener::bind(format!("127.0.0.1:{PORT}"))
+                .await
+                .unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut link = EncryptedStream::<100>::accept(stream, &server_signing)
+                .await
+                .expect("Server Accept failed");
+            loop {
+                // The first iteration is fine, but the second is after an unexpected rekeying operation,
+                // resulting in an error. But we're not asserting it yet.
+                let mut msg = link.recv().await.expect("Server Receive failed");
+                msg.reverse();
+                link.send(&msg).await.expect("Server Send failed");
+            }
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await; // Required by Linux
+        assert!(!handle.is_finished());
+
+        let stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
+            .await
+            .unwrap();
+        let mut link = EncryptedStream::<100>::connect(stream, &server_verifying)
+            .await
+            .unwrap();
+
+        link.send(b"test").await.unwrap();
+        assert_eq!(link.recv().await.unwrap(), b"tset");
+
+        link.crypto.rekey().unwrap();
+        let result = link.send(b"test").await;
+        println!("EncryptedStream: send() with too early rekey: {result:?}");
+
+        let response = link.recv().await;
+        println!("EncryptedStream: recv() with too early rekey: {response:?}");
+        assert!(response.is_err());
+
         handle.abort();
     }
 }
