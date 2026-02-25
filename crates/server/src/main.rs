@@ -94,6 +94,7 @@ async fn common_main(args: Args) -> Result<State> {
             "Conclave".into(),
             "Conclave server".into(),
             run.ip,
+            run.domain,
             enc_port,
             run.unc_port,
             run.config,

@@ -7,6 +7,8 @@ CREATE TABLE SERVER_CONFIG (
     description text NOT NULL,
     key text NOT NULL, -- hex: secret and public keys
     version text NOT NULL,
+    advertised_domain text,
+    allow_anonymous_clients boolean DEFAULT TRUE NOT NULL,
     trackers text
 );
 

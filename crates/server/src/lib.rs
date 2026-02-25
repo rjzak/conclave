@@ -163,6 +163,7 @@ impl State {
         name: String,
         description: String,
         ip: IpAddr,
+        advertised_domain: Option<String>,
         unc_port: u16,
         enc_port: u16,
         sqlite_path: P,
@@ -195,12 +196,25 @@ impl State {
                 ],
             )?;
 
+            if let Some(advertised_domain) = &advertised_domain {
+                conn.execute(
+                    "UPDATE SERVER_CONFIG SET advertised_domain = ?1;",
+                    [advertised_domain],
+                )?;
+            }
+
             let hashed = hash_password(&new_admin_password);
             conn.execute(
                 "UPDATE USER SET password = ?1 WHERE username = 'admin'",
                 [hashed],
             )?;
         }
+
+        let url = if let Some(advertised_domain) = advertised_domain {
+            format!("{URL_PROTOCOL}{advertised_domain}:{unc_port}")
+        } else {
+            format!("{URL_PROTOCOL}{ip}:{unc_port}")
+        };
 
         let sqlite = ClientBuilder::new()
             .journal_mode(JournalMode::Wal)
@@ -211,7 +225,7 @@ impl State {
             Self {
                 name,
                 description,
-                url: format!("{URL_PROTOCOL}{ip}:{unc_port}"),
+                url,
                 ip,
                 enc_port,
                 unc_port,
@@ -255,22 +269,24 @@ impl State {
             "Database path is not a file"
         );
 
-        let (name, description, private_key, public_key, trackers) = {
+        let (name, description, private_key, public_key, url, trackers) = {
             let conn = Connection::open(&sqlite_path)?;
             let mut stmt = conn
-                .prepare("SELECT name, description, key, version, trackers FROM SERVER_CONFIG")?;
-            let (name, description, keypair, version, trackers_string) =
-                stmt.query_row([], |row| {
+                .prepare("SELECT name, description, key, version, advertised_domain, trackers FROM SERVER_CONFIG")?;
+            let (name, description, keypair, version, advertised_domain, trackers_string) = stmt
+                .query_row([], |row| {
                     let name: String = row.get(0)?;
                     let description: String = row.get(1)?;
                     let key_string: String = row.get(2)?;
                     let version: String = row.get(3)?;
-                    let trackers: Option<String> = row.get(4)?;
+                    let advertised_domain: Option<String> = row.get(4)?;
+                    let trackers: Option<String> = row.get(5)?;
                     Ok((
                         name,
                         description,
                         key_string,
                         version,
+                        advertised_domain,
                         trackers.unwrap_or_default(),
                     ))
                 })?;
@@ -314,7 +330,13 @@ impl State {
                 }
             }
 
-            (name, description, private_key, public_key, trackers)
+            let url = if let Some(advertised_domain) = advertised_domain {
+                format!("{URL_PROTOCOL}{advertised_domain}:{unc_port}")
+            } else {
+                format!("{URL_PROTOCOL}{ip}:{unc_port}")
+            };
+
+            (name, description, private_key, public_key, url, trackers)
         };
 
         let sqlite = ClientBuilder::new()
@@ -325,7 +347,7 @@ impl State {
         Ok(Self {
             name,
             description,
-            url: format!("{URL_PROTOCOL}{ip}:{unc_port}"),
+            url,
             ip,
             unc_port,
             enc_port,
@@ -373,6 +395,45 @@ impl State {
                 conn.execute(
                     "UPDATE USER SET password = ?1 WHERE username = 'admin'",
                     [hashed],
+                )
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Whether anonymous clients are allowed to connect to the server.
+    ///
+    /// # Errors
+    ///
+    /// Database errors can occur if the query fails.
+    pub async fn anonymous_clients_allowed(&self) -> Result<bool> {
+        let anonymous = self
+            .sqlite
+            .conn(move |conn| {
+                conn.query_one(
+                    "SELECT allow_anonymous_clients FROM SERVER_CONFIG;",
+                    [],
+                    |row| {
+                        let anonymous: bool = row.get(0)?;
+                        Ok(anonymous)
+                    },
+                )
+            })
+            .await?;
+        Ok(anonymous)
+    }
+
+    /// Enable or disable anonymous client connections
+    ///
+    /// # Errors
+    ///
+    /// Database errors can occur if the query fails.
+    pub async fn anonymous_clients_enabled(&self, anon: bool) -> Result<()> {
+        self.sqlite
+            .conn(move |conn| {
+                conn.execute(
+                    "UPDATE SERVER_CONFIG SET allow_anonymous_clients = ?1;",
+                    [anon],
                 )
             })
             .await?;
@@ -505,7 +566,10 @@ impl State {
                     name: self_clone.name.clone(),
                     description: self_clone.description.clone(),
                     version: VERSION_SEMVER.clone(),
-                    anonymous: false,
+                    anonymous: self_clone
+                        .anonymous_clients_allowed()
+                        .await
+                        .unwrap_or_default(),
                     users_connected: u32::try_from(self_clone.connected_users().await.len())
                         .unwrap_or_default(),
                     uptime: self_clone.since(),
@@ -834,6 +898,8 @@ impl eframe::App for State {
     }
 }
 
+/// Argon hash for storing passwords.
+#[inline]
 #[track_caller]
 fn hash_password(password: &str) -> String {
     let salt = SaltString::generate(&mut OsRng);

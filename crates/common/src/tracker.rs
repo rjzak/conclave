@@ -34,7 +34,8 @@ pub struct Advertise {
     /// For how long the server has been running
     pub uptime: Duration,
 
-    /// URL of the server as advertised
+    /// URL of the server as advertised using the unencrypted port so the client can get
+    /// the server's public key and has a chance to verify it.
     pub url: String,
 
     /// Server's public key
