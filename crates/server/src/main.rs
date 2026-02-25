@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use dialoguer::Password;
+use zeroize::Zeroize;
 
 pub const VERSION: &str = concat!(env!("CONCLAVE_VERSION"), " ", env!("CONCLAVE_BUILD_DATE"));
 
@@ -90,7 +91,7 @@ async fn common_main(args: Args) -> Result<State> {
     Ok(if run.config.exists() {
         State::load(run.ip, enc_port, run.unc_port, &run.config)?
     } else {
-        let (state, password) = State::new(
+        let (state, mut password) = State::new(
             "Conclave".into(),
             "Conclave server".into(),
             run.ip,
@@ -100,7 +101,11 @@ async fn common_main(args: Args) -> Result<State> {
             run.config,
         )?;
 
-        println!("Admin password: {password}\nThis will only appears this first time.");
+        println!(
+            "Admin password: {}\nThis will only appears this first time.",
+            password.as_str()
+        );
+        password.zeroize();
         state
     })
 }

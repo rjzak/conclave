@@ -37,6 +37,7 @@ use tokio::sync::RwLock;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::{error, info, warn};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 /// Default config file name.
 pub const DEFAULT_DATABASE: &str = "server.db";
@@ -129,7 +130,7 @@ pub struct State {
 
     /// Initial password
     #[cfg(feature = "gui")]
-    password: Option<String>,
+    password: Option<Arc<RwLock<Zeroizing<String>>>>,
 
     /// Whether the password has been acknowledged
     #[cfg(feature = "gui")]
@@ -167,13 +168,13 @@ impl State {
         unc_port: u16,
         enc_port: u16,
         sqlite_path: P,
-    ) -> Result<(Self, String)> {
+    ) -> Result<(Self, Zeroizing<String>)> {
         ensure!(
             !sqlite_path.as_ref().exists(),
             "Database path already exists"
         );
         let (private_key, public_key) = random_server_keys();
-        let new_admin_password = Uuid::new_v4().to_string();
+        let new_admin_password = Zeroizing::new(Uuid::new_v4().to_string());
 
         {
             let conn = Connection::open(&sqlite_path)?;
@@ -241,7 +242,7 @@ impl State {
                 #[cfg(feature = "gui")]
                 log: false,
                 #[cfg(feature = "gui")]
-                password: Some(new_admin_password.clone()),
+                password: Some(Arc::new(RwLock::new(new_admin_password.clone()))),
                 #[cfg(feature = "gui")]
                 password_acknowledged: Arc::new(AtomicBool::new(false)),
             },
@@ -841,6 +842,8 @@ impl State {
 #[cfg(feature = "gui")]
 impl eframe::App for State {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
+        use zeroize::Zeroize;
+
         ctx.request_repaint();
 
         let connections = futures::executor::block_on(self.connections.read()).len();
@@ -865,13 +868,14 @@ impl eframe::App for State {
                         .with_close_button(false)
                         .with_inner_size([320.0, 100.0]),
                     move |context, _class| {
-                        let mut text_buff = text_buff.clone();
+                        let text_buff_str = futures::executor::block_on(text_buff.read()).clone();
                         eframe::egui::CentralPanel::default().show(context, |inner_ui| {
                             inner_ui.label("Below is the initial admin password for this server.");
-                            inner_ui.text_edit_singleline(&mut text_buff);
+                            inner_ui.text_edit_singleline(&mut text_buff_str.as_str());
 
                             if inner_ui.button("Confirm").clicked() {
                                 acknowledged.store(true, Ordering::Relaxed);
+                                futures::executor::block_on(text_buff.write()).zeroize();
                             }
                         });
                     },
