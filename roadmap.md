@@ -26,5 +26,6 @@
 - [ ] Web-based client, possibly using WebAssembly.
 - [ ] Mobile client.
 - [ ] Audio/Video sharing. Streaming. Video chat.
+- [ ] End-to-end encryption.
 - [ ] Plugin systems for servers, clients; possibly using WebAssembly.
 - [ ] Python module for the client, possibly useful for bots or automation.

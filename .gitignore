@@ -1,4 +1,5 @@
 /.idea
 /target
 *.db
+*.db-wal
 .DS_Store
