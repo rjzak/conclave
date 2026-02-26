@@ -17,7 +17,7 @@ use crate::config::{ClientConfig, Tracker};
 use crate::conn::ConclaveConnection;
 use conclave_common::net::EncryptedStream;
 use conclave_common::server::{
-    ClientMessagesUnencrypted, ServerInformation, ServerMessagesEncrypted,
+    ClientMessagesEncrypted, ClientMessagesUnencrypted, ServerMessagesEncrypted,
     ServerMessagesUnencrypted, UserAuthentication, VerifyingKey,
 };
 use conclave_common::tracker::{Advertise, TrackerProtocol};
@@ -199,10 +199,10 @@ impl Client {
         &self,
         server: &str,
         port: u16,
-        display_name: &str,
+        display_name: String,
         auth: Option<UserAuthentication>,
         key: Option<VerifyingKey>,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let (port, key) = if let Some(key) = key {
             (port, key)
         } else {
@@ -237,17 +237,26 @@ impl Client {
         let mut encrypted_stream = EncryptedStream::connect(stream, &key).await?;
         eprintln!("Client: EncryptedStream created");
 
-        let login =
-            postcard::to_stdvec(&ServerMessagesEncrypted::ServerAuthenticationRequest(auth))?;
+        let login = postcard::to_stdvec(&ServerMessagesEncrypted::ServerAuthenticationRequest((
+            display_name.clone(),
+            auth,
+        )))?;
         encrypted_stream.send(&login).await?;
 
         eprintln!("Expecting information request");
         let server_info = encrypted_stream.recv().await?;
-        let server_info = postcard::from_bytes::<ServerInformation>(&server_info)?;
+        let server_info = postcard::from_bytes::<ClientMessagesEncrypted>(&server_info)?;
 
-        eprintln!("Received server information");
-        let conn = ConclaveConnection::new(encrypted_stream, server_info, display_name);
-        self.connection.write().await.push(conn);
-        Ok(())
+        match server_info {
+            ClientMessagesEncrypted::ServerInformationResponse(server_info) => {
+                eprintln!("Received server information");
+                let conn = ConclaveConnection::new(encrypted_stream, server_info, &display_name);
+                let mut conns = self.connection.write().await;
+                conns.push(conn);
+                Ok(conns.len())
+            }
+            ClientMessagesEncrypted::Error(error) => Err(error.into()),
+            x => Err(anyhow!("Unexpected message from server: {x:?}")),
+        }
     }
 }

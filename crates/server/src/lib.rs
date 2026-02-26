@@ -643,24 +643,7 @@ impl State {
                                 match stream.recv().await {
                                     Ok(bytes) => {
                                         match postcard::from_bytes::<ServerMessagesEncrypted>(&bytes) {
-                                            Ok(ServerMessagesEncrypted::ServerAuthenticationRequest(auth)) => {
-                                                let server_info = ServerInformation {
-                                                    name: enc_clone.name.clone(),
-                                                    description: enc_clone.description.clone(),
-                                                    url: enc_clone.url.clone(),
-                                                    key: enc_clone.public_key,
-                                                    version: VERSION_SEMVER.clone(),
-                                                    anonymous: false,
-                                                    users_connected: u32::try_from(enc_clone.connections.read().await.len()).unwrap_or_default(),
-                                                };
-                                                let Ok(server_bytes) = postcard::to_stdvec(&server_info) else {
-                                                    error!("Failed to serialize server info");
-                                                    continue;
-                                                };
-                                                if let Err(e) = stream.send(&server_bytes).await {
-                                                    error!("Failed to send server info to {client}: {e}");
-                                                    continue;
-                                                }
+                                            Ok(ServerMessagesEncrypted::ServerAuthenticationRequest((display_name, auth))) => {
                                                 let user_id = if let Some(inner_auth) = auth {
                                                     if let Ok(user_id) = enc_clone.authenticate_user(inner_auth).await {
                                                         Some(user_id)
@@ -688,10 +671,29 @@ impl State {
                                                     }
                                                     continue;
                                                 };
+
+                                                let server_info = ClientMessagesEncrypted::ServerInformationResponse(ServerInformation {
+                                                    name: enc_clone.name.clone(),
+                                                    description: enc_clone.description.clone(),
+                                                    url: enc_clone.url.clone(),
+                                                    key: enc_clone.public_key,
+                                                    version: VERSION_SEMVER.clone(),
+                                                    anonymous: false,
+                                                    users_connected: u32::try_from(enc_clone.connections.read().await.len()).unwrap_or_default(),
+                                                });
+                                                let Ok(server_bytes) = postcard::to_stdvec(&server_info) else {
+                                                    error!("Failed to serialize server info");
+                                                    continue;
+                                                };
+                                                if let Err(e) = stream.send(&server_bytes).await {
+                                                    error!("Failed to send server info to {client}: {e}");
+                                                    continue;
+                                                }
+
                                                 let connection = ClientConnection {
                                                     conn: Arc::new(RwLock::new(stream)),
                                                     user: Arc::new(ConnectedUser {
-                                                        display_name: "Unnamed".to_string(),
+                                                        display_name,
                                                         admin: false,
                                                         connected_since: Duration::default(),
                                                         user_id,

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 use std::time::Duration;
 
 pub use ed25519_dalek::VerifyingKey;
@@ -74,6 +74,21 @@ impl Debug for UserAuthentication {
     }
 }
 
+impl From<(String, String)> for UserAuthentication {
+    fn from((username, password): (String, String)) -> Self {
+        Self { username, password }
+    }
+}
+
+impl From<(&str, &str)> for UserAuthentication {
+    fn from((username, password): (&str, &str)) -> Self {
+        Self {
+            username: username.to_string(),
+            password: password.to_string(),
+        }
+    }
+}
+
 /// Information about a connected user
 #[derive(Clone, Debug, Hash, Deserialize, Serialize)]
 pub struct ConnectedUser {
@@ -99,7 +114,9 @@ pub enum ServerMessagesEncrypted {
     ServerInformationRequest,
 
     /// User tries to authenticate
-    ServerAuthenticationRequest(Option<UserAuthentication>),
+    /// Send the display name and the optional authentication message
+    /// Server responds with Server Information if successful
+    ServerAuthenticationRequest((String, Option<UserAuthentication>)),
 
     /// Ask the server for a list of connected users
     ListConnectedUsersRequest,
@@ -142,3 +159,14 @@ pub enum ServerError {
     /// No authentication provided when this is required
     AuthenticationRequired,
 }
+
+impl Display for ServerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServerError::AuthenticationFailed => write!(f, "Authentication failed"),
+            ServerError::AuthenticationRequired => write!(f, "Authentication required"),
+        }
+    }
+}
+
+impl std::error::Error for ServerError {}

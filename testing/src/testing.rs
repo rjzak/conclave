@@ -10,6 +10,7 @@ const TRACKER_PORT: u16 = 8080;
 const SERVER_PORT: u16 = 8090;
 const LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
+#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn integration() {
     conclave_common::init_tracing();
@@ -57,10 +58,7 @@ async fn integration() {
 
     assert_eq!(
         server
-            .authenticate_user(conclave_common::server::UserAuthentication {
-                username: "admin".into(),
-                password: password.to_string(),
-            })
+            .authenticate_user(("admin".into(), password.to_string()).into())
             .await
             .unwrap(),
         0
@@ -71,19 +69,13 @@ async fn integration() {
         .unwrap();
 
     server
-        .authenticate_user(conclave_common::server::UserAuthentication {
-            username: "admin".into(),
-            password: "user12345".into(),
-        })
+        .authenticate_user(("user", "user12345").into())
         .await
         .unwrap();
 
     assert!(
         server
-            .authenticate_user(conclave_common::server::UserAuthentication {
-                username: "admin".into(),
-                password: "user1dsfsfslkfjsl".into(),
-            })
+            .authenticate_user(("admin", "user1dsfsfslkfjsl").into())
             .await
             .is_err()
     );
@@ -112,12 +104,27 @@ async fn integration() {
     eprintln!("Server: querying for connected user(s)");
     assert!(server.connected_users().await.is_empty());
 
+    // User authentication is required, this should fail
+    assert!(
+        client
+            .connect(
+                LOCALHOST.to_string().as_str(),
+                SERVER_PORT,
+                "Unnamed".into(),
+                None,
+                None,
+            )
+            .await
+            .is_err()
+    );
+
+    // Log in as the admin user
     client
         .connect(
             LOCALHOST.to_string().as_str(),
             SERVER_PORT,
-            "Unnamed",
-            None,
+            "admin".into(),
+            Some(("admin".to_string(), password.to_string()).into()),
             None,
         )
         .await
