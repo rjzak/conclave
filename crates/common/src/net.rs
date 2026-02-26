@@ -5,13 +5,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use chacha20poly1305::aead::OsRng;
+use chacha20poly1305::aead::rand_core::RngCore;
 use chacha20poly1305::{
     Key, XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit},
 };
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
-use rand::Rng;
 use sha2::Sha256;
 use tokio::io::{AsyncRead, AsyncWrite, Interest, Ready};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -94,8 +95,6 @@ impl<const REKEY_INTERVAL: u16> CryptoAlgorithmAndCounter<REKEY_INTERVAL> {
     }
 
     async fn send<S: AsyncWrite + Unpin>(&mut self, stream: &mut S, data: &[u8]) -> Result<()> {
-        use rand::RngCore;
-
         // Rekey if needed
         if self.record_count >= REKEY_INTERVAL {
             self.rekey()?;
@@ -103,7 +102,7 @@ impl<const REKEY_INTERVAL: u16> CryptoAlgorithmAndCounter<REKEY_INTERVAL> {
 
         // Generate random 192-bit nonce
         let mut nonce_bytes = [0u8; 24];
-        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+        OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = XNonce::from_slice(&nonce_bytes);
 
         // Ciphertext length = nonce (24) + plaintext + 16-byte tag
@@ -205,7 +204,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
     /// Network or cryptography errors are possible.
     pub async fn connect(mut stream: TcpStream, server_identity: &VerifyingKey) -> Result<Self> {
         // --- Client ephemeral ---
-        let client_secret = EphemeralSecret::random_from_rng(rand::rngs::OsRng);
+        let client_secret = EphemeralSecret::random_from_rng(OsRng);
 
         let client_pub = X25519Public::from(&client_secret);
 
@@ -258,7 +257,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
         let client_pub = X25519Public::from(client_buf);
 
         // Server ephemeral
-        let server_secret = EphemeralSecret::random_from_rng(rand::rngs::OsRng);
+        let server_secret = EphemeralSecret::random_from_rng(OsRng);
 
         let server_pub = X25519Public::from(&server_secret);
 
@@ -426,9 +425,9 @@ fn derive_key(shared: &[u8]) -> [u8; 32] {
 #[must_use]
 pub fn random_server_keys() -> (SigningKey, VerifyingKey) {
     let mut bytes = [0u8; 32];
-    let mut rng = rand::rngs::OsRng;
+    let mut rng = OsRng;
 
-    rng.fill(&mut bytes);
+    rng.fill_bytes(&mut bytes);
     let signing = SigningKey::from_bytes(&bytes);
     let verifying = signing.verifying_key();
     (signing, verifying)
