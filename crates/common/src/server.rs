@@ -59,7 +59,7 @@ pub struct ServerInformation {
 }
 
 /// User authentication
-#[derive(Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 pub struct UserAuthentication {
     /// User name
     pub username: String,
@@ -80,14 +80,14 @@ pub struct ConnectedUser {
     /// Display name of the user which might be different from their username
     pub display_name: String,
 
-    /// Whether the user is authenticated
-    pub authenticated: bool,
-
     /// Whether the user is an administrator
     pub admin: bool,
 
     /// Time since the user connected
     pub connected_since: Duration,
+
+    /// User's ID, if authenticated.
+    pub user_id: Option<u32>,
 }
 
 /// Client to Server messages for encrypted connections
@@ -122,9 +122,23 @@ pub enum ClientMessagesEncrypted {
     /// Receive a list of connected users
     ListConnectedUsersResponse(Vec<ConnectedUser>),
 
+    /// Server error response
+    Error(ServerError),
+
     /// Do nothing message to keep the connection alive.
     KeepAlive,
 
     /// Drop the connection.
     Disconnect,
+}
+
+/// Server error responses
+#[derive(Debug, Deserialize, Serialize)]
+#[non_exhaustive]
+pub enum ServerError {
+    /// Authentication was incorrect
+    AuthenticationFailed,
+
+    /// No authentication provided when this is required
+    AuthenticationRequired,
 }

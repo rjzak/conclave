@@ -54,9 +54,13 @@ async fn integration() {
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     assert!(server.create_user("admin".into(), "admin").await.is_err());
+
     assert_eq!(
         server
-            .authenticate_user("admin".into(), &password)
+            .authenticate_user(conclave_common::server::UserAuthentication {
+                username: "admin".into(),
+                password: password.to_string(),
+            })
             .await
             .unwrap(),
         0
@@ -65,13 +69,21 @@ async fn integration() {
         .create_user("user".into(), "user12345")
         .await
         .unwrap();
+
     server
-        .authenticate_user("user".into(), "user12345")
+        .authenticate_user(conclave_common::server::UserAuthentication {
+            username: "admin".into(),
+            password: "user12345".into(),
+        })
         .await
         .unwrap();
+
     assert!(
         server
-            .authenticate_user("user".into(), "user1dsfsfslkfjsl")
+            .authenticate_user(conclave_common::server::UserAuthentication {
+                username: "admin".into(),
+                password: "user1dsfsfslkfjsl".into(),
+            })
             .await
             .is_err()
     );

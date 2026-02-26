@@ -10,8 +10,8 @@
 use conclave_common::URL_PROTOCOL;
 use conclave_common::net::{DefaultEncryptedStream, random_server_keys};
 use conclave_common::server::{
-    ClientMessagesEncrypted, ClientMessagesUnencrypted, ConnectedUser, ServerInformation,
-    ServerMessagesEncrypted, ServerMessagesUnencrypted,
+    ClientMessagesEncrypted, ClientMessagesUnencrypted, ConnectedUser, ServerError,
+    ServerInformation, ServerMessagesEncrypted, ServerMessagesUnencrypted, UserAuthentication,
 };
 use conclave_common::tracker::Advertise;
 use conclave_common::tracker::TrackerProtocol::AdvertiseServer;
@@ -447,13 +447,14 @@ impl State {
     ///
     /// Errors result if the password is incorrect, of the user doesn't have a password or doesn't exist,
     /// or if there's a database error.
-    pub async fn authenticate_user(&self, username: String, password: &str) -> Result<u32> {
+    pub async fn authenticate_user(&self, auth: UserAuthentication) -> Result<u32> {
+        let auth_clone = auth.clone();
         let (id, db_password) = self
             .sqlite
             .conn(move |conn| {
                 conn.query_one(
                     "SELECT id, password FROM USER WHERE username = ?1;",
-                    [username],
+                    [&auth_clone.username],
                     |row| {
                         let id: i32 = row.get(0)?;
                         let password: String = row.get(1)?;
@@ -464,7 +465,7 @@ impl State {
             .await?;
 
         let password_hashed = PasswordHash::new(&db_password)?;
-        Argon2::default().verify_password(password.as_ref(), &password_hashed)?;
+        Argon2::default().verify_password(auth.password.as_ref(), &password_hashed)?;
 
         Ok(u32::try_from(id)?)
     }
@@ -642,7 +643,7 @@ impl State {
                                 match stream.recv().await {
                                     Ok(bytes) => {
                                         match postcard::from_bytes::<ServerMessagesEncrypted>(&bytes) {
-                                            Ok(ServerMessagesEncrypted::ServerAuthenticationRequest(_auth)) => {
+                                            Ok(ServerMessagesEncrypted::ServerAuthenticationRequest(auth)) => {
                                                 let server_info = ServerInformation {
                                                     name: enc_clone.name.clone(),
                                                     description: enc_clone.description.clone(),
@@ -660,13 +661,40 @@ impl State {
                                                     error!("Failed to send server info to {client}: {e}");
                                                     continue;
                                                 }
+                                                let user_id = if let Some(inner_auth) = auth {
+                                                    if let Ok(user_id) = enc_clone.authenticate_user(inner_auth).await {
+                                                        Some(user_id)
+                                                    } else {
+                                                        let error_message = ClientMessagesEncrypted::Error(ServerError::AuthenticationFailed);
+                                                        let Ok(error_message) = postcard::to_stdvec(&error_message) else {
+                                                            error!("Failed to serialize server auth error");
+                                                            continue;
+                                                        };
+                                                        if let Err(e) = stream.send(&error_message).await {
+                                                            error!("Failed to send server auth error to {client}: {e}");
+                                                        }
+                                                        continue;
+                                                    }
+                                                } else if enc_clone.anonymous_clients_allowed().await.unwrap_or(false) {
+                                                    None
+                                                } else {
+                                                    let error_message = ClientMessagesEncrypted::Error(ServerError::AuthenticationRequired);
+                                                    let Ok(error_message) = postcard::to_stdvec(&error_message) else {
+                                                        error!("Failed to serialize server auth error");
+                                                        continue;
+                                                    };
+                                                    if let Err(e) = stream.send(&error_message).await {
+                                                        error!("Failed to send server auth error to {client}: {e}");
+                                                    }
+                                                    continue;
+                                                };
                                                 let connection = ClientConnection {
                                                     conn: Arc::new(RwLock::new(stream)),
                                                     user: Arc::new(ConnectedUser {
                                                         display_name: "Unnamed".to_string(),
-                                                        authenticated: false,
                                                         admin: false,
                                                         connected_since: Duration::default(),
+                                                        user_id,
                                                     }),
                                                     addr: Arc::new(client),
                                                 };
