@@ -965,7 +965,7 @@ mod tests {
         conclave_common::init_tracing();
 
         let version = env!("CARGO_PKG_VERSION").parse().unwrap();
-        let state = conclave_tracker::State::new(IpAddr::V4(Ipv4Addr::LOCALHOST), PORT);
+        let state = conclave_tracker::State::<15>::new(IpAddr::V4(Ipv4Addr::LOCALHOST), PORT);
         let (_server_signing, server_verifying) = random_server_keys();
 
         let state_clone = state.clone();
@@ -1037,7 +1037,7 @@ mod tests {
         }
         assert_eq!(state.servers().len(), 1);
 
-        tokio::time::sleep(conclave_common::tracker::SERVER_EXPIRATION).await;
+        tokio::time::sleep(state.duration()).await;
 
         {
             let stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))

@@ -27,7 +27,7 @@ struct Args {
 async fn main() -> anyhow::Result<std::process::ExitCode> {
     conclave_common::init_tracing();
     let args = Args::parse();
-    let tracker = conclave_tracker::State::new(args.ip, args.port);
+    let tracker = conclave_tracker::DefaultState::new(args.ip, args.port);
     println!("Listening on {}:{}", args.ip, args.port);
     tracker.serve().await?;
     Ok(std::process::ExitCode::SUCCESS)
@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 fn main() -> eframe::Result {
     conclave_common::init_tracing();
     let args = Args::parse();
-    let tracker = conclave_tracker::State::new(args.ip, args.port);
+    let tracker = conclave_tracker::DefaultState::new(args.ip, args.port);
     println!("Listening on {}:{}", args.ip, args.port);
 
     let rt = tokio::runtime::Builder::new_multi_thread()

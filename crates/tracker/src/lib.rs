@@ -7,13 +7,13 @@
 #![deny(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
-use conclave_common::tracker::{Advertise, SERVER_EXPIRATION, TrackerProtocol};
+use conclave_common::tracker::{Advertise, TrackerProtocol};
 
 use std::fmt::{Debug, Display};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -22,8 +22,13 @@ use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
+const TRACKER_SERVER_EXPIRATION: u64 = conclave_common::tracker::SERVER_EXPIRATION.as_secs();
+
+/// Tracker state with server record duration of one minute
+pub type DefaultState = State<TRACKER_SERVER_EXPIRATION>;
+
 /// Tracker state
-pub struct State {
+pub struct State<const DURATION_SECONDS: u64> {
     /// List of servers advertised by the tracker
     servers: Arc<DashMap<Advertise, SystemTime>>,
 
@@ -40,7 +45,7 @@ pub struct State {
     serving: Arc<AtomicBool>,
 }
 
-impl Clone for State {
+impl<const DURATION_SECONDS: u64> Clone for State<DURATION_SECONDS> {
     fn clone(&self) -> Self {
         Self {
             servers: self.servers.clone(),
@@ -52,7 +57,7 @@ impl Clone for State {
     }
 }
 
-impl State {
+impl<const DURATION_SECONDS: u64> State<DURATION_SECONDS> {
     /// Create a new Tracker object
     #[must_use]
     pub fn new(ip: IpAddr, port: u16) -> Self {
@@ -133,12 +138,14 @@ impl State {
     }
 
     /// Number of queries received by the tracker
+    #[inline]
     #[must_use]
     pub fn queries(&self) -> u32 {
         self.queries.load(Ordering::Relaxed)
     }
 
     /// Whether the tracker is currently serving requests
+    #[inline]
     #[must_use]
     pub fn serving(&self) -> bool {
         self.serving.load(Ordering::Relaxed)
@@ -146,19 +153,20 @@ impl State {
 
     /// List of servers advertised by the tracker, and expire old ones
     #[must_use]
+    #[tracing::instrument]
     pub fn servers(&self) -> Vec<Advertise> {
         let mut to_remove = Vec::new();
 
         for entry in self.servers.iter() {
             if let Ok(duration) = entry.value().elapsed()
-                && duration >= SERVER_EXPIRATION
+                && duration >= self.duration()
             {
-                tracing::info!("Removing expired server: {}", entry.key().name);
                 to_remove.push(entry.key().clone());
             }
         }
 
         for server in to_remove {
+            tracing::info!("Removing expired server: {}", server.name);
             self.servers.remove(&server);
         }
 
@@ -167,15 +175,23 @@ impl State {
             .map(|e| e.key().clone())
             .collect::<Vec<_>>()
     }
+
+    /// Tracker's expiration duration for server advertisements
+    #[inline]
+    #[must_use]
+    #[allow(clippy::unused_self)]
+    pub const fn duration(&self) -> Duration {
+        Duration::from_secs(DURATION_SECONDS)
+    }
 }
 
-impl Debug for State {
+impl<const DURATION_SECONDS: u64> Debug for State<DURATION_SECONDS> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Tracker:{}", self.servers.len())
     }
 }
 
-impl Display for State {
+impl<const DURATION_SECONDS: u64> Display for State<DURATION_SECONDS> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -188,7 +204,7 @@ impl Display for State {
 }
 
 #[cfg(feature = "gui")]
-impl eframe::App for State {
+impl<const DURATION_SECONDS: u64> eframe::App for State<DURATION_SECONDS> {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint();
 
