@@ -16,6 +16,7 @@ pub const VERSION: &str = concat!(env!("CONCLAVE_VERSION"), " ", env!("CONCLAVE_
 #[command(author, about, version = VERSION)]
 struct Args {
     /// IP Address to listen on
+    #[arg(short, long, default_value = "127.0.0.1")]
     ip: IpAddr,
 
     /// Port to listen on

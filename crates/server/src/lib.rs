@@ -883,6 +883,8 @@ impl eframe::App for State {
                 "Total connections: {}",
                 self.total_visits.load(Ordering::Relaxed)
             ));
+            ui.separator();
+            eframe::egui::widgets::global_theme_preference_buttons(ui);
             ui.checkbox(&mut self.log, "Log window");
 
             if let Some(password) = &self.password

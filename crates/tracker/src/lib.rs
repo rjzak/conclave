@@ -211,6 +211,8 @@ impl<const DURATION_SECONDS: u64> eframe::App for State<DURATION_SECONDS> {
         eframe::egui::CentralPanel::default().show(ctx, |ui| {
             ui.label(format!("Servers: {}", self.servers.len()));
             ui.label(format!("Queries: {}", self.queries()));
+            ui.separator();
+            eframe::egui::widgets::global_theme_preference_buttons(ui);
         });
     }
 }
