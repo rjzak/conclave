@@ -109,7 +109,7 @@ pub struct BookmarkEntry {
     pub server: String,
 
     /// Port of the server
-    pub port: u16,
+    pub port: Port,
 
     /// User's display name
     pub display_name: String,
@@ -129,4 +129,17 @@ pub struct UserAuth {
 
     /// Password
     pub password: String,
+}
+
+/// Port information
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+pub enum Port {
+    /// Unencrypted port
+    Unencrypted(u16),
+
+    /// Encrypted port
+    Encrypted(u16),
+
+    /// Encrypted and unencrypted port, in that order
+    EncryptedAndUnencrypted((u16, u16)),
 }
