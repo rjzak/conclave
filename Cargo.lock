@@ -832,6 +832,7 @@ dependencies = [
  "clap",
  "conclave-common",
  "dashmap",
+ "eframe",
  "futures",
  "home",
  "postcard",
@@ -841,6 +842,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
+ "wgpu",
 ]
 
 [[package]]
@@ -1239,6 +1241,7 @@ dependencies = [
  "pollster",
  "profiling",
  "raw-window-handle",
+ "serde",
  "static_assertions",
  "wasm-bindgen",
  "wasm-bindgen-futures",
