@@ -108,6 +108,10 @@ pub struct BookmarkEntry {
     /// Domain or IP address of the server
     pub server: String,
 
+    /// Name of the server
+    #[serde(default)]
+    pub name: String,
+
     /// Port of the server
     pub port: Port,
 
@@ -115,6 +119,7 @@ pub struct BookmarkEntry {
     pub display_name: String,
 
     /// User's username
+    #[serde(default)]
     pub auth: Option<UserAuth>,
 
     /// Server's public key

@@ -13,7 +13,7 @@ pub mod config;
 /// Server connection management and protocol handling.
 pub mod conn;
 
-use crate::config::{ClientConfig, Tracker};
+use crate::config::{BookmarkEntry, ClientConfig, Tracker};
 use crate::conn::ConclaveConnection;
 use conclave_common::net::EncryptedStream;
 use conclave_common::server::{
@@ -31,7 +31,7 @@ use bytes::Bytes;
 use dashmap::DashSet;
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::{info, trace};
 
@@ -47,7 +47,7 @@ pub struct Client {
     trackers: Arc<DashSet<(String, u16)>>,
 
     /// Config file path
-    config_file: PathBuf,
+    config_file: Mutex<PathBuf>,
 
     /// Client's config
     config: Arc<RwLock<ClientConfig>>,
@@ -97,9 +97,24 @@ impl Client {
                     .map(|t| (t.server.clone(), t.port))
                     .collect(),
             ),
-            config_file: path,
+            config_file: Mutex::new(path),
             config: Arc::new(RwLock::new(config)),
         })
+    }
+
+    /// Update the user's default display name and write to the config file.
+    ///
+    /// # Errors
+    ///
+    /// I/O errors may occur when writing to the config file.
+    pub async fn update_default_username(&self, username: &String) -> Result<()> {
+        self.config
+            .write()
+            .await
+            .default_display_name
+            .clone_from(username);
+        let config_file = self.config_file.lock().await;
+        self.config.read().await.save(&*config_file)
     }
 
     /// Add a tracker to the list of known trackers and update the database
@@ -120,7 +135,8 @@ impl Client {
                 server: tracker_name.to_string(),
                 port: tracker_port,
             });
-            self.config.read().await.save(&self.config_file)?;
+            let config_file = self.config_file.lock().await;
+            self.config.read().await.save(&*config_file)?;
         } else {
             trace!("Tracker {}:{} already known", tracker_name, tracker_port);
         }
@@ -147,7 +163,8 @@ impl Client {
             .await
             .trackers
             .retain(|t| t.server != tracker_name || t.port != tracker_port);
-        self.config.read().await.save(&self.config_file)?;
+        let config_file = self.config_file.lock().await;
+        self.config.read().await.save(&*config_file)?;
 
         Ok(())
     }
@@ -188,6 +205,69 @@ impl Client {
         }
 
         Ok(servers_set)
+    }
+
+    /// Add a server bookmark to the config file
+    ///
+    /// # Errors
+    ///
+    /// I/O errors may occur when writing to the config file.
+    pub async fn add_bookmark(&self, bookmark: &BookmarkEntry) -> Result<()> {
+        self.config.write().await.bookmarks.push(bookmark.clone());
+        let config_file = self.config_file.lock().await;
+        self.config.read().await.save(&*config_file)
+    }
+
+    /// Remove a server bookmark by server's index in the list
+    ///
+    /// # Errors
+    ///
+    /// I/O errors may occur when writing to the config file.
+    pub async fn remove_bookmark_by_index(&self, index: usize) -> Result<()> {
+        self.config.write().await.bookmarks.remove(index);
+        let config_file = self.config_file.lock().await;
+        self.config.read().await.save(&*config_file)
+    }
+
+    /// Remove a server bookmark by server's IP address or domain name
+    ///
+    /// # Errors
+    ///
+    /// I/O errors may occur when writing to the config file.
+    pub async fn remove_bookmark_by_ip_domain(&self, server: &str) -> Result<()> {
+        self.config
+            .write()
+            .await
+            .bookmarks
+            .retain(|b| b.server != server);
+        let config_file = self.config_file.lock().await;
+        self.config.read().await.save(&*config_file)
+    }
+
+    /// Remove a server bookmark by server's name
+    ///
+    /// # Errors
+    ///
+    /// I/O errors may occur when writing to the config file.
+    pub async fn remove_bookmark_by_name(&self, name: &str) -> Result<()> {
+        self.config
+            .write()
+            .await
+            .bookmarks
+            .retain(|b| b.name != name);
+        let config_file = self.config_file.lock().await;
+        self.config.read().await.save(&*config_file)
+    }
+
+    /// Remove a server bookmark by server's key
+    ///
+    /// # Errors
+    ///
+    /// I/O errors may occur when writing to the config file.
+    pub async fn remove_bookmark_by_key(&self, key: VerifyingKey) -> Result<()> {
+        self.config.write().await.bookmarks.retain(|b| b.key != key);
+        let config_file = self.config_file.lock().await;
+        self.config.read().await.save(&*config_file)
     }
 
     /// Connect to a server
