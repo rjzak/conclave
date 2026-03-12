@@ -137,3 +137,16 @@ async fn integration() {
     tracker_process.abort();
     server_process.abort();
 }
+
+#[test]
+fn version() {
+    // Ensure the calls to unwrap() in the semver parsing don't panic.
+    assert!(!conclave_client::VERSION.build.is_empty()); // Git hash
+    println!("Semver version: {:?}", conclave_client::VERSION);
+    let _ = conclave_client::VERSION.to_string();
+    let v = conclave_server::VERSION.to_string();
+    println!("Version: {v}");
+    let _ = conclave_tracker::VERSION.to_string();
+    assert_eq!(*conclave_client::VERSION, *conclave_server::VERSION);
+    assert_eq!(*conclave_tracker::VERSION, *conclave_server::VERSION);
+}

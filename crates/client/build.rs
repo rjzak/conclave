@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::ops::Add;
-
 use chrono::Utc;
 
 fn main() {
@@ -40,11 +38,11 @@ fn main() {
             .as_ref()
             .and_then(|output| std::str::from_utf8(&output.stdout).ok().map(str::trim));
 
-        // Default git_describe to cargo_pkg_version
-        let mut git_describe = String::from(env!("CARGO_PKG_VERSION"));
-        if let Some(git_short_hash) = git_short_hash {
-            git_describe = format!("v{git_describe}-{git_short_hash}");
-        }
+        let git_short_hash = if let Some(git_short_hash) = git_short_hash {
+            format!("+{git_short_hash}")
+        } else {
+            String::new()
+        };
 
         let git_dirty_cmd = std::process::Command::new("git")
             .args(["describe", "--all", "--dirty"])
@@ -54,11 +52,10 @@ fn main() {
             .as_ref()
             .and_then(|output| std::str::from_utf8(&output.stdout).ok().map(str::trim));
         let dirty = git_dirty.map(|d| d.contains("dirty")).unwrap_or(false);
-        if dirty {
-            git_describe = git_describe.add("-dirty");
-        }
+        let dirty = if dirty { "-dirty" } else { "" };
 
-        println!("cargo:rustc-env=CONCLAVE_VERSION={}", git_describe);
+        let conclave_version = format!("{}{}{}", env!("CARGO_PKG_VERSION"), dirty, git_short_hash);
+        println!("cargo:rustc-env=CONCLAVE_VERSION={}", conclave_version);
     } else {
         println!(
             "cargo:rustc-env=CONCLAVE_VERSION=v{}",

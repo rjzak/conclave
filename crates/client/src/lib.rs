@@ -24,16 +24,21 @@ use conclave_common::tracker::{Advertise, TrackerProtocol};
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use dashmap::DashSet;
 use futures::{SinkExt, StreamExt};
+use semver::Version;
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::{info, trace};
+
+/// Conclave version
+pub static VERSION: LazyLock<Version> =
+    LazyLock::new(|| Version::parse(env!("CONCLAVE_VERSION")).unwrap());
 
 /// Default config file name.
 pub const DEFAULT_FILE: &str = "client.toml";

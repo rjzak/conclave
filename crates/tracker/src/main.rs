@@ -9,7 +9,12 @@ use std::net::IpAddr;
 
 use clap::Parser;
 
-pub const VERSION: &str = concat!(env!("CONCLAVE_VERSION"), " ", env!("CONCLAVE_BUILD_DATE"));
+pub const VERSION: &str = concat!(
+    "v",
+    env!("CONCLAVE_VERSION"),
+    " ",
+    env!("CONCLAVE_BUILD_DATE")
+);
 
 /// Conclave Tracker
 #[derive(Parser, Debug)]

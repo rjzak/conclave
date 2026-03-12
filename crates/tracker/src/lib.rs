@@ -11,16 +11,21 @@ use conclave_common::tracker::{Advertise, TrackerProtocol};
 
 use std::fmt::{Debug, Display};
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
+use semver::Version;
 use tokio::net::TcpListener;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
+
+/// Conclave version
+pub static VERSION: LazyLock<Version> =
+    LazyLock::new(|| Version::parse(env!("CONCLAVE_VERSION")).unwrap());
 
 const TRACKER_SERVER_EXPIRATION: u64 = conclave_common::tracker::SERVER_EXPIRATION.as_secs();
 

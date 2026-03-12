@@ -15,7 +15,12 @@ use clap::{Parser, Subcommand};
 use dialoguer::Password;
 use zeroize::Zeroize;
 
-pub const VERSION: &str = concat!(env!("CONCLAVE_VERSION"), " ", env!("CONCLAVE_BUILD_DATE"));
+pub const VERSION: &str = concat!(
+    "v",
+    env!("CONCLAVE_VERSION"),
+    " ",
+    env!("CONCLAVE_BUILD_DATE")
+);
 
 /// Conclave Server
 #[derive(Parser, Debug)]

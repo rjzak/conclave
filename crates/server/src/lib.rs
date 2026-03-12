@@ -44,8 +44,9 @@ pub const DEFAULT_DATABASE: &str = "server.db";
 
 const SCHEMA: &str = include_str!("schema.sql");
 
-static VERSION_SEMVER: LazyLock<Version> =
-    LazyLock::new(|| Version::parse(env!("CARGO_PKG_VERSION")).unwrap());
+/// Conclave version
+pub static VERSION: LazyLock<Version> =
+    LazyLock::new(|| Version::parse(env!("CONCLAVE_VERSION")).unwrap());
 
 /// Client connection
 struct ClientConnection {
@@ -567,7 +568,7 @@ impl State {
                 let advert = AdvertiseServer(Advertise {
                     name: self_clone.name.clone(),
                     description: self_clone.description.clone(),
-                    version: VERSION_SEMVER.clone(),
+                    version: VERSION.clone(),
                     anonymous: self_clone
                         .anonymous_clients_allowed()
                         .await
@@ -677,7 +678,7 @@ impl State {
                                                     description: enc_clone.description.clone(),
                                                     url: enc_clone.url.clone(),
                                                     key: enc_clone.public_key,
-                                                    version: VERSION_SEMVER.clone(),
+                                                    version: VERSION.clone(),
                                                     anonymous: false,
                                                     users_connected: u32::try_from(enc_clone.connections.read().await.len()).unwrap_or_default(),
                                                 });
@@ -800,7 +801,7 @@ impl State {
                             description: self.description.clone(),
                             url: self.url.clone(),
                             key: self.public_key,
-                            version: VERSION_SEMVER.clone(),
+                            version: VERSION.clone(),
                             anonymous: false,
                             users_connected: u32::try_from(connections.len()).unwrap_or_default(),
                         };

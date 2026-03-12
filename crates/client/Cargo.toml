@@ -21,6 +21,7 @@ eframe = { workspace = true, features = ["accesskit", "default_fonts", "serde", 
 futures = { workspace = true, features = ["alloc", "std"] }
 home = { workspace = true }
 postcard = { workspace = true, features = ["alloc", "use-std"] }
+semver = { workspace = true }
 serde = { workspace = true, features = ["alloc", "derive", "std"] }
 serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
