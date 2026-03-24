@@ -31,7 +31,7 @@ fn main() {
             println!("cargo:rerun-if-changed={}/refs/tags", git_dir);
         }
         let git_short_hash_cmd = std::process::Command::new("git")
-            .args(["rev-parse", "--short", "head"])
+            .args(["rev-parse", "--short", "HEAD"])
             .output()
             .ok();
         let git_short_hash = git_short_hash_cmd
@@ -39,6 +39,7 @@ fn main() {
             .and_then(|output| std::str::from_utf8(&output.stdout).ok().map(str::trim));
 
         let git_short_hash = if let Some(git_short_hash) = git_short_hash {
+            assert!(!git_short_hash.is_empty());
             format!("+{git_short_hash}")
         } else {
             String::new()
