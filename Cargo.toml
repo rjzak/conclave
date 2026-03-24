@@ -12,7 +12,7 @@ conclave-tracker = { path = "crates/tracker", version = "0.0", default-features 
 # External
 anyhow = { version = "1.0.102", default-features = false }
 argon2 = { version = "0.5.3", default-features = false }
-async-sqlite = { version = "0.5.6", default-features = false }
+async-sqlite = { version = "0.5.7", default-features = false }
 bytes = { version = "1.11.1", default-features = false }
 chacha20poly1305 = { version = "0.10.1", default-features = false }
 chrono = { version = "0.4.44", default-features = false }
@@ -33,9 +33,9 @@ sha2 = { version = "0.10.9", default-features = false }
 tempdir = { version = "0.3.7", default-features = false }
 tokio = { version = "1.50.0", default-features = false }
 tokio-util = { version = "0.7.18", default-features = false }
-toml = { version = "1.0.6", default-features = false }
+toml = { version = "1.1.0", default-features = false }
 tracing = { version = "0.1.44", default-features = false }
-tracing-subscriber = { version = "0.3.22", default-features = false }
+tracing-subscriber = { version = "0.3.23", default-features = false }
 uuid = { version = "1.22.0", default-features = false }
 wgpu = { version = "27", default-features = false } # Needs to be the same version used by egui
 x25519-dalek = { version = "2.0.1", default-features = false }
