@@ -11,4 +11,4 @@ rustflags = ["-C", "target-feature=+power8-crypto,+power8-vector,+vsx"]
 rustflags = ["-C", "target-feature=+power8-crypto,+power8-vector,+vsx"]
 
 [target.'cfg(target_arch = "x86_64")']
-rustflags = ["-C", "target-feature=+aes,+fma,+sse4.2,+popcnt"]
+rustflags = ["-C", "target-feature=+aes,+fma,+sha,+sse4.2,+popcnt,+rdseed,+rdrand"]
