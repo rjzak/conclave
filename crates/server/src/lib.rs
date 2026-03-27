@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 
 use conclave_common::URL_PROTOCOL;
-use conclave_common::net::{DefaultEncryptedStream, random_server_keys};
+use conclave_common::net::{DefaultEncryptedStream, random_keypair};
 use conclave_common::server::{
     ClientMessagesEncrypted, ClientMessagesUnencrypted, ConnectedUser, ServerError,
     ServerInformation, ServerMessagesEncrypted, ServerMessagesUnencrypted, UserAuthentication,
@@ -174,7 +174,7 @@ impl State {
             !sqlite_path.as_ref().exists(),
             "Database path already exists"
         );
-        let (private_key, public_key) = random_server_keys();
+        let (private_key, public_key) = random_keypair();
         let new_admin_password = Zeroizing::new(Uuid::new_v4().to_string());
 
         {
@@ -949,7 +949,7 @@ fn hash_password(password: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use conclave_common::net::random_server_keys;
+    use conclave_common::net::random_keypair;
     use conclave_common::tracker::TrackerProtocol::AdvertiseServer;
     use conclave_common::tracker::{Advertise, TrackerProtocol};
 
@@ -969,7 +969,7 @@ mod tests {
 
         let version = env!("CARGO_PKG_VERSION").parse().unwrap();
         let state = conclave_tracker::State::<15>::new(IpAddr::V4(Ipv4Addr::LOCALHOST), PORT);
-        let (_server_signing, server_verifying) = random_server_keys();
+        let (_server_signing, server_verifying) = random_keypair();
 
         let state_clone = state.clone();
         let tracker = tokio::spawn(async move {

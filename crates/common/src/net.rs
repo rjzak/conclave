@@ -153,6 +153,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedWrite<REKEY_INTERVAL> {
     /// # Errors
     ///
     /// Network errors
+    #[inline]
     pub async fn send(&mut self, data: &[u8]) -> Result<()> {
         self.crypto.write().await.send(&mut self.write, data).await
     }
@@ -176,6 +177,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedRead<REKEY_INTERVAL> {
     /// # Errors
     ///
     /// Network errors
+    #[inline]
     pub async fn recv(&mut self) -> Result<Vec<u8>> {
         self.crypto.write().await.recv(&mut self.read).await
     }
@@ -230,9 +232,67 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
             .verify(&transcript, &sig)
             .map_err(|e| anyhow!("Failed to verify signature: {e}"))?;
 
+        // Signal: no client key
+        stream.write_u8(0).await?;
+
         // --- Derive shared secret ---
         let shared = client_secret.diffie_hellman(&server_pub);
 
+        let key = derive_key(shared.as_bytes());
+
+        Ok(Self {
+            stream,
+            crypto: CryptoAlgorithmAndCounter {
+                cipher: XChaCha20Poly1305::new(Key::from_slice(&key)),
+                current_key: key,
+                record_count: 0,
+            },
+        })
+    }
+
+    /// Client: Create an encrypted stream for connecting to a server using a client's key
+    ///
+    /// # Errors
+    ///
+    /// Network or cryptography errors are possible.
+    pub async fn connect_with_key(
+        mut stream: TcpStream,
+        server_identity: &VerifyingKey,
+        client_key: &SigningKey,
+    ) -> Result<Self> {
+        // --- Client ephemeral ---
+        let client_secret = EphemeralSecret::random_from_rng(OsRng);
+        let client_pub = X25519Public::from(&client_secret);
+
+        // Send client ephemeral
+        stream.write_all(client_pub.as_bytes()).await?;
+
+        // --- Receive server ephemeral ---
+        let mut server_pub_buf = [0u8; 32];
+        stream.read_exact(&mut server_pub_buf).await?;
+        let server_pub = X25519Public::from(server_pub_buf);
+
+        // --- Receive server signature ---
+        let mut sig_buf = [0u8; 64];
+        stream.read_exact(&mut sig_buf).await?;
+        let sig = Signature::from_bytes(&sig_buf);
+
+        // Verify server signed both keys
+        let mut transcript = [0u8; 64];
+        transcript[..32].copy_from_slice(client_pub.as_bytes());
+        transcript[32..].copy_from_slice(server_pub.as_bytes());
+
+        server_identity
+            .verify(&transcript, &sig)
+            .map_err(|e| anyhow!("Failed to verify signature: {e}"))?;
+
+        // Signal: client key follows, then send signature
+        stream.write_u8(1).await?;
+        let client_sig = client_key.sign(&transcript);
+        stream.write_all(&client_sig.to_bytes()).await?;
+
+        // --- Derive shared secret ---
+        let shared = client_secret.diffie_hellman(&server_pub);
         let key = derive_key(shared.as_bytes());
 
         Ok(Self {
@@ -273,6 +333,13 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
 
         stream.write_all(&sig.to_bytes()).await?;
 
+        // Read client auth flag; if set, consume the client's 64-byte signature
+        let has_client_key = stream.read_u8().await?;
+        if has_client_key != 0 {
+            let mut client_sig_buf = [0u8; 64];
+            stream.read_exact(&mut client_sig_buf).await?;
+        }
+
         // --- Shared secret ---
         let shared = server_secret.diffie_hellman(&client_pub);
 
@@ -293,6 +360,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
     /// # Errors
     ///
     /// Networking errors may result
+    #[inline]
     pub async fn send(&mut self, data: &[u8]) -> Result<()> {
         self.crypto.send(&mut self.stream, data).await
     }
@@ -302,6 +370,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
     /// # Errors
     ///
     /// Networking errors may result
+    #[inline]
     pub async fn recv(&mut self) -> Result<Vec<u8>> {
         self.crypto.recv(&mut self.stream).await
     }
@@ -311,6 +380,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
     /// # Errors
     ///
     /// Network errors are possible
+    #[inline]
     pub async fn shutdown(&mut self) -> io::Result<()> {
         self.stream.shutdown().await
     }
@@ -320,6 +390,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
     /// # Errors
     ///
     /// Network errors are possible
+    #[inline]
     pub async fn ready(&self, interest: Interest) -> io::Result<Ready> {
         self.stream.ready(interest).await
     }
@@ -329,6 +400,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
     /// # Errors
     ///
     /// Network errors are possible but improbable.
+    #[inline]
     pub fn peer_addr(&self) -> io::Result<std::net::SocketAddr> {
         self.stream.peer_addr()
     }
@@ -338,6 +410,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
     /// # Errors
     ///
     /// Network errors are possible but improbable.
+    #[inline]
     pub fn linger(&self) -> io::Result<Option<Duration>> {
         self.stream.linger()
     }
@@ -347,6 +420,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
     /// # Errors
     ///
     /// Network errors are possible.
+    #[inline]
     pub async fn readable(&self) -> io::Result<()> {
         self.stream.readable().await
     }
@@ -356,6 +430,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
     /// # Errors
     ///
     /// Network errors are possible.
+    #[inline]
     pub async fn writable(&self) -> io::Result<()> {
         self.stream.writable().await
     }
@@ -365,6 +440,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
     /// # Errors
     ///
     /// Errors shouldn't happen.
+    #[inline]
     pub fn nodelay(&self) -> io::Result<bool> {
         self.stream.nodelay()
     }
@@ -374,6 +450,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
     /// # Errors
     ///
     /// Shouldn't be any errors
+    #[inline]
     pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
         self.stream.set_nodelay(nodelay)
     }
@@ -421,9 +498,9 @@ fn derive_key(shared: &[u8]) -> [u8; 32] {
     key
 }
 
-/// Generate random server keys
+/// Generate random keypair
 #[must_use]
-pub fn random_server_keys() -> (SigningKey, VerifyingKey) {
+pub fn random_keypair() -> (SigningKey, VerifyingKey) {
     let mut bytes = [0u8; 32];
     let mut rng = OsRng;
 
@@ -444,7 +521,7 @@ mod tests {
     async fn crypto_socket() {
         const PORT: u16 = 12345;
 
-        let (server_signing, server_verifying) = random_server_keys();
+        let (server_signing, server_verifying) = random_keypair();
         let handle = tokio::spawn(async move {
             let listener = TcpListener::bind(format!("127.0.0.1:{PORT}"))
                 .await
@@ -492,13 +569,67 @@ mod tests {
         handle.abort();
     }
 
+    /// Ensure basic `EncryptedStream` functionality with a client key.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn crypto_socket_client_key() {
+        const PORT: u16 = 12344;
+
+        let (client_signing, _client_verifying) = random_keypair();
+        let (server_signing, server_verifying) = random_keypair();
+        let handle = tokio::spawn(async move {
+            let listener = TcpListener::bind(format!("127.0.0.1:{PORT}"))
+                .await
+                .unwrap();
+            eprintln!("Server listening on port {PORT}");
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut link = EncryptedStream::<100>::accept(stream, &server_signing)
+                .await
+                .expect("Server Accept failed");
+            loop {
+                println!("EncryptedStream: accept() created, waiting for data");
+                let mut msg = link.recv().await.expect("Server Receive failed");
+                println!("Server Received: {msg:?}");
+                msg.reverse();
+                println!("Server Sending: {msg:?}");
+                link.send(&msg).await.expect("Server Send failed");
+            }
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await; // Required by Linux
+        assert!(!handle.is_finished());
+        eprintln!("Server process created.");
+
+        let stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
+            .await
+            .unwrap();
+        let mut link =
+            EncryptedStream::<100>::connect_with_key(stream, &server_verifying, &client_signing)
+                .await
+                .expect("Client Connect failed");
+        println!("EncryptedStream: connect_with_key() created, sending data");
+
+        for _ in 0..link.interval() * 3 {
+            let uuid = Uuid::new_v4().to_string();
+            let uuid_bytes = uuid.as_bytes();
+            println!("Client Sending: {uuid_bytes:?}");
+            link.send(uuid_bytes).await.expect("Client Send failed");
+            let mut msg = link.recv().await.expect("Client Receive failed");
+            println!("Client Received: {msg:?}");
+            msg.reverse();
+            assert_eq!(msg, uuid_bytes);
+        }
+
+        // We would rekey on the next exchange.
+        assert_eq!(link.crypto.record_count, link.interval());
+        handle.abort();
+    }
+
     /// Split the `EncryptedStream` into separate read and write halves. Ensure that this works,
     /// and that both halves rekey correctly.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn crypto_socket_split() {
         const PORT: u16 = 12399;
 
-        let (server_signing, server_verifying) = random_server_keys();
+        let (server_signing, server_verifying) = random_keypair();
 
         let handle = tokio::spawn(async move {
             let listener = TcpListener::bind(format!("127.0.0.1:{PORT}"))
@@ -560,12 +691,82 @@ mod tests {
         handle.abort();
     }
 
+    /// Split the `EncryptedStream` into separate read and write halves. Ensure that this works,
+    /// and that both halves rekey correctly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn crypto_socket_split_client_key() {
+        const PORT: u16 = 12398;
+
+        let (client_signing, _client_verifying) = random_keypair();
+        let (server_signing, server_verifying) = random_keypair();
+
+        let handle = tokio::spawn(async move {
+            let listener = TcpListener::bind(format!("127.0.0.1:{PORT}"))
+                .await
+                .unwrap();
+            eprintln!("Server listening on port {PORT}");
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut link = EncryptedStream::<100>::accept(stream, &server_signing)
+                .await
+                .expect("Server Accept failed");
+            loop {
+                println!("EncryptedStream: accept() created, waiting for data");
+                let mut msg = link.recv().await.expect("Server Receive failed");
+                println!("Server Received: {msg:?}");
+                msg.reverse();
+                println!("Server Sending: {msg:?}");
+                link.send(&msg).await.expect("Server Send failed");
+            }
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await; // Required by Linux
+        assert!(!handle.is_finished());
+        eprintln!("Server process created.");
+
+        let stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
+            .await
+            .unwrap();
+        let link =
+            EncryptedStream::<100>::connect_with_key(stream, &server_verifying, &client_signing)
+                .await
+                .expect("Client Connect failed");
+        println!("EncryptedStream: connect() created, sending data");
+
+        let uuid_vec = (0..link.interval() * 3)
+            .map(|_| Uuid::new_v4().to_string())
+            .collect::<Vec<_>>();
+        let (mut read, mut write) = link.into_split();
+
+        let uuid_vec_clone = uuid_vec.clone();
+        let read_process = tokio::spawn(async move {
+            for uuid in uuid_vec_clone {
+                let mut msg = read.recv().await.expect("Client Receive failed");
+                println!("Client Received: {msg:?}");
+                msg.reverse();
+
+                let uuid_bytes = uuid.as_bytes();
+                assert_eq!(msg, uuid_bytes);
+            }
+        });
+
+        for uuid in uuid_vec {
+            let uuid_bytes = uuid.as_bytes();
+            println!("Client Sending: {uuid_bytes:?}");
+            write.send(uuid_bytes).await.expect("Client Send failed");
+        }
+
+        // We would rekey on the next exchange.
+        assert_eq!(write.crypto.read().await.record_count, write.interval());
+
+        read_process.abort();
+        handle.abort();
+    }
+
     /// Ensure that `EncryptedStream` fails to connect if the server isn't using the correct key.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn wrong_key() {
         const PORT: u16 = 12444;
-        let (server_signing, _) = random_server_keys();
-        let (_, server_verifying) = random_server_keys();
+        let (server_signing, _) = random_keypair();
+        let (_, server_verifying) = random_keypair();
 
         let handle = tokio::spawn(async move {
             let listener = TcpListener::bind(format!("127.0.0.1:{PORT}"))
@@ -604,7 +805,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn incorrect_rekey() {
         const PORT: u16 = 12434;
-        let (server_signing, server_verifying) = random_server_keys();
+        let (server_signing, server_verifying) = random_keypair();
 
         let handle = tokio::spawn(async move {
             let listener = TcpListener::bind(format!("127.0.0.1:{PORT}"))
