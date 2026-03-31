@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use eframe::{egui, Frame};
+use eframe::{Frame, egui};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -56,12 +56,9 @@ impl eframe::App for ConclaveClient {
                 "Source code."
             ));
 
-            ui.with_layout(
-                egui::Layout::bottom_up(egui::Align::LEFT),
-                |ui| {
-                    egui::warn_if_debug_build(ui);
-                },
-            );
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                egui::warn_if_debug_build(ui);
+            });
         });
     }
 }
