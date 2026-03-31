@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use eframe::Frame;
-use eframe::egui::Context;
+use eframe::{egui, Frame};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -28,16 +27,16 @@ impl ConclaveClient {
 }
 
 impl eframe::App for ConclaveClient {
-    fn update(&mut self, ctx: &Context, _frame: &mut Frame) {
-        ctx.request_repaint();
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut Frame) {
+        ui.request_repaint();
         // Put your widgets into a `SidePanel`, `TopBottomPanel`, `CentralPanel`, `Window` or `Area`.
         // For inspiration and more examples, go to https://emilk.github.io/egui
 
-        eframe::egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            eframe::egui::MenuBar::new().ui(ui, |ui| {
+        egui::Panel::top("top_panel").show_inside(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Quit").clicked() {
-                        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+                        ui.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
                     }
                 });
                 ui.add_space(16.0);
@@ -46,21 +45,21 @@ impl eframe::App for ConclaveClient {
             });
         });
 
-        eframe::egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             // The central panel the region left after adding TopPanel's and SidePanel's
             ui.heading("eframe template");
 
             ui.separator();
 
-            ui.add(eframe::egui::github_link_file!(
+            ui.add(egui::github_link_file!(
                 "https://github.com/emilk/eframe_template/blob/main/",
                 "Source code."
             ));
 
             ui.with_layout(
-                eframe::egui::Layout::bottom_up(eframe::egui::Align::LEFT),
+                egui::Layout::bottom_up(egui::Align::LEFT),
                 |ui| {
-                    eframe::egui::warn_if_debug_build(ui);
+                    egui::warn_if_debug_build(ui);
                 },
             );
         });

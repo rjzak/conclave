@@ -872,13 +872,13 @@ impl State {
 
 #[cfg(feature = "gui")]
 impl eframe::App for State {
-    fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
         use zeroize::Zeroize;
 
-        ctx.request_repaint();
+        ui.request_repaint();
 
         let connections = futures::executor::block_on(self.connections.read()).len();
-        eframe::egui::CentralPanel::default().show(ctx, |ui| {
+        eframe::egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.label(format!("Current clients: {connections}"));
             ui.label(format!(
                 "Total connections: {}",
@@ -893,7 +893,7 @@ impl eframe::App for State {
             {
                 let text_buff = password.clone();
                 let acknowledged = self.password_acknowledged.clone();
-                ctx.show_viewport_deferred(
+                ui.show_viewport_deferred(
                     eframe::egui::ViewportId::from_hash_of("conclave_server_admin_password"),
                     eframe::egui::ViewportBuilder::default()
                         .with_title("Conclave Server Admin Password")
@@ -902,7 +902,7 @@ impl eframe::App for State {
                         .with_inner_size([320.0, 100.0]),
                     move |context, _class| {
                         let text_buff_str = futures::executor::block_on(text_buff.read()).clone();
-                        eframe::egui::CentralPanel::default().show(context, |inner_ui| {
+                        eframe::egui::CentralPanel::default().show_inside(context, |inner_ui| {
                             inner_ui.label("Below is the initial admin password for this server.");
                             inner_ui.text_edit_singleline(&mut text_buff_str.as_str());
 
@@ -916,7 +916,7 @@ impl eframe::App for State {
             }
 
             if self.log {
-                ctx.show_viewport_deferred(
+                ui.show_viewport_deferred(
                     eframe::egui::ViewportId::from_hash_of("conclave_server_log"),
                     eframe::egui::ViewportBuilder::default()
                         .with_title("Conclave Server Log")
@@ -925,7 +925,7 @@ impl eframe::App for State {
                         .with_close_button(false)
                         .with_inner_size([200.0, 100.0]),
                     |context, _class| {
-                        eframe::egui::CentralPanel::default().show(context, |inner_ui| {
+                        eframe::egui::CentralPanel::default().show_inside(context, |inner_ui| {
                             inner_ui.label("Log will go here");
                         });
                     },

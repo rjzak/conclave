@@ -210,10 +210,10 @@ impl<const DURATION_SECONDS: u64> Display for State<DURATION_SECONDS> {
 
 #[cfg(feature = "gui")]
 impl<const DURATION_SECONDS: u64> eframe::App for State<DURATION_SECONDS> {
-    fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
-        ctx.request_repaint();
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
+        ui.request_repaint();
 
-        eframe::egui::CentralPanel::default().show(ctx, |ui| {
+        eframe::egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.label(format!("Servers: {}", self.servers.len()));
             ui.label(format!("Queries: {}", self.queries()));
             ui.separator();
