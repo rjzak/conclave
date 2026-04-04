@@ -319,7 +319,7 @@ impl Client {
         eprintln!("Re-connecting to the server on port {port}");
         let stream = TcpStream::connect(format!("{server}:{port}")).await?;
         eprintln!("Creating encrypted stream to server");
-        let mut encrypted_stream = EncryptedStream::connect(stream, &key).await?;
+        let mut encrypted_stream = EncryptedStream::connect(stream, &key, None).await?;
         eprintln!("Client: EncryptedStream created");
 
         let login = postcard::to_stdvec(&ServerMessagesEncrypted::ServerAuthenticationRequest((

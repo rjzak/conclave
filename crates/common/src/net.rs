@@ -28,6 +28,12 @@ use zeroize::ZeroizeOnDrop;
 /// Protocol version
 const VERSION: u8 = 1;
 
+/// Indicates that the client provided a key during the handshake
+const USE_CLIENT_KEY: u8 = 1;
+
+/// HKDF info for deriving the new keys
+const REKEY_INFO: &[u8] = b"secure-stream-rekey";
+
 /// Send and receive state are tracked independently so that a split stream's write
 /// half racing ahead cannot cause the read half to rekey at the wrong time.
 #[derive(ZeroizeOnDrop)]
@@ -46,7 +52,7 @@ impl<const REKEY_INTERVAL: u16> CryptoAlgorithmAndCounter<REKEY_INTERVAL> {
     fn send_rekey(&mut self) -> Result<()> {
         let hk = Hkdf::<Sha256>::new(None, &self.send_key);
         let mut new_key = [0u8; 32];
-        hk.expand(b"secure-stream-rekey", &mut new_key)
+        hk.expand(REKEY_INFO, &mut new_key)
             .map_err(|_| anyhow!("Rekey failed"))?;
         self.send_cipher = XChaCha20Poly1305::new(Key::from_slice(&new_key));
         self.send_key = new_key;
@@ -57,7 +63,7 @@ impl<const REKEY_INTERVAL: u16> CryptoAlgorithmAndCounter<REKEY_INTERVAL> {
     fn rekey_recv(&mut self) -> Result<()> {
         let hk = Hkdf::<Sha256>::new(None, &self.recv_key);
         let mut new_key = [0u8; 32];
-        hk.expand(b"secure-stream-rekey", &mut new_key)
+        hk.expand(REKEY_INFO, &mut new_key)
             .map_err(|_| anyhow!("Rekey failed"))?;
         self.recv_cipher = XChaCha20Poly1305::new(Key::from_slice(&new_key));
         self.recv_key = new_key;
@@ -213,69 +219,15 @@ pub struct EncryptedStream<const REKEY_INTERVAL: u16> {
 }
 
 impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
-    /// Client: Create an encrypted stream for connecting to a server
+    /// Client: Create an encrypted stream for connecting to a server optionally with a client key
     ///
     /// # Errors
     ///
     /// Network or cryptography errors are possible.
-    pub async fn connect(mut stream: TcpStream, server_identity: &VerifyingKey) -> Result<Self> {
-        // --- Client ephemeral ML-KEM keypair ---
-        let (client_pubkey, client_seckey) = mlkem1024::keypair();
-        let pk_bytes = client_pubkey.as_bytes();
-
-        // Send client public key
-        stream.write_all(pk_bytes).await?;
-
-        // --- Receive server ciphertext (encapsulation of client's public key) ---
-        let mut ct_buf = [0u8; mlkem1024::ciphertext_bytes()];
-        stream.read_exact(&mut ct_buf).await?;
-        let ciphertext = mlkem1024::Ciphertext::from_bytes(&ct_buf)
-            .map_err(|e| anyhow!("Invalid ciphertext: {e:?}"))?;
-
-        // --- Receive server signature ---
-        let mut sig_buf = [0u8; 64];
-        stream.read_exact(&mut sig_buf).await?;
-        let sig = Signature::from_bytes(&sig_buf);
-
-        // Verify server signed transcript = client_pk || ciphertext
-        let mut transcript = Vec::with_capacity(pk_bytes.len() + ct_buf.len());
-        transcript.extend_from_slice(pk_bytes);
-        transcript.extend_from_slice(&ct_buf);
-
-        server_identity
-            .verify(&transcript, &sig)
-            .map_err(|e| anyhow!("Failed to verify signature: {e}"))?;
-
-        // --- Decapsulate to recover shared secret ---
-        let shared = mlkem1024::decapsulate(&ciphertext, &client_seckey);
-
-        // Signal: no client key
-        stream.write_u8(0).await?;
-
-        let key = derive_key(shared.as_bytes());
-
-        Ok(Self {
-            stream,
-            crypto: CryptoAlgorithmAndCounter {
-                send_cipher: XChaCha20Poly1305::new(Key::from_slice(&key)),
-                send_key: key,
-                send_count: 0,
-                recv_cipher: XChaCha20Poly1305::new(Key::from_slice(&key)),
-                recv_key: key,
-                recv_count: 0,
-            },
-        })
-    }
-
-    /// Client: Create an encrypted stream for connecting to a server using a client's key
-    ///
-    /// # Errors
-    ///
-    /// Network or cryptography errors are possible.
-    pub async fn connect_with_key(
+    pub async fn connect(
         mut stream: TcpStream,
         server_identity: &VerifyingKey,
-        client_key: &SigningKey,
+        client_key: Option<&SigningKey>,
     ) -> Result<Self> {
         // --- Client ephemeral ML-KEM keypair ---
         let (client_pubkey, client_seckey) = mlkem1024::keypair();
@@ -307,10 +259,14 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
         // --- Decapsulate to recover shared secret ---
         let shared = mlkem1024::decapsulate(&ciphertext, &client_seckey);
 
-        // Signal: client key follows, then send signature
-        stream.write_u8(1).await?;
-        let client_sig = client_key.sign(&transcript);
-        stream.write_all(&client_sig.to_bytes()).await?;
+        if let Some(client_key) = client_key {
+            // Signal: client key follows, then send signature
+            stream.write_u8(USE_CLIENT_KEY).await?;
+            let client_sig = client_key.sign(&transcript);
+            stream.write_all(&client_sig.to_bytes()).await?;
+        } else {
+            stream.write_u8(0).await?;
+        }
 
         let key = derive_key(shared.as_bytes());
 
@@ -568,7 +524,7 @@ mod tests {
         let stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
             .await
             .unwrap();
-        let mut link = EncryptedStream::<100>::connect(stream, &server_verifying)
+        let mut link = EncryptedStream::<100>::connect(stream, &server_verifying, None)
             .await
             .expect("Client Connect failed");
         println!("EncryptedStream: connect() created, sending data");
@@ -623,7 +579,7 @@ mod tests {
             .await
             .unwrap();
         let mut link =
-            EncryptedStream::<100>::connect_with_key(stream, &server_verifying, &client_signing)
+            EncryptedStream::<100>::connect(stream, &server_verifying, Some(&client_signing))
                 .await
                 .expect("Client Connect failed");
         println!("EncryptedStream: connect_with_key() created, sending data");
@@ -677,7 +633,7 @@ mod tests {
         let stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
             .await
             .unwrap();
-        let link = EncryptedStream::<100>::connect(stream, &server_verifying)
+        let link = EncryptedStream::<100>::connect(stream, &server_verifying, None)
             .await
             .expect("Client Connect failed");
         println!("EncryptedStream: connect() created, sending data");
@@ -747,7 +703,7 @@ mod tests {
             .await
             .unwrap();
         let link =
-            EncryptedStream::<100>::connect_with_key(stream, &server_verifying, &client_signing)
+            EncryptedStream::<100>::connect(stream, &server_verifying, Some(&client_signing))
                 .await
                 .expect("Client Connect failed");
         println!("EncryptedStream: connect() created, sending data");
@@ -809,7 +765,7 @@ mod tests {
         let stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
             .await
             .unwrap();
-        let link_result = EncryptedStream::<100>::connect(stream, &server_verifying).await;
+        let link_result = EncryptedStream::<100>::connect(stream, &server_verifying, None).await;
         println!("EncryptedStream: connect() with wrong key: {link_result:?}");
         assert!(
             link_result
@@ -850,7 +806,7 @@ mod tests {
         let stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
             .await
             .unwrap();
-        let mut link = EncryptedStream::<100>::connect(stream, &server_verifying)
+        let mut link = EncryptedStream::<100>::connect(stream, &server_verifying, None)
             .await
             .unwrap();
 
