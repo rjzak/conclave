@@ -13,6 +13,8 @@ use chacha20poly1305::{
 };
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
+use pqcrypto_mlkem::mlkem1024;
+use pqcrypto_traits::kem::{Ciphertext as _, PublicKey as _, SharedSecret as _};
 use sha2::Sha256;
 use tokio::io::{AsyncRead, AsyncWrite, Interest, Ready};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -21,7 +23,6 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
-use x25519_dalek::{EphemeralSecret, PublicKey as X25519Public};
 use zeroize::ZeroizeOnDrop;
 
 /// Protocol version
@@ -218,38 +219,38 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
     ///
     /// Network or cryptography errors are possible.
     pub async fn connect(mut stream: TcpStream, server_identity: &VerifyingKey) -> Result<Self> {
-        // --- Client ephemeral ---
-        let client_secret = EphemeralSecret::random_from_rng(OsRng);
+        // --- Client ephemeral ML-KEM keypair ---
+        let (client_pubkey, client_seckey) = mlkem1024::keypair();
+        let pk_bytes = client_pubkey.as_bytes();
 
-        let client_pub = X25519Public::from(&client_secret);
+        // Send client public key
+        stream.write_all(pk_bytes).await?;
 
-        // Send client ephemeral
-        stream.write_all(client_pub.as_bytes()).await?;
+        // --- Receive server ciphertext (encapsulation of client's public key) ---
+        let mut ct_buf = [0u8; mlkem1024::ciphertext_bytes()];
+        stream.read_exact(&mut ct_buf).await?;
+        let ciphertext = mlkem1024::Ciphertext::from_bytes(&ct_buf)
+            .map_err(|e| anyhow!("Invalid ciphertext: {e:?}"))?;
 
-        // --- Receive server ephemeral ---
-        let mut server_pub_buf = [0u8; 32];
-        stream.read_exact(&mut server_pub_buf).await?;
-        let server_pub = X25519Public::from(server_pub_buf);
-
-        // --- Receive signature ---
+        // --- Receive server signature ---
         let mut sig_buf = [0u8; 64];
         stream.read_exact(&mut sig_buf).await?;
         let sig = Signature::from_bytes(&sig_buf);
 
-        // Verify server signed both keys
-        let mut transcript = [0u8; 64];
-        transcript[..32].copy_from_slice(client_pub.as_bytes());
-        transcript[32..].copy_from_slice(server_pub.as_bytes());
+        // Verify server signed transcript = client_pk || ciphertext
+        let mut transcript = Vec::with_capacity(pk_bytes.len() + ct_buf.len());
+        transcript.extend_from_slice(pk_bytes);
+        transcript.extend_from_slice(&ct_buf);
 
         server_identity
             .verify(&transcript, &sig)
             .map_err(|e| anyhow!("Failed to verify signature: {e}"))?;
 
+        // --- Decapsulate to recover shared secret ---
+        let shared = mlkem1024::decapsulate(&ciphertext, &client_seckey);
+
         // Signal: no client key
         stream.write_u8(0).await?;
-
-        // --- Derive shared secret ---
-        let shared = client_secret.diffie_hellman(&server_pub);
 
         let key = derive_key(shared.as_bytes());
 
@@ -276,39 +277,41 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
         server_identity: &VerifyingKey,
         client_key: &SigningKey,
     ) -> Result<Self> {
-        // --- Client ephemeral ---
-        let client_secret = EphemeralSecret::random_from_rng(OsRng);
-        let client_pub = X25519Public::from(&client_secret);
+        // --- Client ephemeral ML-KEM keypair ---
+        let (client_pubkey, client_seckey) = mlkem1024::keypair();
+        let pk_bytes = client_pubkey.as_bytes();
 
-        // Send client ephemeral
-        stream.write_all(client_pub.as_bytes()).await?;
+        // Send client public key
+        stream.write_all(pk_bytes).await?;
 
-        // --- Receive server ephemeral ---
-        let mut server_pub_buf = [0u8; 32];
-        stream.read_exact(&mut server_pub_buf).await?;
-        let server_pub = X25519Public::from(server_pub_buf);
+        // --- Receive server ciphertext (encapsulation of client's public key) ---
+        let mut ct_buf = [0u8; mlkem1024::ciphertext_bytes()];
+        stream.read_exact(&mut ct_buf).await?;
+        let ciphertext = mlkem1024::Ciphertext::from_bytes(&ct_buf)
+            .map_err(|e| anyhow!("Invalid ciphertext: {e:?}"))?;
 
         // --- Receive server signature ---
         let mut sig_buf = [0u8; 64];
         stream.read_exact(&mut sig_buf).await?;
         let sig = Signature::from_bytes(&sig_buf);
 
-        // Verify server signed both keys
-        let mut transcript = [0u8; 64];
-        transcript[..32].copy_from_slice(client_pub.as_bytes());
-        transcript[32..].copy_from_slice(server_pub.as_bytes());
+        // Verify server signed transcript = client_pk || ciphertext
+        let mut transcript = Vec::with_capacity(pk_bytes.len() + ct_buf.len());
+        transcript.extend_from_slice(pk_bytes);
+        transcript.extend_from_slice(&ct_buf);
 
         server_identity
             .verify(&transcript, &sig)
             .map_err(|e| anyhow!("Failed to verify signature: {e}"))?;
+
+        // --- Decapsulate to recover shared secret ---
+        let shared = mlkem1024::decapsulate(&ciphertext, &client_seckey);
 
         // Signal: client key follows, then send signature
         stream.write_u8(1).await?;
         let client_sig = client_key.sign(&transcript);
         stream.write_all(&client_sig.to_bytes()).await?;
 
-        // --- Derive shared secret ---
-        let shared = client_secret.diffie_hellman(&server_pub);
         let key = derive_key(shared.as_bytes());
 
         Ok(Self {
@@ -330,26 +333,25 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
     ///
     /// Network or cryptography errors are possible.
     pub async fn accept(mut stream: TcpStream, server_identity: &SigningKey) -> Result<Self> {
-        // Receive client ephemeral
-        let mut client_buf = [0u8; 32];
-        stream.read_exact(&mut client_buf).await?;
-        let client_pub = X25519Public::from(client_buf);
+        // Receive client ML-KEM public key
+        let mut pk_buf = [0u8; mlkem1024::public_key_bytes()];
+        stream.read_exact(&mut pk_buf).await?;
+        let client_pk = mlkem1024::PublicKey::from_bytes(&pk_buf)
+            .map_err(|e| anyhow!("Invalid client public key: {e:?}"))?;
 
-        // Server ephemeral
-        let server_secret = EphemeralSecret::random_from_rng(OsRng);
+        // Encapsulate using client's public key → (shared_secret, ciphertext)
+        let (shared, ciphertext) = mlkem1024::encapsulate(&client_pk);
+        let ct_bytes = ciphertext.as_bytes();
 
-        let server_pub = X25519Public::from(&server_secret);
-
-        // Send server ephemeral
-        stream.write_all(server_pub.as_bytes()).await?;
-
-        // --- Sign transcript ---
-        let mut transcript = [0u8; 64];
-        transcript[..32].copy_from_slice(client_pub.as_bytes());
-        transcript[32..].copy_from_slice(server_pub.as_bytes());
+        // Build transcript = client_pk || ciphertext and sign it
+        let mut transcript = Vec::with_capacity(pk_buf.len() + ct_bytes.len());
+        transcript.extend_from_slice(&pk_buf);
+        transcript.extend_from_slice(ct_bytes);
 
         let sig = server_identity.sign(&transcript);
 
+        // Send ciphertext then signature
+        stream.write_all(ct_bytes).await?;
         stream.write_all(&sig.to_bytes()).await?;
 
         // Read client auth flag; if set, consume the client's 64-byte signature
@@ -358,9 +360,6 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
             let mut client_sig_buf = [0u8; 64];
             stream.read_exact(&mut client_sig_buf).await?;
         }
-
-        // --- Shared secret ---
-        let shared = server_secret.diffie_hellman(&client_pub);
 
         let key = derive_key(shared.as_bytes());
 

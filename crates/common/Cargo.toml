@@ -17,7 +17,8 @@ serde = { workspace = true, features = ["alloc", "derive", "std"] }
 sha2 = { workspace = true }
 tokio = { workspace = true, features = ["net", "io-util", "sync"] }
 tracing-subscriber = { workspace = true, features = ["alloc", "fmt", "std"] }
-x25519-dalek = { workspace = true, features = ["zeroize"] }
+pqcrypto-mlkem = { workspace = true, features = ["std"] }
+pqcrypto-traits = { workspace = true, features = ["std"] }
 zeroize = { workspace = true, features = ["aarch64", "derive", "serde"] }
 
 [dev-dependencies]
