@@ -165,6 +165,8 @@ impl<const REKEY_INTERVAL: u16> CryptoAlgorithmAndCounter<REKEY_INTERVAL> {
 pub struct EncryptedWrite<const REKEY_INTERVAL: u16> {
     crypto: Arc<RwLock<CryptoAlgorithmAndCounter<REKEY_INTERVAL>>>,
     write: OwnedWriteHalf,
+    /// The verified client identity, set by the server after a successful client-authenticated handshake.
+    client_key: Option<VerifyingKey>,
 }
 
 impl<const REKEY_INTERVAL: u16> EncryptedWrite<REKEY_INTERVAL> {
@@ -176,6 +178,14 @@ impl<const REKEY_INTERVAL: u16> EncryptedWrite<REKEY_INTERVAL> {
     #[inline]
     pub async fn send(&mut self, data: &[u8]) -> Result<()> {
         self.crypto.write().await.send(&mut self.write, data).await
+    }
+
+    /// Returns the verified client identity, if the client authenticated during the handshake.
+    /// Only populated on the server side after `accept`.
+    #[inline]
+    #[must_use]
+    pub fn client_key(&self) -> Option<&VerifyingKey> {
+        self.client_key.as_ref()
     }
 
     #[inline]
@@ -216,6 +226,8 @@ pub type DefaultEncryptedStream = EncryptedStream<1_000>;
 pub struct EncryptedStream<const REKEY_INTERVAL: u16> {
     stream: TcpStream,
     crypto: CryptoAlgorithmAndCounter<REKEY_INTERVAL>,
+    /// The verified client identity, set by the server after a successful client-authenticated handshake.
+    client_key: Option<VerifyingKey>,
 }
 
 impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
@@ -260,8 +272,11 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
         let shared = mlkem1024::decapsulate(&ciphertext, &client_seckey);
 
         if let Some(client_key) = client_key {
-            // Signal: client key follows, then send signature
+            // Signal: verifying key and signature follow
             stream.write_u8(USE_CLIENT_KEY).await?;
+            stream
+                .write_all(client_key.verifying_key().as_bytes())
+                .await?;
             let client_sig = client_key.sign(&transcript);
             stream.write_all(&client_sig.to_bytes()).await?;
         } else {
@@ -280,6 +295,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
                 recv_key: key,
                 recv_count: 0,
             },
+            client_key: None,
         })
     }
 
@@ -310,12 +326,25 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
         stream.write_all(ct_bytes).await?;
         stream.write_all(&sig.to_bytes()).await?;
 
-        // Read client auth flag; if set, consume the client's 64-byte signature
-        let has_client_key = stream.read_u8().await?;
-        if has_client_key != 0 {
+        // Read client auth flag; if set, verify the client's verifying key and signature
+        let client_key = if stream.read_u8().await? == USE_CLIENT_KEY {
+            let mut vk_buf = [0u8; 32];
+            stream.read_exact(&mut vk_buf).await?;
+            let verifying_key = VerifyingKey::from_bytes(&vk_buf)
+                .map_err(|e| anyhow!("Invalid client verifying key: {e}"))?;
+
             let mut client_sig_buf = [0u8; 64];
             stream.read_exact(&mut client_sig_buf).await?;
-        }
+            let client_sig = Signature::from_bytes(&client_sig_buf);
+
+            verifying_key
+                .verify(&transcript, &client_sig)
+                .map_err(|e| anyhow!("Failed to verify client signature: {e}"))?;
+
+            Some(verifying_key)
+        } else {
+            None
+        };
 
         let key = derive_key(shared.as_bytes());
 
@@ -329,6 +358,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
                 recv_key: key,
                 recv_count: 0,
             },
+            client_key,
         })
     }
 
@@ -432,6 +462,14 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
         self.stream.set_nodelay(nodelay)
     }
 
+    /// Returns the verified client identity, if the client authenticated during the handshake.
+    /// Only populated on the server side after `accept`.
+    #[inline]
+    #[must_use]
+    pub fn client_key(&self) -> Option<&VerifyingKey> {
+        self.client_key.as_ref()
+    }
+
     #[inline]
     #[allow(unused)]
     const fn interval(&self) -> u16 {
@@ -452,7 +490,11 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
                 crypto: crypto.clone(),
                 read,
             },
-            EncryptedWrite { crypto, write },
+            EncryptedWrite {
+                crypto,
+                write,
+                client_key: self.client_key,
+            },
         )
     }
 }
