@@ -1,0 +1,50 @@
+codecov:
+  branch: main
+  require_ci_to_pass: false
+  notify:
+    after_n_builds: 4 # adjust to the number of jobs in .github/workflows/coverage.yml
+    require_ci_to_pass: false
+    wait_for_ci: false
+
+flags:
+  integration:
+    carryforward: true
+    paths:
+      - testing/
+
+coverage:
+  status:
+    project:
+      default: false
+      client:
+        paths: [ "crates/client" ]
+        target: auto
+        threshold: 5%
+      common:
+        paths: [ "crates/common" ]
+        target: auto
+        threshold: 5%
+      server:
+        paths: [ "crates/server" ]
+        target: auto
+        threshold: 0.05%
+      tracker:
+        paths: [ "crates/tracker" ]
+        target: auto  # auto compares coverage to the previous base commit
+        threshold: 0.05%  # the leniency in hitting the target
+    patch:
+      default: false
+      client:
+        paths: [ "crates/client" ]
+        target: 50%
+      common:
+        paths: [ "crates/common" ]
+        target: 50%
+      server:
+        paths: [ "crates/server" ]
+        target: auto
+        threshold: 0.05%
+      tracker:
+        paths: [ "crates/tracker" ]
+        target: auto  # auto compares coverage to the previous base commit
+        threshold: 0.05%  # the leniency in hitting the target
