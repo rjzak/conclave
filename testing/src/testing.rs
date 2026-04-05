@@ -90,7 +90,7 @@ async fn integration() {
         .unwrap();
 
     eprintln!("Client: added tracker, querying tracker(s)");
-    assert_eq!(client.list_servers().await.unwrap().len(), 1);
+    assert_eq!(client.list_servers_from_trackers().await.unwrap().len(), 1);
 
     eprintln!("Tracker: querying for server(s)");
     let tracked_servers = tracker.servers();

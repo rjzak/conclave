@@ -30,6 +30,7 @@ tokio-util = { workspace = true, features = ["codec"] }
 toml = { workspace = true, features = ["default", "parse"] }
 tracing = { workspace = true, features = ["attributes", "max_level_info", "std"] }
 wgpu = { workspace = true, features = ["std", "vulkan"] }
+zeroize = { workspace = true, features = ["aarch64", "derive", "serde"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu = { workspace = true, features = ["metal", "vulkan-portability"] }

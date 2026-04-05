@@ -179,7 +179,7 @@ impl Client {
     /// # Errors
     ///
     /// Errors may arise from network problems.
-    pub async fn list_servers(&self) -> Result<HashSet<Advertise>> {
+    pub async fn list_servers_from_trackers(&self) -> Result<HashSet<Advertise>> {
         let mut servers_set = HashSet::new();
         let get_servers_bytes = postcard::to_stdvec(&TrackerProtocol::GetServers)?;
 
@@ -337,6 +337,13 @@ impl Client {
         match server_info {
             ClientMessagesEncrypted::ServerInformationResponse(server_info) => {
                 eprintln!("Received server information");
+                if server_info.version > *VERSION {
+                    tracing::warn!(
+                        "Server version {} is newer than client version {}",
+                        server_info.version,
+                        *VERSION
+                    );
+                }
                 let conn = ConclaveConnection::new(encrypted_stream, server_info, &display_name);
                 let mut conns = self.connection.write().await;
                 conns.push(conn);

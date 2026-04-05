@@ -848,6 +848,7 @@ dependencies = [
  "toml",
  "tracing",
  "wgpu",
+ "zeroize",
 ]
 
 [[package]]
@@ -1098,6 +1099,7 @@ dependencies = [
  "fiat-crypto",
  "rustc_version",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -1252,6 +1254,7 @@ dependencies = [
  "serde",
  "sha2 0.10.9",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]

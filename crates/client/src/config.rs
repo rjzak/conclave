@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const DEFAULT_CLIENT_FILE: &str = "conclave.toml";
 
@@ -28,7 +29,7 @@ pub fn default_config_path() -> Result<PathBuf> {
 }
 
 /// Client configuration
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 pub struct ClientConfig {
     /// Default display name to use when connecting to servers
     pub default_display_name: String,
@@ -93,7 +94,7 @@ impl ClientConfig {
 }
 
 /// Tracker listing entry
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 pub struct Tracker {
     /// Domain or IP address of the tracker
     pub server: String,
@@ -103,7 +104,7 @@ pub struct Tracker {
 }
 
 /// Server bookmark entry
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 pub struct BookmarkEntry {
     /// Domain or IP address of the server
     pub server: String,
@@ -123,6 +124,7 @@ pub struct BookmarkEntry {
     pub auth: Option<UserAuth>,
 
     /// Server's public key
+    #[zeroize(skip)]
     pub key: VerifyingKey,
 
     /// Share local time (and timezone, which provides location information) with the server.
@@ -130,7 +132,7 @@ pub struct BookmarkEntry {
 }
 
 /// User's credential for a server
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 pub struct UserAuth {
     /// User name
     pub username: String,
@@ -140,7 +142,7 @@ pub struct UserAuth {
 }
 
 /// Port information
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 pub enum Port {
     /// Unencrypted port
     Unencrypted(u16),

@@ -11,7 +11,7 @@ version.workspace = true
 anyhow = { workspace = true, features = ["std"] }
 chacha20poly1305 = { workspace = true, features = ["alloc", "getrandom"] }
 chrono = { workspace = true, features = ["serde", "std"] }
-ed25519-dalek = { workspace = true, features = ["serde"] }
+ed25519-dalek = { workspace = true, features = ["serde", "zeroize"] }
 hkdf = { workspace = true }
 semver = { workspace = true, features = ["serde", "std"] }
 serde = { workspace = true, features = ["alloc", "derive", "std"] }
