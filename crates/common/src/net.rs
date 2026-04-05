@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::io;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -18,7 +17,6 @@ use pqcrypto_traits::kem::{Ciphertext as _, PublicKey as _, SharedSecret as _};
 use sha2::Sha256;
 use tokio::io::{AsyncRead, AsyncWrite, Interest, Ready};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::RwLock;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -31,7 +29,7 @@ const VERSION: u8 = 1;
 /// Indicates that the client provided a key during the handshake
 const USE_CLIENT_KEY: u8 = 1;
 
-/// HKDF info for deriving the new keys
+/// HKDF info for rekeying
 const REKEY_INFO: &[u8] = b"secure-stream-rekey";
 
 /// HKDF info for deriving the key in one direction
@@ -40,46 +38,42 @@ const KEY_INFO_1: &[u8] = b"secure-stream";
 /// HKDF info for deriving the key in the other direction
 const KEY_INFO_2: &[u8] = b"the-other-side";
 
-/// Send and receive state are tracked independently so that a split stream's write
-/// half racing ahead cannot cause the read half to rekey at the wrong time.
+/// Single-direction crypto state.
 #[derive(ZeroizeOnDrop)]
-struct CryptoAlgorithmAndCounter<const REKEY_INTERVAL: u16> {
-    // Send direction
-    send_cipher: XChaCha20Poly1305,
-    send_key: [u8; 32], // Copy of the key used for rekeying
-    send_count: u16,
-    // Receive direction
-    recv_cipher: XChaCha20Poly1305,
-    recv_key: [u8; 32], // Copy of the key used for rekeying
-    recv_count: u16,
+struct DirectionalCrypto<const REKEY_INTERVAL: u16> {
+    /// XChaCha20-Poly1305 cipher with a 256-bit key.
+    cipher: XChaCha20Poly1305,
+
+    /// Copy of the key bytes used for rekeying.
+    key: [u8; 32],
+
+    /// Counter to trigger rekeying
+    count: u16,
 }
 
-impl<const REKEY_INTERVAL: u16> CryptoAlgorithmAndCounter<REKEY_INTERVAL> {
-    fn send_rekey(&mut self) -> Result<()> {
-        let hk = Hkdf::<Sha256>::new(None, &self.send_key);
-        let mut new_key = [0u8; 32];
-        hk.expand(REKEY_INFO, &mut new_key)
-            .map_err(|_| anyhow!("Rekey failed"))?;
-        self.send_cipher = XChaCha20Poly1305::new(Key::from_slice(&new_key));
-        self.send_key = new_key;
-        self.send_count = 0;
-        Ok(())
+impl<const REKEY_INTERVAL: u16> DirectionalCrypto<REKEY_INTERVAL> {
+    fn new(key: [u8; 32]) -> Self {
+        Self {
+            cipher: XChaCha20Poly1305::new(Key::from_slice(&key)),
+            key,
+            count: 0,
+        }
     }
 
-    fn rekey_recv(&mut self) -> Result<()> {
-        let hk = Hkdf::<Sha256>::new(None, &self.recv_key);
+    fn rekey(&mut self) -> Result<()> {
+        let hk = Hkdf::<Sha256>::new(None, &self.key);
         let mut new_key = [0u8; 32];
         hk.expand(REKEY_INFO, &mut new_key)
             .map_err(|_| anyhow!("Rekey failed"))?;
-        self.recv_cipher = XChaCha20Poly1305::new(Key::from_slice(&new_key));
-        self.recv_key = new_key;
-        self.recv_count = 0;
+        self.cipher = XChaCha20Poly1305::new(Key::from_slice(&new_key));
+        self.key = new_key;
+        self.count = 0;
         Ok(())
     }
 
     async fn recv<R: AsyncRead + Unpin>(&mut self, stream: &mut R) -> Result<Vec<u8>> {
-        if self.recv_count >= REKEY_INTERVAL {
-            self.rekey_recv()?;
+        if self.count >= REKEY_INTERVAL {
+            self.rekey()?;
         }
 
         let version = stream.read_u8().await?;
@@ -107,7 +101,7 @@ impl<const REKEY_INTERVAL: u16> CryptoAlgorithmAndCounter<REKEY_INTERVAL> {
         aad.extend_from_slice(&nonce_bytes);
 
         let plaintext = self
-            .recv_cipher
+            .cipher
             .decrypt(
                 nonce,
                 chacha20poly1305::aead::Payload {
@@ -117,13 +111,13 @@ impl<const REKEY_INTERVAL: u16> CryptoAlgorithmAndCounter<REKEY_INTERVAL> {
             )
             .map_err(|e| anyhow!("Decryption failed: {e}"))?;
 
-        self.recv_count += 1;
+        self.count += 1;
         Ok(plaintext)
     }
 
     async fn send<S: AsyncWrite + Unpin>(&mut self, stream: &mut S, data: &[u8]) -> Result<()> {
-        if self.send_count >= REKEY_INTERVAL {
-            self.send_rekey()?;
+        if self.count >= REKEY_INTERVAL {
+            self.rekey()?;
         }
 
         // Generate random 192-bit nonce
@@ -141,7 +135,7 @@ impl<const REKEY_INTERVAL: u16> CryptoAlgorithmAndCounter<REKEY_INTERVAL> {
         aad.extend_from_slice(&nonce_bytes);
 
         let encrypted = self
-            .send_cipher
+            .cipher
             .encrypt(
                 nonce,
                 chacha20poly1305::aead::Payload {
@@ -156,21 +150,15 @@ impl<const REKEY_INTERVAL: u16> CryptoAlgorithmAndCounter<REKEY_INTERVAL> {
         stream.write_all(&nonce_bytes).await?;
         stream.write_all(&encrypted).await?;
 
-        self.send_count += 1;
+        self.count += 1;
         Ok(())
-    }
-
-    #[inline]
-    #[allow(clippy::unused_self)]
-    const fn interval(&self) -> u16 {
-        REKEY_INTERVAL
     }
 }
 
 /// Write half of the encrypted stream
 pub struct EncryptedWrite<const REKEY_INTERVAL: u16> {
-    crypto: Arc<RwLock<CryptoAlgorithmAndCounter<REKEY_INTERVAL>>>,
     write: OwnedWriteHalf,
+    crypto: DirectionalCrypto<REKEY_INTERVAL>,
     /// The verified client identity, set by the server after a successful client-authenticated handshake.
     client_key: Option<VerifyingKey>,
 }
@@ -183,7 +171,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedWrite<REKEY_INTERVAL> {
     /// Network errors
     #[inline]
     pub async fn send(&mut self, data: &[u8]) -> Result<()> {
-        self.crypto.write().await.send(&mut self.write, data).await
+        self.crypto.send(&mut self.write, data).await
     }
 
     /// Returns the verified client identity, if the client authenticated during the handshake.
@@ -205,8 +193,8 @@ impl<const REKEY_INTERVAL: u16> EncryptedWrite<REKEY_INTERVAL> {
 
 /// Read half of the encrypted stream
 pub struct EncryptedRead<const REKEY_INTERVAL: u16> {
-    crypto: Arc<RwLock<CryptoAlgorithmAndCounter<REKEY_INTERVAL>>>,
     read: OwnedReadHalf,
+    crypto: DirectionalCrypto<REKEY_INTERVAL>,
 }
 
 impl<const REKEY_INTERVAL: u16> EncryptedRead<REKEY_INTERVAL> {
@@ -217,7 +205,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedRead<REKEY_INTERVAL> {
     /// Network errors
     #[inline]
     pub async fn recv(&mut self) -> Result<Vec<u8>> {
-        self.crypto.write().await.recv(&mut self.read).await
+        self.crypto.recv(&mut self.read).await
     }
 
     /// Encryption rekey interval by number of messages sent.
@@ -235,7 +223,8 @@ pub type DefaultEncryptedStream = EncryptedStream<1_000>;
 /// Encrypted socket
 pub struct EncryptedStream<const REKEY_INTERVAL: u16> {
     stream: TcpStream,
-    crypto: CryptoAlgorithmAndCounter<REKEY_INTERVAL>,
+    send_crypto: DirectionalCrypto<REKEY_INTERVAL>,
+    recv_crypto: DirectionalCrypto<REKEY_INTERVAL>,
     /// The verified client identity, set by the server after a successful client-authenticated handshake.
     client_key: Option<VerifyingKey>,
 }
@@ -298,14 +287,8 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
 
         Ok(Self {
             stream,
-            crypto: CryptoAlgorithmAndCounter {
-                send_cipher: XChaCha20Poly1305::new(Key::from_slice(&send_key)),
-                send_key,
-                send_count: 0,
-                recv_cipher: XChaCha20Poly1305::new(Key::from_slice(&recv_key)),
-                recv_key,
-                recv_count: 0,
-            },
+            send_crypto: DirectionalCrypto::new(send_key),
+            recv_crypto: DirectionalCrypto::new(recv_key),
             client_key: None,
         })
     }
@@ -362,14 +345,8 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
 
         Ok(Self {
             stream,
-            crypto: CryptoAlgorithmAndCounter {
-                send_cipher: XChaCha20Poly1305::new(Key::from_slice(&send_key)),
-                send_key,
-                send_count: 0,
-                recv_cipher: XChaCha20Poly1305::new(Key::from_slice(&recv_key)),
-                recv_key,
-                recv_count: 0,
-            },
+            send_crypto: DirectionalCrypto::new(send_key),
+            recv_crypto: DirectionalCrypto::new(recv_key),
             client_key,
         })
     }
@@ -381,7 +358,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
     /// Networking errors may result
     #[inline]
     pub async fn send(&mut self, data: &[u8]) -> Result<()> {
-        self.crypto.send(&mut self.stream, data).await
+        self.send_crypto.send(&mut self.stream, data).await
     }
 
     /// Receive data over the encrypted socket
@@ -391,7 +368,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
     /// Networking errors may result
     #[inline]
     pub async fn recv(&mut self) -> Result<Vec<u8>> {
-        self.crypto.recv(&mut self.stream).await
+        self.recv_crypto.recv(&mut self.stream).await
     }
 
     /// Close the connection
@@ -444,7 +421,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
         self.stream.readable().await
     }
 
-    /// Wait for the socket to become readable
+    /// Wait for the socket to become writable
     ///
     /// # Errors
     ///
@@ -484,27 +461,28 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
 
     /// Encryption rekey interval by number of messages sent.
     #[inline]
+    #[allow(clippy::unused_self)]
     pub const fn interval(&self) -> u16 {
-        self.crypto.interval()
+        REKEY_INTERVAL
     }
 
-    /// Split the encrypted stream into separate read and write halves
+    /// Split the encrypted stream into separate read and write halves.
+    /// Each half owns its crypto state independently — no shared lock.
     pub fn into_split(
         self,
     ) -> (
         EncryptedRead<REKEY_INTERVAL>,
         EncryptedWrite<REKEY_INTERVAL>,
     ) {
-        let crypto = Arc::new(RwLock::new(self.crypto));
-        let (read, write) = self.stream.into_split();
+        let (read_half, write_half) = self.stream.into_split();
         (
             EncryptedRead {
-                crypto: crypto.clone(),
-                read,
+                read: read_half,
+                crypto: self.recv_crypto,
             },
             EncryptedWrite {
-                crypto,
-                write,
+                write: write_half,
+                crypto: self.send_crypto,
                 client_key: self.client_key,
             },
         )
@@ -522,7 +500,7 @@ impl<const REKEY_INTERVAL: u16> std::fmt::Debug for EncryptedStream<REKEY_INTERV
 }
 
 #[inline]
-fn derive_key(shared: &[u8], info: &[u8]) -> [u8; 32] {
+fn derive_key(info: &[u8], shared: &[u8]) -> [u8; 32] {
     let hk = Hkdf::<Sha256>::new(None, shared);
     let mut key = [0u8; 32];
     hk.expand(info, &mut key).unwrap();
@@ -595,7 +573,7 @@ mod tests {
         }
 
         // We would rekey on the next exchange.
-        assert_eq!(link.crypto.send_count, link.interval());
+        assert_eq!(link.send_crypto.count, link.interval());
 
         handle.abort();
     }
@@ -650,7 +628,7 @@ mod tests {
         }
 
         // We would rekey on the next exchange.
-        assert_eq!(link.crypto.send_count, link.interval());
+        assert_eq!(link.send_crypto.count, link.interval());
         handle.abort();
     }
 
@@ -716,7 +694,7 @@ mod tests {
         }
 
         // We would rekey on the next exchange.
-        assert_eq!(write.crypto.read().await.send_count, write.interval());
+        assert_eq!(write.crypto.count, write.interval());
 
         read_process.abort();
         handle.abort();
@@ -786,7 +764,7 @@ mod tests {
         }
 
         // We would rekey on the next exchange.
-        assert_eq!(write.crypto.read().await.send_count, write.interval());
+        assert_eq!(write.crypto.count, write.interval());
 
         read_process.abort();
         handle.abort();
@@ -867,7 +845,7 @@ mod tests {
         link.send(b"test").await.unwrap();
         assert_eq!(link.recv().await.unwrap(), b"tset");
 
-        link.crypto.send_rekey().unwrap();
+        link.send_crypto.rekey().unwrap();
         let result = link.send(b"test").await;
         println!("EncryptedStream: send() with too early rekey: {result:?}");
 
