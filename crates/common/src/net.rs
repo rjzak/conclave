@@ -34,17 +34,23 @@ const USE_CLIENT_KEY: u8 = 1;
 /// HKDF info for deriving the new keys
 const REKEY_INFO: &[u8] = b"secure-stream-rekey";
 
+/// HKDF info for deriving the key in one direction
+const KEY_INFO_1: &[u8] = b"secure-stream";
+
+/// HKDF info for deriving the key in the other direction
+const KEY_INFO_2: &[u8] = b"the-other-side";
+
 /// Send and receive state are tracked independently so that a split stream's write
 /// half racing ahead cannot cause the read half to rekey at the wrong time.
 #[derive(ZeroizeOnDrop)]
 struct CryptoAlgorithmAndCounter<const REKEY_INTERVAL: u16> {
     // Send direction
     send_cipher: XChaCha20Poly1305,
-    send_key: [u8; 32],
+    send_key: [u8; 32], // Copy of the key used for rekeying
     send_count: u16,
     // Receive direction
     recv_cipher: XChaCha20Poly1305,
-    recv_key: [u8; 32],
+    recv_key: [u8; 32], // Copy of the key used for rekeying
     recv_count: u16,
 }
 
@@ -155,7 +161,7 @@ impl<const REKEY_INTERVAL: u16> CryptoAlgorithmAndCounter<REKEY_INTERVAL> {
     }
 
     #[inline]
-    #[allow(clippy::unused_self, unused)]
+    #[allow(clippy::unused_self)]
     const fn interval(&self) -> u16 {
         REKEY_INTERVAL
     }
@@ -188,9 +194,11 @@ impl<const REKEY_INTERVAL: u16> EncryptedWrite<REKEY_INTERVAL> {
         self.client_key.as_ref()
     }
 
+    /// Encryption rekey interval by number of messages sent.
     #[inline]
-    #[allow(clippy::unused_self, unused)]
-    const fn interval(&self) -> u16 {
+    #[must_use]
+    #[allow(clippy::unused_self)]
+    pub const fn interval(&self) -> u16 {
         REKEY_INTERVAL
     }
 }
@@ -212,9 +220,11 @@ impl<const REKEY_INTERVAL: u16> EncryptedRead<REKEY_INTERVAL> {
         self.crypto.write().await.recv(&mut self.read).await
     }
 
+    /// Encryption rekey interval by number of messages sent.
     #[inline]
-    #[allow(clippy::unused_self, unused)]
-    const fn interval(&self) -> u16 {
+    #[must_use]
+    #[allow(clippy::unused_self)]
+    pub const fn interval(&self) -> u16 {
         REKEY_INTERVAL
     }
 }
@@ -283,16 +293,17 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
             stream.write_u8(0).await?;
         }
 
-        let key = derive_key(shared.as_bytes());
+        let send_key = derive_key(KEY_INFO_1, shared.as_bytes());
+        let recv_key = derive_key(KEY_INFO_2, shared.as_bytes());
 
         Ok(Self {
             stream,
             crypto: CryptoAlgorithmAndCounter {
-                send_cipher: XChaCha20Poly1305::new(Key::from_slice(&key)),
-                send_key: key,
+                send_cipher: XChaCha20Poly1305::new(Key::from_slice(&send_key)),
+                send_key,
                 send_count: 0,
-                recv_cipher: XChaCha20Poly1305::new(Key::from_slice(&key)),
-                recv_key: key,
+                recv_cipher: XChaCha20Poly1305::new(Key::from_slice(&recv_key)),
+                recv_key,
                 recv_count: 0,
             },
             client_key: None,
@@ -346,16 +357,17 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
             None
         };
 
-        let key = derive_key(shared.as_bytes());
+        let recv_key = derive_key(KEY_INFO_1, shared.as_bytes());
+        let send_key = derive_key(KEY_INFO_2, shared.as_bytes());
 
         Ok(Self {
             stream,
             crypto: CryptoAlgorithmAndCounter {
-                send_cipher: XChaCha20Poly1305::new(Key::from_slice(&key)),
-                send_key: key,
+                send_cipher: XChaCha20Poly1305::new(Key::from_slice(&send_key)),
+                send_key,
                 send_count: 0,
-                recv_cipher: XChaCha20Poly1305::new(Key::from_slice(&key)),
-                recv_key: key,
+                recv_cipher: XChaCha20Poly1305::new(Key::from_slice(&recv_key)),
+                recv_key,
                 recv_count: 0,
             },
             client_key,
@@ -470,9 +482,9 @@ impl<const REKEY_INTERVAL: u16> EncryptedStream<REKEY_INTERVAL> {
         self.client_key.as_ref()
     }
 
+    /// Encryption rekey interval by number of messages sent.
     #[inline]
-    #[allow(unused)]
-    const fn interval(&self) -> u16 {
+    pub const fn interval(&self) -> u16 {
         self.crypto.interval()
     }
 
@@ -510,10 +522,10 @@ impl<const REKEY_INTERVAL: u16> std::fmt::Debug for EncryptedStream<REKEY_INTERV
 }
 
 #[inline]
-fn derive_key(shared: &[u8]) -> [u8; 32] {
+fn derive_key(shared: &[u8], info: &[u8]) -> [u8; 32] {
     let hk = Hkdf::<Sha256>::new(None, shared);
     let mut key = [0u8; 32];
-    hk.expand(b"secure-stream", &mut key).unwrap();
+    hk.expand(info, &mut key).unwrap();
     key
 }
 
@@ -559,7 +571,7 @@ mod tests {
                 link.send(&msg).await.expect("Server Send failed");
             }
         });
-        tokio::time::sleep(Duration::from_secs(1)).await; // Required by Linux
+        tokio::time::sleep(Duration::from_millis(10)).await; // Required by Linux
         assert!(!handle.is_finished());
         eprintln!("Server process created.");
 
@@ -613,7 +625,7 @@ mod tests {
                 link.send(&msg).await.expect("Server Send failed");
             }
         });
-        tokio::time::sleep(Duration::from_secs(1)).await; // Required by Linux
+        tokio::time::sleep(Duration::from_millis(10)).await; // Required by Linux
         assert!(!handle.is_finished());
         eprintln!("Server process created.");
 
@@ -668,7 +680,7 @@ mod tests {
                 link.send(&msg).await.expect("Server Send failed");
             }
         });
-        tokio::time::sleep(Duration::from_secs(1)).await; // Required by Linux
+        tokio::time::sleep(Duration::from_millis(10)).await; // Required by Linux
         assert!(!handle.is_finished());
         eprintln!("Server process created.");
 
@@ -737,7 +749,7 @@ mod tests {
                 link.send(&msg).await.expect("Server Send failed");
             }
         });
-        tokio::time::sleep(Duration::from_secs(1)).await; // Required by Linux
+        tokio::time::sleep(Duration::from_millis(10)).await; // Required by Linux
         assert!(!handle.is_finished());
         eprintln!("Server process created.");
 
@@ -783,7 +795,7 @@ mod tests {
     /// Ensure that `EncryptedStream` fails to connect if the server isn't using the correct key.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn wrong_key() {
-        const PORT: u16 = 12444;
+        const PORT: u16 = 12450;
         let (server_signing, _) = random_keypair();
         let (_, server_verifying) = random_keypair();
 
@@ -801,7 +813,7 @@ mod tests {
                 link.send(&msg).await.expect("Server Send failed");
             }
         });
-        tokio::time::sleep(Duration::from_secs(1)).await; // Required by Linux
+        tokio::time::sleep(Duration::from_millis(10)).await; // Required by Linux
         assert!(!handle.is_finished());
 
         let stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
@@ -823,7 +835,7 @@ mod tests {
     /// Make sure the `EncryptedStream` fails if one side rekeys when it's not supposed to.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn incorrect_rekey() {
-        const PORT: u16 = 12434;
+        const PORT: u16 = 12460;
         let (server_signing, server_verifying) = random_keypair();
 
         let handle = tokio::spawn(async move {
@@ -842,7 +854,7 @@ mod tests {
                 link.send(&msg).await.expect("Server Send failed");
             }
         });
-        tokio::time::sleep(Duration::from_secs(1)).await; // Required by Linux
+        tokio::time::sleep(Duration::from_millis(10)).await; // Required by Linux
         assert!(!handle.is_finished());
 
         let stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
