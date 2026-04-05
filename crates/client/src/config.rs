@@ -124,6 +124,9 @@ pub struct BookmarkEntry {
 
     /// Server's public key
     pub key: VerifyingKey,
+
+    /// Share local time (and timezone, which provides location information) with the server.
+    pub share_time: bool,
 }
 
 /// User's credential for a server

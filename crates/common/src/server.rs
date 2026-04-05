@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fmt::{Debug, Display};
-use std::time::Duration;
-
+use chrono::{DateTime, Local};
 pub use ed25519_dalek::VerifyingKey;
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use std::fmt::{Debug, Display};
+use std::time::Duration;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Response to protocol handshake
@@ -103,6 +103,9 @@ pub struct ConnectedUser {
 
     /// User's ID, if authenticated.
     pub user_id: Option<u32>,
+
+    /// User-provided local time, used to display timezone offsets.
+    pub timezone: Option<DateTime<Local>>,
 }
 
 /// Client to Server messages for encrypted connections
@@ -116,7 +119,7 @@ pub enum ServerMessagesEncrypted {
     /// User tries to authenticate
     /// Send the display name and the optional authentication message
     /// Server responds with Server Information if successful
-    ServerAuthenticationRequest((String, Option<UserAuthentication>)),
+    ServerAuthenticationRequest((String, Option<DateTime<Local>>, Option<UserAuthentication>)),
 
     /// Ask the server for a list of connected users
     ListConnectedUsersRequest,

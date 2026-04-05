@@ -284,6 +284,7 @@ impl Client {
         &self,
         server: &str,
         port: u16,
+        share_time: bool,
         display_name: String,
         auth: Option<UserAuthentication>,
         key: Option<VerifyingKey>,
@@ -324,6 +325,7 @@ impl Client {
 
         let login = postcard::to_stdvec(&ServerMessagesEncrypted::ServerAuthenticationRequest((
             display_name.clone(),
+            share_time.then(chrono::Local::now),
             auth,
         )))?;
         encrypted_stream.send(&login).await?;
@@ -342,6 +344,22 @@ impl Client {
             }
             ClientMessagesEncrypted::Error(error) => Err(error.into()),
             x => Err(anyhow!("Unexpected message from server: {x:?}")),
+        }
+    }
+
+    /// Call a closure for each Conclave connection
+    pub async fn map_connections(&self, f: impl Fn(&ConclaveConnection)) {
+        let conns = self.connection.write().await;
+        conns.iter().for_each(f);
+    }
+
+    /// Disconnects from all servers and remove the server connections from the list.
+    pub async fn disconnect_all(&self) {
+        let mut conns = self.connection.write().await;
+        for conn in conns.drain(..) {
+            if let Err(e) = conn.disconnect().await {
+                tracing::error!("Error disconnecting connection: {e:?}");
+            }
         }
     }
 }

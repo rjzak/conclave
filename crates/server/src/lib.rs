@@ -644,7 +644,7 @@ impl State {
                                 match stream.recv().await {
                                     Ok(bytes) => {
                                         match postcard::from_bytes::<ServerMessagesEncrypted>(&bytes) {
-                                            Ok(ServerMessagesEncrypted::ServerAuthenticationRequest((display_name, auth))) => {
+                                            Ok(ServerMessagesEncrypted::ServerAuthenticationRequest((display_name, user_local_time, auth))) => {
                                                 let user_id = if let Some(inner_auth) = auth {
                                                     if let Ok(user_id) = enc_clone.authenticate_user(inner_auth).await {
                                                         Some(user_id)
@@ -698,6 +698,7 @@ impl State {
                                                         admin: false,
                                                         connected_since: Duration::default(),
                                                         user_id,
+                                                        timezone: user_local_time,
                                                     }),
                                                     addr: Arc::new(client),
                                                 };

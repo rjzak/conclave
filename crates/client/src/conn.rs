@@ -4,10 +4,12 @@ use conclave_common::net::{DefaultEncryptedStream, EncryptedWrite};
 use conclave_common::server::{
     ClientMessagesEncrypted, ConnectedUser, ServerInformation, ServerMessagesEncrypted,
 };
+use std::ops::Not;
 
 use std::sync::Arc;
 
 use anyhow::Result;
+use chrono::{DateTime, Duration, Local};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
@@ -29,6 +31,9 @@ pub struct ConclaveConnection {
 
     /// Join handle for the task which listens for messages from the server
     pub(crate) listen_handle: Arc<JoinHandle<()>>,
+
+    /// When the connection was established
+    pub(crate) connection_time: DateTime<Local>,
 }
 
 impl ConclaveConnection {
@@ -46,6 +51,7 @@ impl ConclaveConnection {
             listen_handle: Arc::new(tokio::spawn(tokio::time::sleep(
                 tokio::time::Duration::from_millis(1),
             ))),
+            connection_time: Local::now(),
         };
 
         let conn_clone = conn.clone();
@@ -127,6 +133,26 @@ impl ConclaveConnection {
         let request = postcard::to_stdvec(&ServerMessagesEncrypted::KeepAlive)?;
         self.connection.write().await.send(&request).await?;
         Ok(())
+    }
+
+    /// When the connection was established, if still connected.
+    #[inline]
+    #[must_use]
+    pub fn connected_since(&self) -> Option<&DateTime<Local>> {
+        self.listen_handle
+            .is_finished()
+            .not()
+            .then_some(&self.connection_time)
+    }
+
+    /// Connection duration, if still connected.
+    #[inline]
+    #[must_use]
+    pub fn connection_duration(&self) -> Option<Duration> {
+        self.listen_handle
+            .is_finished()
+            .not()
+            .then_some(self.connection_time.signed_duration_since(Local::now()))
     }
 
     /// Send a disconnect message to the server and close the connection.

@@ -110,6 +110,7 @@ async fn integration() {
             .connect(
                 LOCALHOST.to_string().as_str(),
                 SERVER_PORT,
+                true,
                 "Unnamed".into(),
                 None,
                 None,
@@ -123,6 +124,7 @@ async fn integration() {
         .connect(
             LOCALHOST.to_string().as_str(),
             SERVER_PORT,
+            true,
             "admin".into(),
             Some(("admin".to_string(), password.to_string()).into()),
             None,
@@ -132,6 +134,14 @@ async fn integration() {
 
     let users = server.connected_users().await;
     assert_eq!(users.len(), 1);
+
+    client
+        .map_connections(|conn| {
+            assert!(conn.connection_duration().is_some());
+        })
+        .await;
+
+    client.disconnect_all().await;
 
     // Cleanup
     tracker_process.abort();

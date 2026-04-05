@@ -16,6 +16,7 @@ conclave-common = { workspace = true }
 anyhow = { workspace = true, features = ["std"] }
 bytes = { workspace = true, features = ["std"] }
 clap = { workspace = true, features = ["color", "derive", "help", "std", "suggestions"] }
+chrono = { workspace = true, features = ["clock", "serde", "std"] }
 dashmap = { workspace = true, features = ["inline"] }
 eframe = { workspace = true, features = ["accesskit", "default_fonts", "serde", "wayland", "wgpu", "x11"] }
 futures = { workspace = true, features = ["alloc", "std"] }
