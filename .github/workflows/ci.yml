@@ -6,6 +6,7 @@ permissions:
 jobs:
   test:
     runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -16,6 +17,10 @@ jobs:
           - runner: windows-latest
           - runner: windows-11-arm
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fe104658747b27e96e4f7e80cd0a94068e53901d # v2.16.1
+        with:
+          egress-policy: audit
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: rui314/setup-mold@725a8794d15fc7563f59595bd9556495c0564878 #v1
       - name: cargo test
@@ -23,7 +28,22 @@ jobs:
 
   fmt_clippy:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fe104658747b27e96e4f7e80cd0a94068e53901d # v2.16.1
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            crates.io:443
+            index.crates.io:443
+            github.com:443
+            githubapp.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            static.crates.io:443
+            static.rust-lang.org:443
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: rui314/setup-mold@725a8794d15fc7563f59595bd9556495c0564878 #v1
       - name: cargo fmt
@@ -33,7 +53,18 @@ jobs:
 
   check-spdx-headers:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fe104658747b27e96e4f7e80cd0a94068e53901d # v2.16.1
+        with:
+          egress-policy: audit
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+            githubapp.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: enarx/spdx@b5bfdd4410071bf058c8333d0e70020001524b6b # master
         with:
