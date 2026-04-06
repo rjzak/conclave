@@ -23,7 +23,6 @@ clap = { workspace = true, features = ["color", "derive", "help", "std", "sugges
 dashmap = { workspace = true, features = ["inline"] }
 eframe = { workspace = true, features = ["accesskit", "default_fonts", "wayland", "wgpu", "x11"], optional = true }
 futures = { workspace = true, features = ["alloc", "std"] }
-postcard = { workspace = true, features = ["alloc", "use-std"] }
 semver = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync"] }
 tokio-util = { workspace = true, features = ["codec"] }

@@ -181,7 +181,7 @@ impl Client {
     /// Errors may arise from network problems.
     pub async fn list_servers_from_trackers(&self) -> Result<HashSet<Advertise>> {
         let mut servers_set = HashSet::new();
-        let get_servers_bytes = postcard::to_stdvec(&TrackerProtocol::GetServers)?;
+        let get_servers_bytes = TrackerProtocol::GetServers.to_vec();
 
         info!(
             "Requesting servers list from {} trackers",
@@ -195,7 +195,7 @@ impl Client {
             framed.send(Bytes::from(get_servers_bytes.clone())).await?;
             if let Some(res_result) = framed.next().await {
                 let bytes = res_result?;
-                let resp: TrackerProtocol = postcard::from_bytes(&bytes)?;
+                let resp = TrackerProtocol::from_bytes(&bytes)?;
                 if let TrackerProtocol::ServersList(servers) = resp {
                     info!(
                         "Received {} servers list from tracker {}:{}: {:?}",

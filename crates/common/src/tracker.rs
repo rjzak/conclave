@@ -42,6 +42,29 @@ pub struct Advertise {
     pub key: VerifyingKey,
 }
 
+impl Advertise {
+    /// Serialize with Postcard.
+    ///
+    /// # Panics
+    ///
+    /// A panic should be impossible.
+    #[inline]
+    #[must_use]
+    pub fn to_vec(&self) -> Vec<u8> {
+        postcard::to_stdvec(&self).expect("`Advertise` failed to serialize")
+    }
+
+    /// Deserialize with Postcard.
+    ///
+    /// # Errors
+    ///
+    /// Postcard error is the data isn't valid or complete.
+    #[inline]
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, postcard::Error> {
+        postcard::from_bytes(bytes)
+    }
+}
+
 impl Hash for Advertise {
     fn hash<H: Hasher>(&self, state: &mut H) {
         // Only some fields should be considered for hashing, so that small changes do trigger
@@ -65,4 +88,27 @@ pub enum TrackerProtocol {
 
     /// List of servers response
     ServersList(Vec<Advertise>),
+}
+
+impl TrackerProtocol {
+    /// Serialize with Postcard.
+    ///
+    /// # Panics
+    ///
+    /// A panic should be impossible.
+    #[inline]
+    #[must_use]
+    pub fn to_vec(&self) -> Vec<u8> {
+        postcard::to_stdvec(&self).expect("`TrackerProtocol` failed to serialize")
+    }
+
+    /// Deserialize with Postcard.
+    ///
+    /// # Errors
+    ///
+    /// Postcard error is the data isn't valid or complete.
+    #[inline]
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, postcard::Error> {
+        postcard::from_bytes(bytes)
+    }
 }

@@ -98,18 +98,12 @@ impl<const DURATION_SECONDS: u64> State<DURATION_SECONDS> {
                 while let Some(result) = framed.next().await {
                     match result {
                         Ok(bytes) => {
-                            if let Ok(proto) = postcard::from_bytes(&bytes) {
+                            if let Ok(proto) = TrackerProtocol::from_bytes(&bytes) {
                                 match proto {
                                     TrackerProtocol::GetServers => {
                                         let response =
-                                            TrackerProtocol::ServersList(self_clone.servers());
-                                        let response = match postcard::to_allocvec(&response) {
-                                            Ok(b) => b,
-                                            Err(e) => {
-                                                tracing::error!("Serialization error: {e}");
-                                                continue;
-                                            }
-                                        };
+                                            TrackerProtocol::ServersList(self_clone.servers())
+                                                .to_vec();
                                         if let Err(e) = framed.send(Bytes::from(response)).await {
                                             tracing::error!("Response error: {e}");
                                         } else {

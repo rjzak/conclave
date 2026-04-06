@@ -588,13 +588,7 @@ impl State {
                         continue;
                     };
                     let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
-                    let serialized = match postcard::to_stdvec(&advert) {
-                        Ok(bytes) => bytes,
-                        Err(e) => {
-                            error!("Failed to serialize advertise message: {e}");
-                            continue;
-                        }
-                    };
+                    let serialized = advert.to_vec();
                     if let Err(e) = framed.send(Bytes::from(serialized)).await {
                         error!("Failed to send advertise message: {e}");
                     }
