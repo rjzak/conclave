@@ -297,14 +297,13 @@ impl Client {
 
             // Request key from the server
             eprintln!("Requesting key from server");
-            let key_request = ServerMessagesUnencrypted::KeyRequest;
-            let key_request = postcard::to_stdvec(&key_request)?;
+            let key_request = ServerMessagesUnencrypted::KeyRequest.to_vec();
             framed.send(Bytes::from(key_request)).await?;
 
             let (port, key) = if let Some(result) = framed.next().await {
                 eprintln!("Received key bytes from server");
                 let result = result?;
-                match postcard::from_bytes::<ClientMessagesUnencrypted>(&result) {
+                match ClientMessagesUnencrypted::from_bytes(&result) {
                     Ok(ClientMessagesUnencrypted::KeyResponse(key)) => key,
                     Ok(x) => return Err(anyhow!("Unexpected message from server: {x:?}")),
                     Err(e) => return Err(e.into()),
@@ -323,16 +322,17 @@ impl Client {
         let mut encrypted_stream = EncryptedStream::connect(stream, &key, None).await?;
         eprintln!("Client: EncryptedStream created");
 
-        let login = postcard::to_stdvec(&ServerMessagesEncrypted::ServerAuthenticationRequest((
+        let login = ServerMessagesEncrypted::ServerAuthenticationRequest((
             display_name.clone(),
             share_time.then(chrono::Local::now),
             auth,
-        )))?;
+        ))
+        .to_vec();
         encrypted_stream.send(&login).await?;
 
         eprintln!("Expecting information request");
         let server_info = encrypted_stream.recv().await?;
-        let server_info = postcard::from_bytes::<ClientMessagesEncrypted>(&server_info)?;
+        let server_info = ClientMessagesEncrypted::from_bytes(&server_info)?;
 
         match server_info {
             ClientMessagesEncrypted::ServerInformationResponse(server_info) => {
@@ -355,7 +355,7 @@ impl Client {
     }
 
     /// Call a closure for each Conclave connection
-    pub async fn map_connections(&self, f: impl Fn(&ConclaveConnection)) {
+    pub async fn map_connections(&self, f: impl FnMut(&ConclaveConnection)) {
         let conns = self.connection.write().await;
         conns.iter().for_each(f);
     }
@@ -365,7 +365,10 @@ impl Client {
         let mut conns = self.connection.write().await;
         for conn in conns.drain(..) {
             if let Err(e) = conn.disconnect().await {
-                tracing::error!("Error disconnecting connection: {e:?}");
+                tracing::error!(
+                    "Error disconnecting from {}: {e}",
+                    conn.server_info.read().await.name
+                );
             }
         }
     }

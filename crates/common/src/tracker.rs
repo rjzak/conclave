@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::hash::{Hash, Hasher};
-use std::time::Duration;
 
+use chrono::Duration;
 use ed25519_dalek::VerifyingKey;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 pub const RESPONSE: &[u8] = b"Tracker";
 
 /// One-minute expiration for a server's advertisement on a tracker.
-pub const SERVER_EXPIRATION: Duration = Duration::from_secs(60);
+pub const SERVER_EXPIRATION: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Tracker advertisement
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -50,6 +50,7 @@ impl Advertise {
     /// A panic should be impossible.
     #[inline]
     #[must_use]
+    #[track_caller]
     pub fn to_vec(&self) -> Vec<u8> {
         postcard::to_stdvec(&self).expect("`Advertise` failed to serialize")
     }
@@ -98,6 +99,7 @@ impl TrackerProtocol {
     /// A panic should be impossible.
     #[inline]
     #[must_use]
+    #[track_caller]
     pub fn to_vec(&self) -> Vec<u8> {
         postcard::to_stdvec(&self).expect("`TrackerProtocol` failed to serialize")
     }

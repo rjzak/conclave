@@ -65,7 +65,7 @@ impl ConclaveConnection {
                     }
                 };
 
-                let protocol: ClientMessagesEncrypted = match postcard::from_bytes(&data) {
+                let protocol = match ClientMessagesEncrypted::from_bytes(&data) {
                     Ok(protocol) => protocol,
                     Err(e) => {
                         tracing::error!("Error decoding encrypted message: {e:?}");
@@ -98,7 +98,7 @@ impl ConclaveConnection {
     ///
     /// Network errors are possible
     pub async fn update_server_info(&self) -> Result<()> {
-        let request = postcard::to_stdvec(&ServerMessagesEncrypted::ServerInformationRequest)?;
+        let request = ServerMessagesEncrypted::ServerInformationRequest.to_vec();
         self.connection.write().await.send(&request).await?;
         Ok(())
     }
@@ -114,7 +114,7 @@ impl ConclaveConnection {
     ///
     /// Network errors are possible
     pub async fn update_connected_users(&self) -> Result<()> {
-        let request = postcard::to_stdvec(&ServerMessagesEncrypted::ListConnectedUsersRequest)?;
+        let request = ServerMessagesEncrypted::ListConnectedUsersRequest.to_vec();
         self.connection.write().await.send(&request).await?;
         Ok(())
     }
@@ -130,7 +130,7 @@ impl ConclaveConnection {
     ///
     /// Network errors are possible
     pub async fn send_keep_alive(&self) -> Result<()> {
-        let request = postcard::to_stdvec(&ServerMessagesEncrypted::KeepAlive)?;
+        let request = ServerMessagesEncrypted::KeepAlive.to_vec();
         self.connection.write().await.send(&request).await?;
         Ok(())
     }
@@ -161,7 +161,7 @@ impl ConclaveConnection {
     ///
     /// Network errors are possible
     pub async fn disconnect(&self) -> Result<()> {
-        let request = postcard::to_stdvec(&ServerMessagesEncrypted::Disconnect)?;
+        let request = ServerMessagesEncrypted::Disconnect.to_vec();
         self.connection.write().await.send(&request).await?;
         self.listen_handle.abort();
         Ok(())

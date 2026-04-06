@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Duration, Local};
 pub use ed25519_dalek::VerifyingKey;
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use std::fmt::{Debug, Display};
-use std::time::Duration;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Response to protocol handshake
@@ -21,8 +19,30 @@ pub enum ServerMessagesUnencrypted {
     Disconnect,
 }
 
-/// Server to Client messages for unencrypted connections
+impl ServerMessagesUnencrypted {
+    /// Serialize with Postcard.
+    ///
+    /// # Panics
+    ///
+    /// A panic should be impossible.
+    #[inline]
+    #[must_use]
+    pub fn to_vec(&self) -> Vec<u8> {
+        postcard::to_stdvec(&self).expect("`ServerMessagesUnencrypted` failed to serialize")
+    }
 
+    /// Deserialize with Postcard.
+    ///
+    /// # Errors
+    ///
+    /// Postcard error is the data isn't valid or complete.
+    #[inline]
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, postcard::Error> {
+        postcard::from_bytes(bytes)
+    }
+}
+
+/// Server to Client messages for unencrypted connections
 #[derive(Debug, Deserialize, Serialize)]
 pub enum ClientMessagesUnencrypted {
     /// Server's response with the server's port and public key for encryption.
@@ -30,6 +50,30 @@ pub enum ClientMessagesUnencrypted {
 
     /// Drop the connection.
     Disconnect,
+}
+
+impl ClientMessagesUnencrypted {
+    /// Serialize with Postcard.
+    ///
+    /// # Panics
+    ///
+    /// A panic should be impossible.
+    #[inline]
+    #[must_use]
+    #[track_caller]
+    pub fn to_vec(&self) -> Vec<u8> {
+        postcard::to_stdvec(&self).expect("`ClientMessagesUnencrypted` failed to serialize")
+    }
+
+    /// Deserialize with Postcard.
+    ///
+    /// # Errors
+    ///
+    /// Postcard error is the data isn't valid or complete.
+    #[inline]
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, postcard::Error> {
+        postcard::from_bytes(bytes)
+    }
 }
 
 /// Server's information response, also used by the client to keep track
@@ -68,7 +112,7 @@ pub struct UserAuthentication {
     pub password: String,
 }
 
-impl Debug for UserAuthentication {
+impl std::fmt::Debug for UserAuthentication {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "UserAuthentication({})", self.username)
     }
@@ -131,6 +175,30 @@ pub enum ServerMessagesEncrypted {
     Disconnect,
 }
 
+impl ServerMessagesEncrypted {
+    /// Serialize with Postcard.
+    ///
+    /// # Panics
+    ///
+    /// A panic should be impossible.
+    #[inline]
+    #[must_use]
+    #[track_caller]
+    pub fn to_vec(&self) -> Vec<u8> {
+        postcard::to_stdvec(&self).expect("`ServerMessagesEncrypted` failed to serialize")
+    }
+
+    /// Deserialize with Postcard.
+    ///
+    /// # Errors
+    ///
+    /// Postcard error is the data isn't valid or complete.
+    #[inline]
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, postcard::Error> {
+        postcard::from_bytes(bytes)
+    }
+}
+
 /// Server to Client messages for encrypted connections
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Deserialize, Serialize)]
@@ -152,6 +220,30 @@ pub enum ClientMessagesEncrypted {
     Disconnect,
 }
 
+impl ClientMessagesEncrypted {
+    /// Serialize with Postcard.
+    ///
+    /// # Panics
+    ///
+    /// A panic should be impossible.
+    #[inline]
+    #[must_use]
+    #[track_caller]
+    pub fn to_vec(&self) -> Vec<u8> {
+        postcard::to_stdvec(&self).expect("`ClientMessagesEncrypted` failed to serialize")
+    }
+
+    /// Deserialize with Postcard.
+    ///
+    /// # Errors
+    ///
+    /// Postcard error is the data isn't valid or complete.
+    #[inline]
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, postcard::Error> {
+        postcard::from_bytes(bytes)
+    }
+}
+
 /// Server error responses
 #[derive(Debug, Deserialize, Serialize)]
 #[non_exhaustive]
@@ -163,7 +255,7 @@ pub enum ServerError {
     AuthenticationRequired,
 }
 
-impl Display for ServerError {
+impl std::fmt::Display for ServerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ServerError::AuthenticationFailed => write!(f, "Authentication failed"),
