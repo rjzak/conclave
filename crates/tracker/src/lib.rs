@@ -7,7 +7,7 @@
 #![deny(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
-use conclave_common::tracker::{Advertise, TrackerProtocol};
+use conclave_common::tracker::{Advertise, SignedServerList, TrackerProtocol};
 
 use std::fmt::{Debug, Display};
 use std::net::IpAddr;
@@ -19,6 +19,8 @@ use anyhow::Result;
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
+use pqcrypto_mldsa::mldsa87;
+use pqcrypto_mldsa::mldsa87_keypair;
 use semver::Version;
 use tokio::net::TcpListener;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
@@ -48,6 +50,12 @@ pub struct State<const DURATION_SECONDS: u64> {
 
     /// Whether the tracker is currently serving requests
     serving: Arc<AtomicBool>,
+
+    /// ML-DSA 87 private key
+    private_key: mldsa87::SecretKey,
+
+    /// ML-DSA 87 public key
+    public_key: mldsa87::PublicKey,
 }
 
 impl<const DURATION_SECONDS: u64> Clone for State<DURATION_SECONDS> {
@@ -58,20 +66,28 @@ impl<const DURATION_SECONDS: u64> Clone for State<DURATION_SECONDS> {
             port: self.port,
             queries: self.queries.clone(),
             serving: self.serving.clone(),
+            private_key: self.private_key,
+            public_key: self.public_key,
         }
     }
 }
+
+// TODO: Serialize, Deserialize tracker config to save the key
 
 impl<const DURATION_SECONDS: u64> State<DURATION_SECONDS> {
     /// Create a new Tracker object
     #[must_use]
     pub fn new(ip: IpAddr, port: u16) -> Self {
+        let (public_key, private_key) = mldsa87_keypair();
+
         Self {
             servers: Arc::new(DashMap::new()),
             ip,
             port,
             queries: Arc::new(AtomicU32::new(0)),
             serving: Arc::new(AtomicBool::new(false)),
+            public_key,
+            private_key,
         }
     }
 
@@ -100,10 +116,27 @@ impl<const DURATION_SECONDS: u64> State<DURATION_SECONDS> {
                         Ok(bytes) => {
                             if let Ok(proto) = TrackerProtocol::from_bytes(&bytes) {
                                 match proto {
-                                    TrackerProtocol::GetServers => {
+                                    TrackerProtocol::KeyRequest => {
                                         let response =
-                                            TrackerProtocol::ServersList(self_clone.servers())
+                                            TrackerProtocol::TrackerKey(self_clone.public_key)
                                                 .to_vec();
+                                        if let Err(e) = framed.send(Bytes::from(response)).await {
+                                            tracing::error!("Response error: {e}");
+                                        }
+                                    }
+                                    TrackerProtocol::GetServers => {
+                                        let servers = self_clone.servers();
+                                        let signature = mldsa87::sign(
+                                            &Advertise::servers_to_vec(&servers),
+                                            &self_clone.private_key,
+                                        );
+                                        let response =
+                                            TrackerProtocol::ServersList(SignedServerList {
+                                                servers,
+                                                version: VERSION.clone(),
+                                                signature,
+                                            })
+                                            .to_vec();
                                         if let Err(e) = framed.send(Bytes::from(response)).await {
                                             tracing::error!("Response error: {e}");
                                         } else {
@@ -123,7 +156,8 @@ impl<const DURATION_SECONDS: u64> State<DURATION_SECONDS> {
                                         };
                                         self_clone.servers.insert(server, SystemTime::now());
                                     }
-                                    TrackerProtocol::ServersList(_) => {}
+                                    TrackerProtocol::TrackerKey(_)
+                                    | TrackerProtocol::ServersList(_) => {}
                                 }
                             }
                         }

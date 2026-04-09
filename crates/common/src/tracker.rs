@@ -4,6 +4,8 @@ use std::hash::{Hash, Hasher};
 
 use chrono::Duration;
 use ed25519_dalek::VerifyingKey;
+use pqcrypto_mldsa::mldsa87;
+use pqcrypto_traits::sign::SignedMessage;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
@@ -64,6 +66,18 @@ impl Advertise {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, postcard::Error> {
         postcard::from_bytes(bytes)
     }
+
+    /// Serialize a list of servers with Postcard.
+    ///
+    /// # Panics
+    ///
+    /// A panic should be impossible.
+    #[inline]
+    #[must_use]
+    #[track_caller]
+    pub fn servers_to_vec(servers: &[Advertise]) -> Vec<u8> {
+        postcard::to_stdvec(servers).expect("`Advertise` failed to serialize")
+    }
 }
 
 impl Hash for Advertise {
@@ -77,18 +91,87 @@ impl Hash for Advertise {
     }
 }
 
+/// Signed list of servers known to the tracker
+#[derive(Clone, Deserialize, Serialize)]
+pub struct SignedServerList {
+    /// List of servers known to the tracker
+    pub servers: Vec<Advertise>,
+
+    /// Tracker version
+    pub version: Version,
+
+    /// Tracker's signature of the list
+    pub signature: pqcrypto_mldsa::mldsa87::SignedMessage,
+}
+
+impl SignedServerList {
+    /// Get the raw signature bytes
+    #[inline]
+    #[must_use]
+    pub fn signature_bytes(&self) -> &[u8] {
+        self.signature.as_bytes()
+    }
+
+    /// Verify the server list given the public key
+    #[inline]
+    #[must_use]
+    pub fn verify(&self, public_key: &mldsa87::PublicKey) -> bool {
+        let servers_bytes = Advertise::servers_to_vec(&self.servers);
+        servers_bytes == mldsa87::open(&self.signature, public_key).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for SignedServerList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignedServerList")
+            .field("servers", &self.servers)
+            .field("version", &self.version)
+            .field("signature", &self.signature.as_bytes())
+            .finish()
+    }
+}
+
 /// Tracker protocol messages
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 pub enum TrackerProtocol {
     /// When the client wants to get a list of servers
     GetServers,
+
+    /// When the client wants to get a tracker's public key
+    KeyRequest,
 
     /// When the server wishes to advertise itself
     AdvertiseServer(Advertise),
 
     /// List of servers response
-    ServersList(Vec<Advertise>),
+    ServersList(SignedServerList),
+
+    /// Tracker's public key
+    TrackerKey(mldsa87::PublicKey),
+}
+
+impl std::fmt::Debug for TrackerProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use pqcrypto_traits::sign::PublicKey;
+
+        match self {
+            TrackerProtocol::GetServers => f.write_str("TrackerProtocol::GetServers"),
+            TrackerProtocol::KeyRequest => f.write_str("TrackerProtocol::KeyRequest"),
+            TrackerProtocol::AdvertiseServer(server) => f
+                .debug_struct("TrackerProtocol::AdvertiseServer")
+                .field("server", server)
+                .finish(),
+            TrackerProtocol::ServersList(list) => f
+                .debug_struct("TrackerProtocol::ServersList")
+                .field("list", list)
+                .finish(),
+            TrackerProtocol::TrackerKey(key) => f
+                .debug_struct("TrackerProtocol::TrackerKey")
+                .field("key", &hex::encode(key.as_bytes()))
+                .finish(),
+        }
+    }
 }
 
 impl TrackerProtocol {

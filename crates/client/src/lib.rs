@@ -34,7 +34,7 @@ use semver::Version;
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
-use tracing::{info, trace};
+use tracing::{info, trace, warn};
 
 /// Conclave version
 pub static VERSION: LazyLock<Version> =
@@ -75,6 +75,9 @@ impl Default for Client {
         Self::new(DEFAULT_FILE).unwrap()
     }
 }
+
+// TODO: Save and reuse tracker keys
+// TODO: Only ask for tracker key once
 
 impl Client {
     /// Create a client from a path to a config file. If the file doesn't exist,
@@ -192,6 +195,21 @@ impl Client {
             let stream = TcpStream::connect(format!("{}:{}", tracker.0, tracker.1)).await?;
             let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
 
+            framed
+                .send(Bytes::from(TrackerProtocol::KeyRequest.to_vec()))
+                .await?;
+            let tracker_key = if let Some(res_result) = framed.next().await {
+                let bytes = res_result?;
+                let resp = TrackerProtocol::from_bytes(&bytes)?;
+                if let TrackerProtocol::TrackerKey(key) = resp {
+                    Some(key)
+                } else {
+                    return Err(anyhow!("Unexpected response from tracker: {bytes:?}"));
+                }
+            } else {
+                None
+            };
+
             framed.send(Bytes::from(get_servers_bytes.clone())).await?;
             if let Some(res_result) = framed.next().await {
                 let bytes = res_result?;
@@ -199,12 +217,33 @@ impl Client {
                 if let TrackerProtocol::ServersList(servers) = resp {
                     info!(
                         "Received {} servers list from tracker {}:{}: {:?}",
-                        servers.len(),
+                        servers.servers.len(),
                         tracker.0,
                         tracker.1,
                         servers
+                            .servers
+                            .iter()
+                            .map(|s| s.name.clone())
+                            .collect::<Vec<_>>()
                     );
-                    servers_set.extend(servers.into_iter());
+                    if servers.version > *VERSION {
+                        warn!(
+                            "Tracker version {} is newer than client version {}",
+                            servers.version, *VERSION
+                        );
+                    }
+                    if let Some(tracker_key) = tracker_key
+                        && servers.verify(&tracker_key)
+                    {
+                        servers_set.extend(servers.servers.into_iter());
+                    } else if tracker_key.is_none() {
+                        warn!(
+                            "Received server list from tracker but the tracker key was not provided."
+                        );
+                        servers_set.extend(servers.servers.into_iter());
+                    } else {
+                        warn!("Received server list from tracker but the signature was invalid.");
+                    }
                 }
             }
         }
@@ -312,7 +351,7 @@ impl Client {
                 return Err(anyhow!("Server did not respond with key"));
             };
 
-            info!("Received key from server: {key:?}");
+            info!("Received key from server");
             (port, key)
         };
 

@@ -983,7 +983,7 @@ mod tests {
                 let resp = TrackerProtocol::from_bytes(&bytes).unwrap();
                 match resp {
                     TrackerProtocol::ServersList(servers) => {
-                        assert!(servers.is_empty());
+                        assert!(servers.servers.is_empty());
                     }
                     _ => panic!("Unexpected response type"),
                 }
@@ -1023,8 +1023,9 @@ mod tests {
                 let resp = TrackerProtocol::from_bytes(&bytes).unwrap();
                 match resp {
                     TrackerProtocol::ServersList(servers) => {
-                        assert_eq!(servers.len(), 1);
-                        assert_eq!(servers[0].name, "Testing");
+                        assert_eq!(servers.servers.len(), 1);
+                        assert_eq!(servers.servers[0].name, "Testing");
+                        assert!(!servers.signature_bytes().is_empty());
                     }
                     _ => panic!("Unexpected response type"),
                 }
@@ -1047,7 +1048,7 @@ mod tests {
                 let resp = TrackerProtocol::from_bytes(&bytes).unwrap();
                 match resp {
                     TrackerProtocol::ServersList(servers) => {
-                        assert!(servers.is_empty());
+                        assert!(servers.servers.is_empty());
                     }
                     _ => panic!("Unexpected response type"),
                 }
