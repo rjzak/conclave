@@ -11,17 +11,19 @@ use conclave_common::tracker::{Advertise, SignedServerList, TrackerProtocol};
 
 use std::fmt::{Debug, Display};
 use std::net::IpAddr;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use pqcrypto_mldsa::mldsa87;
 use pqcrypto_mldsa::mldsa87_keypair;
 use semver::Version;
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
@@ -30,6 +32,87 @@ pub static VERSION: LazyLock<Version> =
     LazyLock::new(|| Version::parse(env!("CONCLAVE_VERSION")).unwrap());
 
 const TRACKER_SERVER_EXPIRATION: u64 = conclave_common::tracker::SERVER_EXPIRATION.as_secs();
+
+/// Tracker keypair
+#[derive(Serialize, Deserialize)]
+pub struct Keys {
+    /// ML-DSA 87 private key
+    private_key: mldsa87::SecretKey,
+
+    /// ML-DSA 87 public key
+    public_key: mldsa87::PublicKey,
+}
+
+impl Default for Keys {
+    fn default() -> Self {
+        let (public_key, private_key) = mldsa87_keypair();
+        Self {
+            private_key,
+            public_key,
+        }
+    }
+}
+
+impl Keys {
+    /// Load keys from a file path, using the file extension to determine the format.
+    ///
+    /// Supported formats:
+    /// - JSON
+    /// - TOML
+    ///
+    /// # Errors
+    ///
+    /// Returns errors if the file cannot be read, doesn't have an extension, or isn't JSON or TOML.
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let contents = std::fs::read_to_string(&path)?;
+
+        match path.as_ref().extension() {
+            Some(ext) if ext == "toml" => Ok(toml::from_str(&contents)?),
+            Some(ext) if ext == "json" => Ok(serde_json::from_str(&contents)?),
+            Some(ext) => bail!("Unsupported file format {}", ext.display()),
+            None => bail!("File {} has no extension", path.as_ref().display()),
+        }
+    }
+
+    /// Save the keys to a file path, using the file extension to determine the format
+    ///
+    /// Supported formats:
+    /// - JSON
+    /// - TOML
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be written or if the extension doesn't indicate a JSON or TOML format.
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let contents = match path.as_ref().extension() {
+            Some(ext) if ext == "toml" => toml::to_string(&self)?,
+            Some(ext) if ext == "json" => serde_json::to_string(&self)?,
+            Some(ext) => bail!("Unsupported file format {}", ext.display()),
+            None => bail!("File {} has no extension", path.as_ref().display()),
+        };
+        std::fs::write(path, contents)?;
+        Ok(())
+    }
+
+    /// Load or save keys. If a file exists, it's loaded. Otherwise keys are generated and saved.
+    ///
+    /// Supported formats:
+    /// - JSON
+    /// - TOML
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be written or if the extension doesn't indicate a JSON or TOML format.
+    pub fn load_or_save<P: AsRef<Path>>(path: P) -> Result<Self> {
+        if path.as_ref().exists() {
+            Self::load(path)
+        } else {
+            let keys = Keys::default();
+            keys.save(path)?;
+            Ok(keys)
+        }
+    }
+}
 
 /// Tracker state with server record duration of one minute
 pub type DefaultState = State<TRACKER_SERVER_EXPIRATION>;
@@ -72,22 +155,19 @@ impl<const DURATION_SECONDS: u64> Clone for State<DURATION_SECONDS> {
     }
 }
 
-// TODO: Serialize, Deserialize tracker config to save the key
-
 impl<const DURATION_SECONDS: u64> State<DURATION_SECONDS> {
     /// Create a new Tracker object
     #[must_use]
-    pub fn new(ip: IpAddr, port: u16) -> Self {
-        let (public_key, private_key) = mldsa87_keypair();
-
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn new(ip: IpAddr, port: u16, keys: Keys) -> Self {
         Self {
             servers: Arc::new(DashMap::new()),
             ip,
             port,
             queries: Arc::new(AtomicU32::new(0)),
             serving: Arc::new(AtomicBool::new(false)),
-            public_key,
-            private_key,
+            public_key: keys.public_key,
+            private_key: keys.private_key,
         }
     }
 

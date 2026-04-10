@@ -21,6 +21,7 @@ dashmap = { workspace = true, features = ["inline"] }
 eframe = { workspace = true, features = ["accesskit", "default_fonts", "serde", "wayland", "wgpu", "x11"] }
 futures = { workspace = true, features = ["alloc", "std"] }
 home = { workspace = true }
+pqcrypto-mldsa = { workspace = true, features = ["serde"] }
 semver = { workspace = true }
 serde = { workspace = true, features = ["alloc", "derive", "std"] }
 serde_json = { workspace = true, features = ["std"] }

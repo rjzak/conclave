@@ -26,7 +26,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail, ensure};
 use bytes::Bytes;
 use dashmap::DashSet;
 use futures::{SinkExt, StreamExt};
@@ -34,7 +34,7 @@ use semver::Version;
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
-use tracing::{info, trace, warn};
+use tracing::{error, info, trace, warn};
 
 /// Conclave version
 pub static VERSION: LazyLock<Version> =
@@ -49,7 +49,7 @@ pub struct Client {
     connection: Arc<RwLock<Vec<ConclaveConnection>>>,
 
     /// Trackers, domain or IP and port
-    trackers: Arc<DashSet<(String, u16)>>,
+    trackers: Arc<DashSet<Tracker>>,
 
     /// Config file path
     config_file: Mutex<PathBuf>,
@@ -98,13 +98,7 @@ impl Client {
 
         Ok(Self {
             connection: Arc::new(RwLock::new(Vec::new())),
-            trackers: Arc::new(
-                config
-                    .trackers
-                    .iter()
-                    .map(|t| (t.server.clone(), t.port))
-                    .collect(),
-            ),
+            trackers: Arc::new(DashSet::from_iter(config.trackers.clone())),
             config_file: Mutex::new(path),
             config: Arc::new(RwLock::new(config)),
         })
@@ -131,22 +125,42 @@ impl Client {
     ///
     /// Returns errors if there is a database error
     pub async fn add_tracker(&self, tracker_name: &str, tracker_port: u16) -> Result<()> {
-        if self
-            .trackers
-            .insert((String::from(tracker_name), tracker_port))
-        {
+        let stream = TcpStream::connect(format!("{tracker_name}:{tracker_port}")).await?;
+        let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+
+        framed
+            .send(Bytes::from(TrackerProtocol::KeyRequest.to_vec()))
+            .await?;
+        let tracker_key = if let Some(res_result) = framed.next().await {
+            let bytes = res_result?;
+            let resp = TrackerProtocol::from_bytes(&bytes)?;
+            if let TrackerProtocol::TrackerKey(key) = resp {
+                key
+            } else {
+                return Err(anyhow!("Unexpected response from tracker: {bytes:?}"));
+            }
+        } else {
+            bail!("Tracker did not respond with key");
+        };
+
+        let tracker_entry = Tracker {
+            name: tracker_name.to_string(),
+            port: tracker_port,
+            key: tracker_key,
+        };
+
+        if let Some(existing_entry) = self.trackers.get(&tracker_entry) {
+            trace!("Tracker {tracker_name}:{tracker_port} already known");
+            ensure!(existing_entry.key == tracker_key, "Tracker key mismatch!");
+        } else {
             trace!(
                 "Adding tracker {}:{} to database",
                 tracker_name, tracker_port
             );
-            self.config.write().await.trackers.push(Tracker {
-                server: tracker_name.to_string(),
-                port: tracker_port,
-            });
+            self.trackers.insert(tracker_entry.clone());
+            self.config.write().await.trackers.push(tracker_entry);
             let config_file = self.config_file.lock().await;
             self.config.read().await.save(&*config_file)?;
-        } else {
-            trace!("Tracker {}:{} already known", tracker_name, tracker_port);
         }
 
         Ok(())
@@ -158,8 +172,16 @@ impl Client {
     ///
     /// Returns errors if there is a database error
     pub async fn remove_tracker(&self, tracker_name: &str, tracker_port: u16) -> Result<()> {
-        self.trackers
-            .remove(&(String::from(tracker_name), tracker_port));
+        let mut to_remove = None;
+        for tracker in self.trackers.iter() {
+            if tracker.name == tracker_name && tracker.port == tracker_port {
+                to_remove = Some(tracker.clone());
+                break;
+            }
+        }
+        if let Some(to_remove) = to_remove {
+            self.trackers.remove(&to_remove);
+        }
 
         let tracker_name = String::from(tracker_name);
         trace!(
@@ -170,7 +192,7 @@ impl Client {
             .write()
             .await
             .trackers
-            .retain(|t| t.server != tracker_name || t.port != tracker_port);
+            .retain(|t| t.name != tracker_name || t.port != tracker_port);
         let config_file = self.config_file.lock().await;
         self.config.read().await.save(&*config_file)?;
 
@@ -191,24 +213,9 @@ impl Client {
             self.trackers.len()
         );
         for tracker in self.trackers.iter() {
-            info!("Connecting to tracker {}:{}", tracker.0, tracker.1);
-            let stream = TcpStream::connect(format!("{}:{}", tracker.0, tracker.1)).await?;
+            info!("Connecting to tracker {}:{}", tracker.name, tracker.port);
+            let stream = TcpStream::connect(format!("{}:{}", tracker.name, tracker.port)).await?;
             let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
-
-            framed
-                .send(Bytes::from(TrackerProtocol::KeyRequest.to_vec()))
-                .await?;
-            let tracker_key = if let Some(res_result) = framed.next().await {
-                let bytes = res_result?;
-                let resp = TrackerProtocol::from_bytes(&bytes)?;
-                if let TrackerProtocol::TrackerKey(key) = resp {
-                    Some(key)
-                } else {
-                    return Err(anyhow!("Unexpected response from tracker: {bytes:?}"));
-                }
-            } else {
-                None
-            };
 
             framed.send(Bytes::from(get_servers_bytes.clone())).await?;
             if let Some(res_result) = framed.next().await {
@@ -218,8 +225,8 @@ impl Client {
                     info!(
                         "Received {} servers list from tracker {}:{}: {:?}",
                         servers.servers.len(),
-                        tracker.0,
-                        tracker.1,
+                        tracker.name,
+                        tracker.port,
                         servers
                             .servers
                             .iter()
@@ -232,14 +239,7 @@ impl Client {
                             servers.version, *VERSION
                         );
                     }
-                    if let Some(tracker_key) = tracker_key
-                        && servers.verify(&tracker_key)
-                    {
-                        servers_set.extend(servers.servers.into_iter());
-                    } else if tracker_key.is_none() {
-                        warn!(
-                            "Received server list from tracker but the tracker key was not provided."
-                        );
+                    if servers.verify(&tracker.key) {
                         servers_set.extend(servers.servers.into_iter());
                     } else {
                         warn!("Received server list from tracker but the signature was invalid.");
@@ -377,10 +377,9 @@ impl Client {
             ClientMessagesEncrypted::ServerInformationResponse(server_info) => {
                 eprintln!("Received server information");
                 if server_info.version > *VERSION {
-                    tracing::warn!(
+                    warn!(
                         "Server version {} is newer than client version {}",
-                        server_info.version,
-                        *VERSION
+                        server_info.version, *VERSION
                     );
                 }
                 let conn = ConclaveConnection::new(encrypted_stream, server_info, &display_name);
@@ -404,7 +403,7 @@ impl Client {
         let mut conns = self.connection.write().await;
         for conn in conns.drain(..) {
             if let Err(e) = conn.disconnect().await {
-                tracing::error!(
+                error!(
                     "Error disconnecting from {}: {e}",
                     conn.server_info.read().await.name
                 );

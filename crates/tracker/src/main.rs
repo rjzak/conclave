@@ -5,9 +5,9 @@
 #![deny(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
-use std::net::IpAddr;
-
 use clap::Parser;
+use std::net::IpAddr;
+use std::path::PathBuf;
 
 pub const VERSION: &str = concat!(
     "v",
@@ -26,6 +26,9 @@ struct Args {
 
     /// Port to listen on
     port: u16,
+
+    /// Path to the key file. Creates keys if the file doesn't exist.
+    keys: PathBuf,
 }
 
 #[cfg(not(feature = "gui"))]
@@ -33,7 +36,13 @@ struct Args {
 async fn main() -> anyhow::Result<std::process::ExitCode> {
     conclave_common::init_tracing();
     let args = Args::parse();
-    let tracker = conclave_tracker::DefaultState::new(args.ip, args.port);
+    let keys = conclave_tracker::Keys::load_or_save(&args.keys)
+        .map_err(|e| {
+            eprintln!("Error loading keys: {e}");
+            std::process::exit(1);
+        })
+        .unwrap();
+    let tracker = conclave_tracker::DefaultState::new(args.ip, args.port, keys);
     println!("Listening on {}:{}", args.ip, args.port);
     tracker.serve().await?;
     Ok(std::process::ExitCode::SUCCESS)
@@ -44,7 +53,13 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 fn main() -> eframe::Result {
     conclave_common::init_tracing();
     let args = Args::parse();
-    let tracker = conclave_tracker::DefaultState::new(args.ip, args.port);
+    let keys = conclave_tracker::Keys::load_or_save(&args.keys)
+        .map_err(|e| {
+            eprintln!("Error loading keys: {e}");
+            std::process::exit(1);
+        })
+        .unwrap();
+    let tracker = conclave_tracker::DefaultState::new(args.ip, args.port, keys);
     println!("Listening on {}:{}", args.ip, args.port);
 
     let rt = tokio::runtime::Builder::new_multi_thread()

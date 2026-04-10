@@ -960,7 +960,8 @@ mod tests {
         conclave_common::init_tracing();
 
         let version = env!("CARGO_PKG_VERSION").parse().unwrap();
-        let state = conclave_tracker::State::<15>::new(IpAddr::V4(Ipv4Addr::LOCALHOST), PORT);
+        let keys = conclave_tracker::Keys::default();
+        let state = conclave_tracker::State::<15>::new(IpAddr::V4(Ipv4Addr::LOCALHOST), PORT, keys);
         let (_server_signing, server_verifying) = random_keypair();
 
         let state_clone = state.clone();

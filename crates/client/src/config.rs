@@ -5,6 +5,7 @@ use conclave_common::server::VerifyingKey;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
+use pqcrypto_mldsa::mldsa87;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -94,13 +95,41 @@ impl ClientConfig {
 }
 
 /// Tracker listing entry
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 pub struct Tracker {
     /// Domain or IP address of the tracker
-    pub server: String,
+    pub name: String,
 
     /// Port of the tracker
     pub port: u16,
+
+    /// Tracker's public key
+    #[zeroize(skip)]
+    pub key: mldsa87::PublicKey,
+}
+
+impl std::fmt::Debug for Tracker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tracker")
+            .field("server", &self.name)
+            .field("port", &self.port)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Eq for Tracker {}
+
+impl PartialEq for Tracker {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.port == other.port
+    }
+}
+
+impl std::hash::Hash for Tracker {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.port.hash(state);
+    }
 }
 
 /// Server bookmark entry
