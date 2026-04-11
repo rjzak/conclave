@@ -30,6 +30,7 @@ use anyhow::{Result, anyhow, bail, ensure};
 use bytes::Bytes;
 use dashmap::DashSet;
 use futures::{SinkExt, StreamExt};
+use mdns_sd::{ServiceDaemon, ServiceEvent};
 use semver::Version;
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock};
@@ -410,4 +411,121 @@ impl Client {
             }
         }
     }
+}
+
+/// Local Conclave servers discovered by Multicast DNS
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DiscoveredServer {
+    /// Server name
+    pub name: String,
+
+    /// Server's description
+    pub description: String,
+
+    /// Server host: domain or IP address
+    pub host: String,
+
+    /// Server port
+    pub port: u16,
+
+    /// Server's public key
+    pub key: VerifyingKey,
+
+    /// Server's Conclave version
+    pub version: Version,
+}
+
+/// Discover local Conclave servers using Multicast DNS
+///
+/// # Errors
+///
+/// Returns a networking error
+pub fn discover_servers() -> Result<Vec<DiscoveredServer>> {
+    use base64::Engine;
+
+    const MAX_ITERS: usize = 5;
+
+    let mdns = ServiceDaemon::new()?;
+
+    // Use a set as we will likely get the same server multiple times
+    let mut servers = HashSet::new();
+    let receiver = mdns.browse(conclave_common::MDNS_NAME)?;
+
+    let mut counter = 0;
+    while let Ok(event) = receiver.recv() {
+        if let ServiceEvent::ServiceResolved(resolved) = event {
+            let host = resolved.host.replace(".local.", "");
+            let key = if let Some(key) = resolved.txt_properties.get(conclave_common::MDNS_KEY) {
+                let Ok(key) = base64::engine::general_purpose::STANDARD.decode(key.val_str())
+                else {
+                    error!("Server key failed base64 decoding");
+                    continue;
+                };
+                if key.len() != 32 {
+                    error!("Invalid key length: {}", key.len());
+                    continue;
+                }
+                let mut key_array = [0u8; 32];
+                key_array.copy_from_slice(&key);
+                let Ok(key) = VerifyingKey::from_bytes(&key_array) else {
+                    error!("Server key failed to be parsed");
+                    continue;
+                };
+                key
+            } else {
+                error!("Server did not provide a key");
+                continue;
+            };
+
+            let version =
+                if let Some(version) = resolved.txt_properties.get(conclave_common::MDNS_VERSION) {
+                    let Ok(version) = Version::parse(version.val_str()) else {
+                        error!("Server version failed Semver parsing");
+                        continue;
+                    };
+                    version
+                } else {
+                    error!("Server did not provide a version");
+                    continue;
+                };
+
+            if version > *VERSION {
+                warn!(
+                    "Server version {version} is newer than client version {}",
+                    *VERSION
+                );
+            }
+
+            let description = if let Some(description) = resolved
+                .txt_properties
+                .get(conclave_common::MDNS_DESCRIPTION)
+            {
+                description.val_str().to_string()
+            } else {
+                error!("Server did not provide a description");
+                continue;
+            };
+
+            let server = DiscoveredServer {
+                host,
+                key,
+                version,
+                description,
+                port: resolved.port,
+                name: resolved.fullname.replace(conclave_common::MDNS_NAME, ""),
+            };
+
+            servers.insert(server);
+        }
+        counter += 1;
+        if counter > MAX_ITERS {
+            break;
+        }
+    }
+
+    if mdns.shutdown().is_err() {
+        // Pass
+    }
+
+    Ok(servers.into_iter().collect())
 }

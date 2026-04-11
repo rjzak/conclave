@@ -47,6 +47,7 @@ async fn integration() {
         Some("localhost".into()),
         SERVER_PORT,
         SERVER_PORT + 1,
+        false,
         server_db,
     )
     .unwrap();

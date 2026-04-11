@@ -31,11 +31,12 @@ use bytes::Bytes;
 use chrono::{DateTime, Duration, Local, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use futures::{SinkExt, StreamExt};
+use mdns_sd::{ServiceDaemon, ServiceInfo};
 use semver::Version;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
-use tracing::{error, info, warn};
+use tracing::{error, info, trace, warn};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -125,6 +126,9 @@ pub struct State {
     /// Whether the server is currently serving requests
     serving: Arc<AtomicBool>,
 
+    /// Advertising via Multicast DNS
+    mdns: Option<ServiceDaemon>,
+
     /// Show the log window
     #[cfg(feature = "gui")]
     log: bool,
@@ -161,6 +165,11 @@ impl State {
     /// # Errors
     ///
     /// An error results if the database creation fails, including inability to write to the provided file path.
+    ///
+    /// # Panics
+    ///
+    /// Panics if Multicast DNS is requested and fails to start
+    #[allow(clippy::too_many_arguments)]
     pub fn new<P: AsRef<Path>>(
         name: String,
         description: String,
@@ -168,6 +177,7 @@ impl State {
         advertised_domain: Option<String>,
         unc_port: u16,
         enc_port: u16,
+        mdns: bool,
         sqlite_path: P,
     ) -> Result<(Self, Zeroizing<String>)> {
         ensure!(
@@ -240,6 +250,7 @@ impl State {
                 connections: Arc::new(RwLock::new(Vec::new())),
                 total_visits: Arc::new(AtomicU32::new(0)),
                 serving: Arc::new(AtomicBool::new(false)),
+                mdns: mdns.then(|| ServiceDaemon::new().expect("Failed to start Multicast DNS")),
                 #[cfg(feature = "gui")]
                 log: false,
                 #[cfg(feature = "gui")]
@@ -256,10 +267,15 @@ impl State {
     /// # Errors
     ///
     /// An error results if the database can't be read.
+    ///
+    /// # Panics
+    ///
+    /// Panics if Multicast DNS is requested and fails to start
     pub fn load<P: AsRef<Path>>(
         ip: IpAddr,
         enc_port: u16,
         unc_port: u16,
+        mdns: bool,
         sqlite_path: P,
     ) -> Result<Self> {
         ensure!(
@@ -362,6 +378,7 @@ impl State {
             connections: Arc::new(RwLock::new(Vec::new())),
             total_visits: Arc::new(AtomicU32::new(0)),
             serving: Arc::new(AtomicBool::new(false)),
+            mdns: mdns.then(|| ServiceDaemon::new().expect("Failed to start Multicast DNS")),
             #[cfg(feature = "gui")]
             log: false,
             #[cfg(feature = "gui")]
@@ -619,6 +636,38 @@ impl State {
         self.advertise_trackers()?;
         self.serving.store(true, Ordering::Relaxed);
         let self_clone = self.clone();
+
+        if let Some(mdns) = &self_clone.mdns {
+            use base64::Engine;
+
+            let host_name = format!("{}.local.", self_clone.ip);
+            let key_encoded =
+                base64::engine::general_purpose::STANDARD.encode(self_clone.public_key);
+            let properties = [
+                (conclave_common::MDNS_VERSION, VERSION.to_string()),
+                (
+                    conclave_common::MDNS_DESCRIPTION,
+                    self_clone.description.clone(),
+                ),
+                (conclave_common::MDNS_KEY, key_encoded),
+            ];
+            let service = {
+                let mut service = ServiceInfo::new(
+                    conclave_common::MDNS_NAME,
+                    &self_clone.name,
+                    &host_name,
+                    self_clone.ip,
+                    self_clone.enc_port,
+                    &properties[..],
+                )?;
+                if self_clone.ip.is_unspecified() {
+                    service = service.enable_addr_auto();
+                }
+                service
+            };
+            trace!("Registering MDNS service...");
+            mdns.register(service)?;
+        }
 
         tokio::spawn(async move {
             self_clone.serve_encrypted().await;

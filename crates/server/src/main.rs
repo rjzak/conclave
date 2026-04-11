@@ -70,13 +70,23 @@ struct Run {
     /// Database file path
     #[arg(short, long, default_value = DEFAULT_DATABASE)]
     config: PathBuf,
+
+    /// Advertise this server via Multicast DNS
+    #[arg(short, long)]
+    mdns: bool,
 }
 
 async fn common_main(args: Args) -> Result<State> {
     let run = match args {
         Args::Admin(admin) => {
             // These ports don't matter as we won't use them
-            let state = State::load(IpAddr::V4(Ipv4Addr::LOCALHOST), 9998, 9999, &admin.config)?;
+            let state = State::load(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                9998,
+                9999,
+                false,
+                &admin.config,
+            )?;
             match &admin.action {
                 AdminActions::ResetAdminPassword => {
                     let password = Password::new()
@@ -94,7 +104,7 @@ async fn common_main(args: Args) -> Result<State> {
     let enc_port = run.enc_port.unwrap_or(run.unc_port + 1);
 
     Ok(if run.config.exists() {
-        State::load(run.ip, enc_port, run.unc_port, &run.config)?
+        State::load(run.ip, enc_port, run.unc_port, run.mdns, &run.config)?
     } else {
         let (state, mut password) = State::new(
             "Conclave".into(),
@@ -103,6 +113,7 @@ async fn common_main(args: Args) -> Result<State> {
             run.domain,
             enc_port,
             run.unc_port,
+            run.mdns,
             run.config,
         )?;
 

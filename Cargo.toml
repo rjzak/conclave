@@ -13,6 +13,7 @@ conclave-tracker = { path = "crates/tracker", version = "0.0", default-features 
 anyhow = { version = "1.0.102", default-features = false }
 argon2 = { version = "0.5.3", default-features = false }
 async-sqlite = { version = "0.5.7", default-features = false }
+base64 = { version = "0.22.1", default-features = false }
 bytes = { version = "1.11.1", default-features = false }
 chacha20poly1305 = { version = "0.10.1", default-features = false }
 chrono = { version = "0.4.44", default-features = false }
@@ -25,6 +26,7 @@ futures = { version = "0.3.32", default-features = false }
 hex = { version = "0.4.3", default-features = false }
 hkdf = { version = "0.13.0", default-features = false }
 home = { version = "0.5.12", default-features = false }
+mdns-sd = { version = "0.19.0", default-features = false }
 pqcrypto-mldsa = { version = "0.1.2", default-features = false }
 pqcrypto-mlkem = { version = "0.1.1", default-features = false }
 pqcrypto-traits = { version = "0.3.5", default-features = false }
