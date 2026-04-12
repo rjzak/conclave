@@ -902,6 +902,7 @@ dependencies = [
  "hex",
  "mdns-sd",
  "semver",
+ "tempdir",
  "tokio",
  "tokio-util",
  "tracing",

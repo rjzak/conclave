@@ -638,33 +638,7 @@ impl State {
         let self_clone = self.clone();
 
         if let Some(mdns) = &self_clone.mdns {
-            use base64::Engine;
-
-            let host_name = format!("{}.local.", self_clone.ip);
-            let key_encoded =
-                base64::engine::general_purpose::STANDARD.encode(self_clone.public_key);
-            let properties = [
-                (conclave_common::MDNS_VERSION, VERSION.to_string()),
-                (
-                    conclave_common::MDNS_DESCRIPTION,
-                    self_clone.description.clone(),
-                ),
-                (conclave_common::MDNS_KEY, key_encoded),
-            ];
-            let service = {
-                let mut service = ServiceInfo::new(
-                    conclave_common::MDNS_NAME,
-                    &self_clone.name,
-                    &host_name,
-                    self_clone.ip,
-                    self_clone.enc_port,
-                    &properties[..],
-                )?;
-                if self_clone.ip.is_unspecified() {
-                    service = service.enable_addr_auto();
-                }
-                service
-            };
+            let service = self_clone.mdns_service_info()?;
             trace!("Registering MDNS service...");
             mdns.register(service)?;
         }
@@ -909,6 +883,32 @@ impl State {
             .map(|conn| (*conn.user).clone())
             .collect()
     }
+
+    fn mdns_service_info(&self) -> mdns_sd::Result<ServiceInfo> {
+        use base64::Engine;
+
+        let host_name = format!("{}.local.", self.ip);
+        let key_encoded = base64::engine::general_purpose::STANDARD.encode(self.public_key);
+        let properties = [
+            (conclave_common::MDNS_VERSION, VERSION.to_string()),
+            (conclave_common::MDNS_DESCRIPTION, self.description.clone()),
+            (conclave_common::MDNS_KEY, key_encoded),
+        ];
+
+        let mut service = ServiceInfo::new(
+            conclave_common::MDNS_NAME,
+            &self.name,
+            &host_name,
+            self.ip,
+            self.enc_port,
+            &properties[..],
+        )?;
+        if self.ip.is_unspecified() {
+            service = service.enable_addr_auto();
+        }
+
+        Ok(service)
+    }
 }
 
 #[cfg(feature = "gui")]
@@ -1107,5 +1107,73 @@ mod tests {
         assert!(state.servers().servers.is_empty());
 
         tracker.abort();
+    }
+
+    // Convert from properties key/value pairs to DNS TXT record content
+    // Lightly adapted from https://github.com/keepsimple1/mdns-sd/blob/d5f906028c45b15e1ce8ee9edd4b05a51c35fb3a/src/service_info.rs#L895
+    fn encode_txt<'a>(properties: impl Iterator<Item = &'a mdns_sd::TxtProperty>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for prop in properties {
+            let mut s = prop.key().as_bytes().to_vec();
+            if let Some(v) = &prop.val() {
+                s.extend(b"=");
+                s.extend(*v);
+            }
+
+            // Property that exceed the length are truncated
+            let sz: u8 = s.len().try_into().unwrap_or_else(|_| {
+                panic!(
+                    "Property {} is too long, greater than 255 bytes",
+                    prop.key()
+                );
+            });
+
+            // TXT uses (Length,Value) format for each property,
+            // i.e. the first byte is the length.
+            bytes.push(sz);
+            bytes.extend(s);
+        }
+        if bytes.is_empty() {
+            bytes.push(0);
+        }
+        bytes
+    }
+
+    #[test]
+    fn mdns_advertisement() {
+        conclave_common::init_tracing();
+
+        let tempdir = tempdir::TempDir::new("conclave_testing").unwrap();
+        let server_db = tempdir
+            .path()
+            .join(format!("testing_server_{}.db", uuid::Uuid::new_v4()));
+
+        let (state, _) = crate::State::new(
+            "Testing Server 123".into(),
+            "Testing Description my super cool Conclave server!!!!!!!!!!".into(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            Some("myserver.example.com".into()),
+            1010,
+            1011,
+            true,
+            server_db,
+        )
+        .unwrap();
+
+        let service_info = state.mdns_service_info().unwrap();
+        let properties = service_info.get_properties();
+
+        let mut properties_total = 0;
+        for property in properties.iter() {
+            println!("{property} size:{}", property.to_string().len());
+            assert!(!property.to_string().is_empty());
+            assert!(property.to_string().len() < 255);
+            properties_total += property.to_string().len();
+        }
+        println!("Total properties size: {properties_total}");
+
+        let dns_record = encode_txt(properties.iter());
+        println!("DNS record size: {}", dns_record.len());
+        assert!(dns_record.len() < 512);
     }
 }
