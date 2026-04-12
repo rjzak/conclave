@@ -101,10 +101,29 @@ pub struct SignedServerList {
     pub version: Version,
 
     /// Tracker's signature of the list
-    pub signature: pqcrypto_mldsa::mldsa87::SignedMessage,
+    pub signature: mldsa87::SignedMessage,
 }
 
 impl SignedServerList {
+    /// Create a signed server list
+    #[inline]
+    #[must_use]
+    pub fn new(
+        servers: Vec<Advertise>,
+        version: Version,
+        private_key: &mldsa87::SecretKey,
+    ) -> Self {
+        let mut servers_bytes = Advertise::servers_to_vec(&servers);
+        servers_bytes.extend(version.to_string().as_bytes());
+        let signature = mldsa87::sign(&servers_bytes, private_key);
+
+        Self {
+            servers,
+            version,
+            signature,
+        }
+    }
+
     /// Get the raw signature bytes
     #[inline]
     #[must_use]
@@ -116,7 +135,8 @@ impl SignedServerList {
     #[inline]
     #[must_use]
     pub fn verify(&self, public_key: &mldsa87::PublicKey) -> bool {
-        let servers_bytes = Advertise::servers_to_vec(&self.servers);
+        let mut servers_bytes = Advertise::servers_to_vec(&self.servers);
+        servers_bytes.extend(self.version.to_string().as_bytes());
         servers_bytes == mldsa87::open(&self.signature, public_key).unwrap_or_default()
     }
 }

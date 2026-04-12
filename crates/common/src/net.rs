@@ -23,6 +23,9 @@ use tokio::{
 };
 use zeroize::ZeroizeOnDrop;
 
+/// Default rekey interval (in messages)
+pub const DEFAULT_REKEY_INTERVAL: u16 = 1000;
+
 /// Protocol version
 const VERSION: u8 = 1;
 
@@ -218,7 +221,7 @@ impl<const REKEY_INTERVAL: u16> EncryptedRead<REKEY_INTERVAL> {
 }
 
 /// Default `EncryptedStream`
-pub type DefaultEncryptedStream = EncryptedStream<1_000>;
+pub type DefaultEncryptedStream = EncryptedStream<DEFAULT_REKEY_INTERVAL>;
 
 /// Encrypted socket
 pub struct EncryptedStream<const REKEY_INTERVAL: u16> {

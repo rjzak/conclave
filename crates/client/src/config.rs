@@ -30,7 +30,7 @@ pub fn default_config_path() -> Result<PathBuf> {
 }
 
 /// Client configuration
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct ClientConfig {
     /// Default display name to use when connecting to servers
     pub default_display_name: String,
@@ -95,7 +95,7 @@ impl ClientConfig {
 }
 
 /// Tracker listing entry
-#[derive(Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct Tracker {
     /// Domain or IP address of the tracker
     pub name: String,
@@ -104,7 +104,10 @@ pub struct Tracker {
     pub port: u16,
 
     /// Tracker's public key
-    #[zeroize(skip)]
+    #[serde(
+        serialize_with = "conclave_common::serde::serialize_mldsa_public_key",
+        deserialize_with = "conclave_common::serde::deserialize_mldsa_public_key"
+    )]
     pub key: mldsa87::PublicKey,
 }
 
@@ -153,10 +156,15 @@ pub struct BookmarkEntry {
     pub auth: Option<UserAuth>,
 
     /// Server's public key
+    #[serde(
+        serialize_with = "conclave_common::serde::serialize_dalek_public_key",
+        deserialize_with = "conclave_common::serde::deserialize_dalek_public_key"
+    )]
     #[zeroize(skip)]
     pub key: VerifyingKey,
 
     /// Share local time (and timezone, which provides location information) with the server.
+    #[serde(default)]
     pub share_time: bool,
 }
 

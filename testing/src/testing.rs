@@ -99,7 +99,7 @@ async fn integration() {
     assert_eq!(client.list_servers_from_trackers().await.unwrap().len(), 1);
 
     eprintln!("Tracker: querying for server(s)");
-    let tracked_servers = tracker.servers();
+    let tracked_servers = tracker.servers().servers;
     assert_eq!(tracked_servers.len(), 1);
     assert_eq!(tracked_servers[0].name, "Conclave Server");
     assert_eq!(

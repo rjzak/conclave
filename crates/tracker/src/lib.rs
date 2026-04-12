@@ -37,9 +37,17 @@ const TRACKER_SERVER_EXPIRATION: u64 = conclave_common::tracker::SERVER_EXPIRATI
 #[derive(Serialize, Deserialize)]
 pub struct Keys {
     /// ML-DSA 87 private key
+    #[serde(
+        serialize_with = "conclave_common::serde::serialize_mldsa_private_key",
+        deserialize_with = "conclave_common::serde::deserialize_mldsa_private_key"
+    )]
     private_key: mldsa87::SecretKey,
 
     /// ML-DSA 87 public key
+    #[serde(
+        serialize_with = "conclave_common::serde::serialize_mldsa_public_key",
+        deserialize_with = "conclave_common::serde::deserialize_mldsa_public_key"
+    )]
     public_key: mldsa87::PublicKey,
 }
 
@@ -134,11 +142,8 @@ pub struct State<const DURATION_SECONDS: u64> {
     /// Whether the tracker is currently serving requests
     serving: Arc<AtomicBool>,
 
-    /// ML-DSA 87 private key
-    private_key: mldsa87::SecretKey,
-
-    /// ML-DSA 87 public key
-    public_key: mldsa87::PublicKey,
+    /// ML-DSA 87 keypair
+    keys: Arc<Keys>,
 }
 
 impl<const DURATION_SECONDS: u64> Clone for State<DURATION_SECONDS> {
@@ -149,8 +154,7 @@ impl<const DURATION_SECONDS: u64> Clone for State<DURATION_SECONDS> {
             port: self.port,
             queries: self.queries.clone(),
             serving: self.serving.clone(),
-            private_key: self.private_key,
-            public_key: self.public_key,
+            keys: self.keys.clone(),
         }
     }
 }
@@ -166,8 +170,7 @@ impl<const DURATION_SECONDS: u64> State<DURATION_SECONDS> {
             port,
             queries: Arc::new(AtomicU32::new(0)),
             serving: Arc::new(AtomicBool::new(false)),
-            public_key: keys.public_key,
-            private_key: keys.private_key,
+            keys: Arc::new(keys),
         }
     }
 
@@ -198,25 +201,16 @@ impl<const DURATION_SECONDS: u64> State<DURATION_SECONDS> {
                                 match proto {
                                     TrackerProtocol::KeyRequest => {
                                         let response =
-                                            TrackerProtocol::TrackerKey(self_clone.public_key)
+                                            TrackerProtocol::TrackerKey(self_clone.keys.public_key)
                                                 .to_vec();
                                         if let Err(e) = framed.send(Bytes::from(response)).await {
                                             tracing::error!("Response error: {e}");
                                         }
                                     }
                                     TrackerProtocol::GetServers => {
-                                        let servers = self_clone.servers();
-                                        let signature = mldsa87::sign(
-                                            &Advertise::servers_to_vec(&servers),
-                                            &self_clone.private_key,
-                                        );
                                         let response =
-                                            TrackerProtocol::ServersList(SignedServerList {
-                                                servers,
-                                                version: VERSION.clone(),
-                                                signature,
-                                            })
-                                            .to_vec();
+                                            TrackerProtocol::ServersList(self_clone.servers())
+                                                .to_vec();
                                         if let Err(e) = framed.send(Bytes::from(response)).await {
                                             tracing::error!("Response error: {e}");
                                         } else {
@@ -267,7 +261,7 @@ impl<const DURATION_SECONDS: u64> State<DURATION_SECONDS> {
     /// List of servers advertised by the tracker, and expire old ones
     #[must_use]
     #[tracing::instrument]
-    pub fn servers(&self) -> Vec<Advertise> {
+    pub fn servers(&self) -> SignedServerList {
         let mut to_remove = Vec::new();
 
         for entry in self.servers.iter() {
@@ -283,10 +277,13 @@ impl<const DURATION_SECONDS: u64> State<DURATION_SECONDS> {
             self.servers.remove(&server);
         }
 
-        self.servers
+        let servers = self
+            .servers
             .iter()
             .map(|e| e.key().clone())
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+
+        SignedServerList::new(servers, VERSION.clone(), &self.keys.private_key)
     }
 
     /// Tracker's expiration duration for server advertisements

@@ -13,6 +13,11 @@ pub mod tracker;
 /// Networking utilities
 pub mod net;
 
+/// Serialization and deserialization utilities, only to be used to load/save some cryptographic keys
+/// as hex-encoded bytes for use with config files. Any cryptographic materials sent over the network
+/// will be as raw bytes using the respective crates' default `serde` implementations.
+pub mod serde;
+
 /// Data structures for communicating with the server
 pub mod server;
 

@@ -18,7 +18,8 @@ use tokio::task::JoinHandle;
 #[derive(Clone)]
 pub struct ConclaveConnection {
     /// Encrypted connection to a server
-    pub(crate) connection: Arc<RwLock<EncryptedWrite<1000>>>,
+    pub(crate) connection:
+        Arc<RwLock<EncryptedWrite<{ conclave_common::net::DEFAULT_REKEY_INTERVAL }>>>,
 
     /// Server information
     pub(crate) server_info: Arc<RwLock<ServerInformation>>,

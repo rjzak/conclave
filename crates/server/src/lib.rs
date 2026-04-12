@@ -1081,7 +1081,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(state.servers().len(), 1);
+        assert_eq!(state.servers().servers.len(), 1);
 
         tokio::time::sleep(state.duration()).await;
 
@@ -1104,7 +1104,7 @@ mod tests {
                 }
             }
         }
-        assert!(state.servers().is_empty());
+        assert!(state.servers().servers.is_empty());
 
         tracker.abort();
     }
