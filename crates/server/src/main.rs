@@ -59,13 +59,9 @@ struct Run {
     #[arg(short, long)]
     domain: Option<String>,
 
-    /// Port to listen on for unencrypted connections
+    /// Port to listen on for connections
     #[arg(short, long)]
-    unc_port: u16,
-
-    /// Port to listen on for encrypted connections, for use the unencrypted port plus one
-    #[arg(short, long)]
-    enc_port: Option<u16>,
+    port: u16,
 
     /// Database file path
     #[arg(short, long, default_value = DEFAULT_DATABASE)]
@@ -80,13 +76,7 @@ async fn common_main(args: Args) -> Result<State> {
     let run = match args {
         Args::Admin(admin) => {
             // These ports don't matter as we won't use them
-            let state = State::load(
-                IpAddr::V4(Ipv4Addr::LOCALHOST),
-                9998,
-                9999,
-                false,
-                &admin.config,
-            )?;
+            let state = State::load(IpAddr::V4(Ipv4Addr::LOCALHOST), 9998, false, &admin.config)?;
             match &admin.action {
                 AdminActions::ResetAdminPassword => {
                     let password = Password::new()
@@ -101,18 +91,15 @@ async fn common_main(args: Args) -> Result<State> {
         Args::Run(run) => run,
     };
 
-    let enc_port = run.enc_port.unwrap_or(run.unc_port + 1);
-
     Ok(if run.config.exists() {
-        State::load(run.ip, enc_port, run.unc_port, run.mdns, &run.config)?
+        State::load(run.ip, run.port, run.mdns, &run.config)?
     } else {
         let (state, mut password) = State::new(
             "Conclave".into(),
             "Conclave server".into(),
             run.ip,
             run.domain,
-            enc_port,
-            run.unc_port,
+            run.port,
             run.mdns,
             run.config,
         )?;

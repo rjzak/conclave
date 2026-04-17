@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 pub const RESPONSE: &[u8] = b"Tracker";
 
 /// One-minute expiration for a server's advertisement on a tracker.
-pub const SERVER_EXPIRATION: std::time::Duration = std::time::Duration::from_secs(60);
+pub const SERVER_EXPIRATION: std::time::Duration = std::time::Duration::from_mins(1);
 
 /// Tracker advertisement
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]

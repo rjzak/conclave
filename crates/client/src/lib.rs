@@ -17,8 +17,7 @@ use crate::config::{BookmarkEntry, ClientConfig, Tracker};
 use crate::conn::ConclaveConnection;
 use conclave_common::net::EncryptedStream;
 use conclave_common::server::{
-    ClientMessagesEncrypted, ClientMessagesUnencrypted, ServerMessagesEncrypted,
-    ServerMessagesUnencrypted, UserAuthentication, VerifyingKey,
+    ClientMessagesEncrypted, ServerMessagesEncrypted, UserAuthentication, VerifyingKey, unencrypted,
 };
 use conclave_common::tracker::{Advertise, TrackerProtocol};
 
@@ -241,7 +240,7 @@ impl Client {
                         );
                     }
                     if servers.verify(&tracker.key) {
-                        servers_set.extend(servers.servers.into_iter());
+                        servers_set.extend(servers.servers);
                     } else {
                         warn!("Received server list from tracker but the signature was invalid.");
                     }
@@ -329,38 +328,38 @@ impl Client {
         auth: Option<UserAuthentication>,
         key: Option<VerifyingKey>,
     ) -> Result<usize> {
-        let (port, key) = if let Some(key) = key {
-            (port, key)
+        let key = if let Some(key) = key {
+            key
         } else {
-            let stream = TcpStream::connect(format!("{server}:{port}")).await?;
-            let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+            let mut stream = TcpStream::connect(format!("{server}:{port}")).await?;
 
-            // Request key from the server
-            eprintln!("Requesting key from server");
-            let key_request = ServerMessagesUnencrypted::KeyRequest.to_vec();
-            framed.send(Bytes::from(key_request)).await?;
+            info!("Requesting key from server");
+            unencrypted::ClientToServer::KeyRequest
+                .send(&mut stream)
+                .await?;
 
-            let (port, key) = if let Some(result) = framed.next().await {
-                eprintln!("Received key bytes from server");
-                let result = result?;
-                match ClientMessagesUnencrypted::from_bytes(&result) {
-                    Ok(ClientMessagesUnencrypted::KeyResponse(key)) => key,
-                    Ok(x) => return Err(anyhow!("Unexpected message from server: {x:?}")),
-                    Err(e) => return Err(e.into()),
-                }
-            } else {
-                return Err(anyhow!("Server did not respond with key"));
+            let key_response = unencrypted::ServerToClient::receive(&mut stream).await?;
+            let unencrypted::ServerToClient::PublicKey(key) = key_response else {
+                bail!("Server did not provide a public key")
             };
 
             info!("Received key from server");
-            (port, key)
+            key
         };
 
-        eprintln!("Re-connecting to the server on port {port}");
-        let stream = TcpStream::connect(format!("{server}:{port}")).await?;
-        eprintln!("Creating encrypted stream to server");
+        let mut stream = TcpStream::connect(format!("{server}:{port}")).await?;
+
+        info!(
+            "Connecting to the server on port {port} with key {:?}",
+            key.as_bytes()
+        );
+        unencrypted::ClientToServer::GoCrypto
+            .send(&mut stream)
+            .await?;
+
+        info!("Creating encrypted stream to server");
         let mut encrypted_stream = EncryptedStream::connect(stream, &key, None).await?;
-        eprintln!("Client: EncryptedStream created");
+        info!("Client: EncryptedStream created");
 
         let login = ServerMessagesEncrypted::ServerAuthenticationRequest((
             display_name.clone(),
@@ -370,7 +369,7 @@ impl Client {
         .to_vec();
         encrypted_stream.send(&login).await?;
 
-        eprintln!("Expecting information request");
+        info!("Expecting information request");
         let server_info = encrypted_stream.recv().await?;
         let server_info = ClientMessagesEncrypted::from_bytes(&server_info)?;
 

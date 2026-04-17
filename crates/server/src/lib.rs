@@ -10,8 +10,8 @@
 use conclave_common::URL_PROTOCOL;
 use conclave_common::net::{DefaultEncryptedStream, random_keypair};
 use conclave_common::server::{
-    ClientMessagesEncrypted, ClientMessagesUnencrypted, ConnectedUser, ServerError,
-    ServerInformation, ServerMessagesEncrypted, ServerMessagesUnencrypted, UserAuthentication,
+    ClientMessagesEncrypted, ConnectedUser, ServerError, ServerInformation,
+    ServerMessagesEncrypted, UserAuthentication, unencrypted,
 };
 use conclave_common::tracker::Advertise;
 use conclave_common::tracker::TrackerProtocol::AdvertiseServer;
@@ -30,7 +30,7 @@ use async_sqlite::{Client, ClientBuilder, JournalMode};
 use bytes::Bytes;
 use chrono::{DateTime, Duration, Local, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use futures::{SinkExt, StreamExt};
+use futures::SinkExt;
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use semver::Version;
 use tokio::net::{TcpListener, TcpStream};
@@ -93,11 +93,8 @@ pub struct State {
     /// Listening IP
     ip: IpAddr,
 
-    /// Unencrypted Server port
-    unc_port: u16,
-
-    /// Encrypted Server port
-    enc_port: u16,
+    /// Server port
+    port: u16,
 
     /// When the server started
     started: DateTime<Utc>,
@@ -169,14 +166,12 @@ impl State {
     /// # Panics
     ///
     /// Panics if Multicast DNS is requested and fails to start
-    #[allow(clippy::too_many_arguments)]
     pub fn new<P: AsRef<Path>>(
         name: String,
         description: String,
         ip: IpAddr,
         advertised_domain: Option<String>,
-        unc_port: u16,
-        enc_port: u16,
+        port: u16,
         mdns: bool,
         sqlite_path: P,
     ) -> Result<(Self, Zeroizing<String>)> {
@@ -223,9 +218,9 @@ impl State {
         }
 
         let url = if let Some(advertised_domain) = advertised_domain {
-            format!("{URL_PROTOCOL}{advertised_domain}:{unc_port}")
+            format!("{URL_PROTOCOL}{advertised_domain}:{port}")
         } else {
-            format!("{URL_PROTOCOL}{ip}:{unc_port}")
+            format!("{URL_PROTOCOL}{ip}:{port}")
         };
 
         let sqlite = ClientBuilder::new()
@@ -239,8 +234,7 @@ impl State {
                 description,
                 url,
                 ip,
-                enc_port,
-                unc_port,
+                port,
                 started: Local::now().to_utc(),
                 public_key,
                 private_key,
@@ -271,13 +265,7 @@ impl State {
     /// # Panics
     ///
     /// Panics if Multicast DNS is requested and fails to start
-    pub fn load<P: AsRef<Path>>(
-        ip: IpAddr,
-        enc_port: u16,
-        unc_port: u16,
-        mdns: bool,
-        sqlite_path: P,
-    ) -> Result<Self> {
+    pub fn load<P: AsRef<Path>>(ip: IpAddr, port: u16, mdns: bool, sqlite_path: P) -> Result<Self> {
         ensure!(
             sqlite_path.as_ref().exists(),
             "Database file does not exist"
@@ -349,9 +337,9 @@ impl State {
             }
 
             let url = if let Some(advertised_domain) = advertised_domain {
-                format!("{URL_PROTOCOL}{advertised_domain}:{unc_port}")
+                format!("{URL_PROTOCOL}{advertised_domain}:{port}")
             } else {
-                format!("{URL_PROTOCOL}{ip}:{unc_port}")
+                format!("{URL_PROTOCOL}{ip}:{port}")
             };
 
             (name, description, private_key, public_key, url, trackers)
@@ -367,8 +355,7 @@ impl State {
             description,
             url,
             ip,
-            unc_port,
-            enc_port,
+            port,
             started: Local::now().to_utc(),
             public_key,
             private_key,
@@ -631,8 +618,6 @@ impl State {
     #[allow(clippy::too_many_lines)]
     #[tracing::instrument]
     pub async fn serve(&self) -> Result<()> {
-        let server_key_port =
-            ClientMessagesUnencrypted::KeyResponse((self.enc_port, self.public_key)).to_vec();
         self.advertise_trackers()?;
         self.serving.store(true, Ordering::Relaxed);
         let self_clone = self.clone();
@@ -643,33 +628,86 @@ impl State {
             mdns.register(service)?;
         }
 
-        tokio::spawn(async move {
-            self_clone.serve_encrypted().await;
-        });
-
-        let unc_listener = TcpListener::bind((self.ip, self.enc_port)).await?;
         let disconnect_bytes = ServerMessagesEncrypted::Disconnect.to_vec();
-        let enc_clone = self.clone();
+        let listener = TcpListener::bind((self.ip, self.port)).await?;
         tokio::spawn(async move {
-            loop {
-                match unc_listener.accept().await {
-                    Ok((socket, client)) => {
-                        match DefaultEncryptedStream::accept(socket, &enc_clone.private_key).await {
-                            Ok(mut stream) => match stream.recv().await {
-                                Ok(bytes) => match ServerMessagesEncrypted::from_bytes(&bytes) {
-                                    Ok(ServerMessagesEncrypted::ServerAuthenticationRequest((
-                                        display_name,
-                                        user_local_time,
-                                        auth,
-                                    ))) => {
-                                        let user_id = if let Some(inner_auth) = auth {
-                                            if let Ok(user_id) =
-                                                enc_clone.authenticate_user(inner_auth).await
+            while self_clone.serving.load(Ordering::Relaxed) {
+                match listener.accept().await {
+                    Ok((mut socket, client)) => {
+                        let message = match unencrypted::ClientToServer::receive(&mut socket).await
+                        {
+                            Ok(message) => message,
+                            Err(e) => {
+                                error!("Failed to receive message: {e}");
+                                continue;
+                            }
+                        };
+                        match message {
+                            unencrypted::ClientToServer::KeyRequest => {
+                                let response =
+                                    unencrypted::ServerToClient::PublicKey(self_clone.public_key);
+                                if let Err(e) = response.send(&mut socket).await {
+                                    error!("Failed to send key response: {e}");
+                                }
+                            }
+                            unencrypted::ClientToServer::VersionRequest => {
+                                let response =
+                                    unencrypted::ServerToClient::Version(VERSION.clone());
+                                if let Err(e) = response.send(&mut socket).await {
+                                    error!("Failed to send version response: {e}");
+                                }
+                            }
+                            unencrypted::ClientToServer::GoCrypto => {
+                                let mut stream = match DefaultEncryptedStream::accept(
+                                    socket,
+                                    &self_clone.private_key,
+                                )
+                                .await
+                                {
+                                    Ok(s) => s,
+                                    Err(e) => {
+                                        error!("Failed to start encrypted connection: {e}");
+                                        continue;
+                                    }
+                                };
+                                match stream.recv().await {
+                                    Ok(bytes) => match ServerMessagesEncrypted::from_bytes(&bytes) {
+                                        Ok(
+                                            ServerMessagesEncrypted::ServerAuthenticationRequest((
+                                                display_name,
+                                                user_local_time,
+                                                auth,
+                                            )),
+                                        ) => {
+                                            let user_id = if let Some(inner_auth) = auth {
+                                                if let Ok(user_id) =
+                                                    self_clone.authenticate_user(inner_auth).await
+                                                {
+                                                    Some(user_id)
+                                                } else {
+                                                    let error_message =
+                                                        ClientMessagesEncrypted::Error(
+                                                            ServerError::AuthenticationFailed,
+                                                        )
+                                                        .to_vec();
+                                                    if let Err(e) =
+                                                        stream.send(&error_message).await
+                                                    {
+                                                        error!(
+                                                            "Failed to send server auth error to {client}: {e}"
+                                                        );
+                                                    }
+                                                    continue;
+                                                }
+                                            } else if self_clone
+                                                .anonymous_clients_allowed()
+                                                .await
+                                                .unwrap_or(false)
                                             {
-                                                Some(user_id)
+                                                None
                                             } else {
                                                 let error_message = ClientMessagesEncrypted::Error(
-                                                    ServerError::AuthenticationFailed,
+                                                    ServerError::AuthenticationRequired,
                                                 )
                                                 .to_vec();
                                                 if let Err(e) = stream.send(&error_message).await {
@@ -678,134 +716,77 @@ impl State {
                                                     );
                                                 }
                                                 continue;
-                                            }
-                                        } else if enc_clone
-                                            .anonymous_clients_allowed()
-                                            .await
-                                            .unwrap_or(false)
-                                        {
-                                            None
-                                        } else {
-                                            let error_message = ClientMessagesEncrypted::Error(
-                                                ServerError::AuthenticationRequired,
-                                            )
-                                            .to_vec();
-                                            if let Err(e) = stream.send(&error_message).await {
+                                            };
+
+                                            let server_bytes =
+                                                ClientMessagesEncrypted::ServerInformationResponse(
+                                                    ServerInformation {
+                                                        name: self_clone.name.clone(),
+                                                        description: self_clone.description.clone(),
+                                                        url: self_clone.url.clone(),
+                                                        key: self_clone.public_key,
+                                                        version: VERSION.clone(),
+                                                        anonymous: false,
+                                                        users_connected: u32::try_from(
+                                                            self_clone
+                                                                .connections
+                                                                .read()
+                                                                .await
+                                                                .len(),
+                                                        )
+                                                        .unwrap_or_default(),
+                                                    },
+                                                )
+                                                .to_vec();
+                                            if let Err(e) = stream.send(&server_bytes).await {
                                                 error!(
-                                                    "Failed to send server auth error to {client}: {e}"
+                                                    "Failed to send server info to {client}: {e}"
+                                                );
+                                                continue;
+                                            }
+
+                                            let connection = ClientConnection {
+                                                conn: Arc::new(RwLock::new(stream)),
+                                                user: Arc::new(ConnectedUser {
+                                                    display_name,
+                                                    admin: false,
+                                                    connected_since: Duration::default(),
+                                                    user_id,
+                                                    timezone: user_local_time,
+                                                }),
+                                                addr: Arc::new(client),
+                                            };
+                                            self_clone.connections.write().await.push(connection);
+                                        }
+                                        Ok(_) => {
+                                            if let Err(e) = stream.send(&disconnect_bytes).await {
+                                                error!(
+                                                    "Failed to send keep alive to {client}: {e}"
                                                 );
                                             }
-                                            continue;
-                                        };
-
-                                        let server_bytes =
-                                            ClientMessagesEncrypted::ServerInformationResponse(
-                                                ServerInformation {
-                                                    name: enc_clone.name.clone(),
-                                                    description: enc_clone.description.clone(),
-                                                    url: enc_clone.url.clone(),
-                                                    key: enc_clone.public_key,
-                                                    version: VERSION.clone(),
-                                                    anonymous: false,
-                                                    users_connected: u32::try_from(
-                                                        enc_clone.connections.read().await.len(),
-                                                    )
-                                                    .unwrap_or_default(),
-                                                },
-                                            )
-                                            .to_vec();
-                                        if let Err(e) = stream.send(&server_bytes).await {
-                                            error!("Failed to send server info to {client}: {e}");
-                                            continue;
                                         }
-
-                                        let connection = ClientConnection {
-                                            conn: Arc::new(RwLock::new(stream)),
-                                            user: Arc::new(ConnectedUser {
-                                                display_name,
-                                                admin: false,
-                                                connected_since: Duration::default(),
-                                                user_id,
-                                                timezone: user_local_time,
-                                            }),
-                                            addr: Arc::new(client),
-                                        };
-                                        enc_clone.connections.write().await.push(connection);
-                                    }
-                                    Ok(_) => {
-                                        if let Err(e) = stream.send(&disconnect_bytes).await {
-                                            error!("Failed to send keep alive to {client}: {e}");
+                                        Err(e) => {
+                                            error!("Error decoding message from {client}: {e}");
                                         }
-                                    }
+                                    },
                                     Err(e) => {
                                         error!("Error decoding message from {client}: {e}");
                                     }
-                                },
-                                Err(e) => {
-                                    error!("Error receiving encrypted connection: {e}");
                                 }
-                            },
-                            Err(e) => {
-                                error!("Error accepting encrypted connection: {e}");
                             }
                         }
                     }
                     Err(e) => {
-                        error!("Error accepting encrypted connection: {e}");
+                        error!("Failed to accept connection: {e}");
+                        break;
                     }
                 }
             }
         });
 
-        let unc_listener = TcpListener::bind((self.ip, self.unc_port)).await?;
-        loop {
-            match unc_listener.accept().await {
-                Ok((socket, client)) => {
-                    let mut framed = Framed::new(socket, LengthDelimitedCodec::new());
-                    match framed.next().await {
-                        Some(Ok(bytes)) => match ServerMessagesUnencrypted::from_bytes(&bytes) {
-                            Ok(msg) => match msg {
-                                ServerMessagesUnencrypted::KeyRequest => {
-                                    if let Err(e) =
-                                        framed.send(Bytes::from(server_key_port.clone())).await
-                                    {
-                                        error!("Failed to send key response: {e}");
-                                    }
-                                }
-                                ServerMessagesUnencrypted::Disconnect => {
-                                    if let Err(e) = framed.close().await {
-                                        error!("Failed to close connection: {e}");
-                                    }
-                                    break;
-                                }
-                            },
-                            Err(e) => {
-                                error!("Error decoding message from {client}: {e}");
-                            }
-                        },
-                        None => {}
-                        Some(Err(e)) => {
-                            error!("Error decoding message from {client}: {e}");
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Error accepting unencrypted connection: {e}");
-                }
-            }
-        }
-
-        #[allow(unreachable_code)]
-        self.serving.store(false, Ordering::Relaxed);
-
-        Ok(())
-    }
-
-    #[tracing::instrument]
-    async fn serve_encrypted(&self) {
         let keep_alive_bytes = ServerMessagesEncrypted::KeepAlive.to_vec();
 
-        loop {
+        while self.serving.load(Ordering::Relaxed) {
             let mut to_disconnect = Vec::new();
             for (index, client) in self.connections.read().await.iter().enumerate() {
                 let mut conn = client.conn.write().await;
@@ -872,6 +853,8 @@ impl State {
                 }
             }
         }
+
+        Ok(())
     }
 
     /// Get a list of connected users
@@ -900,7 +883,7 @@ impl State {
             &self.name,
             &host_name,
             self.ip,
-            self.enc_port,
+            self.port,
             &properties[..],
         )?;
         if self.ip.is_unspecified() {
@@ -1154,7 +1137,6 @@ mod tests {
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             Some("myserver.example.com".into()),
             1010,
-            1011,
             true,
             server_db,
         )

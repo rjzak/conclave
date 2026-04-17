@@ -9,70 +9,96 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// Response to protocol handshake
 pub const RESPONSE: &[u8] = b"Server";
 
-/// Client to Server messages for unencrypted connections
-#[derive(Debug, Deserialize, Serialize)]
-pub enum ServerMessagesUnencrypted {
-    /// Ask the server for its public key and port
-    KeyRequest,
+/// Protocol for getting the server's public key
+pub mod unencrypted {
+    use anyhow::{Result, anyhow};
+    use ed25519_dalek::VerifyingKey;
+    use semver::Version;
+    use serde::{Deserialize, Serialize};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
 
-    /// Drop the connection.
-    Disconnect,
-}
+    /// Unencrypted messages to the server
+    #[derive(Debug, PartialEq, Eq, Copy, Clone, Serialize, Deserialize)]
+    pub enum ClientToServer {
+        /// Request the server's public key
+        KeyRequest,
 
-impl ServerMessagesUnencrypted {
-    /// Serialize with Postcard.
-    ///
-    /// # Panics
-    ///
-    /// A panic should be impossible.
-    #[inline]
-    #[must_use]
-    pub fn to_vec(&self) -> Vec<u8> {
-        postcard::to_stdvec(&self).expect("`ServerMessagesUnencrypted` failed to serialize")
+        /// Request the server's version
+        VersionRequest,
+
+        /// Switch to encrypted connection
+        GoCrypto,
     }
 
-    /// Deserialize with Postcard.
-    ///
-    /// # Errors
-    ///
-    /// Postcard error is the data isn't valid or complete.
-    #[inline]
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, postcard::Error> {
-        postcard::from_bytes(bytes)
-    }
-}
+    impl ClientToServer {
+        /// Send the message to the server
+        ///
+        /// # Errors
+        ///
+        /// Networking errors are possible
+        #[inline]
+        pub async fn send(&self, stream: &mut TcpStream) -> Result<()> {
+            let bytes = postcard::to_stdvec(&self)?;
+            stream.write_u32(u32::try_from(bytes.len())?).await?;
+            stream.write_all(&bytes).await?;
 
-/// Server to Client messages for unencrypted connections
-#[derive(Debug, Deserialize, Serialize)]
-pub enum ClientMessagesUnencrypted {
-    /// Server's response with the server's port and public key for encryption.
-    KeyResponse((u16, VerifyingKey)),
+            Ok(())
+        }
 
-    /// Drop the connection.
-    Disconnect,
-}
+        /// Receive a message from the server
+        ///
+        /// # Errors
+        ///
+        /// Networking errors are possible
+        #[inline]
+        pub async fn receive(stream: &mut TcpStream) -> Result<Self> {
+            let len = stream.read_u32().await?;
+            let mut bytes = vec![0u8; len as usize];
+            stream.read_exact(&mut bytes).await?;
 
-impl ClientMessagesUnencrypted {
-    /// Serialize with Postcard.
-    ///
-    /// # Panics
-    ///
-    /// A panic should be impossible.
-    #[inline]
-    #[must_use]
-    #[track_caller]
-    pub fn to_vec(&self) -> Vec<u8> {
-        postcard::to_stdvec(&self).expect("`ClientMessagesUnencrypted` failed to serialize")
+            postcard::from_bytes(&bytes).map_err(|e| anyhow!("Failed to deserialize message: {e}"))
+        }
     }
 
-    /// Deserialize with Postcard.
-    ///
-    /// # Errors
-    ///
-    /// Postcard error is the data isn't valid or complete.
-    #[inline]
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, postcard::Error> {
-        postcard::from_bytes(bytes)
+    /// Unencrypted messages from the server
+    #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+    pub enum ServerToClient {
+        /// Server's public key
+        PublicKey(VerifyingKey),
+
+        /// Server's version
+        Version(Version),
+    }
+
+    impl ServerToClient {
+        /// Send the message to the client
+        ///
+        /// # Errors
+        ///
+        /// Networking errors are possible
+        #[inline]
+        pub async fn send(&self, stream: &mut TcpStream) -> Result<()> {
+            let bytes = postcard::to_stdvec(&self)?;
+            stream.write_u32(u32::try_from(bytes.len())?).await?;
+            stream.write_all(&bytes).await?;
+
+            Ok(())
+        }
+
+        /// Receive a message from the client
+        ///
+        /// # Errors
+        ///
+        /// Networking errors are possible
+        #[inline]
+        pub async fn receive(stream: &mut TcpStream) -> Result<Self> {
+            let len = stream.read_u32().await?;
+            let mut bytes = vec![0u8; len as usize];
+            stream.read_exact(&mut bytes).await?;
+
+            postcard::from_bytes(&bytes).map_err(|e| anyhow!("Failed to deserialize message: {e}"))
+        }
     }
 }
 
