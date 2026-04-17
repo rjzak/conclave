@@ -27,15 +27,12 @@ use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use async_sqlite::rusqlite::fallible_iterator::FallibleIterator;
 use async_sqlite::rusqlite::{Batch, Connection, OptionalExtension};
 use async_sqlite::{Client, ClientBuilder, JournalMode};
-use bytes::Bytes;
 use chrono::{DateTime, Duration, Local, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use futures::SinkExt;
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use semver::Version;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::{error, info, trace, warn};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -585,15 +582,14 @@ impl State {
                 });
 
                 for (tracker_host, tracker_port) in self_clone.trackers.read().await.iter() {
-                    let Ok(stream) =
+                    let Ok(mut stream) =
                         TcpStream::connect(format!("{tracker_host}:{tracker_port}")).await
                     else {
                         error!("Failed to connect to tracker {tracker_host}:{tracker_port}");
                         continue;
                     };
-                    let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
-                    let serialized = advert.to_vec();
-                    if let Err(e) = framed.send(Bytes::from(serialized)).await {
+
+                    if let Err(e) = advert.send(&mut stream).await {
                         error!("Failed to send advertise message: {e}");
                     }
                 }
@@ -979,11 +975,8 @@ mod tests {
 
     use std::net::{IpAddr, Ipv4Addr};
 
-    use bytes::Bytes;
     use chrono::Duration;
-    use futures::{SinkExt, StreamExt};
     use tokio::net::TcpStream;
-    use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn advertise() {
@@ -1004,32 +997,26 @@ mod tests {
         tokio::time::sleep(Duration::seconds(1).to_std().unwrap()).await;
 
         {
-            let stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
+            let mut stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
                 .await
                 .unwrap();
-            let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
 
-            let serialized = TrackerProtocol::GetServers.to_vec();
-            framed.send(Bytes::from(serialized)).await.unwrap();
-            if let Some(res_result) = framed.next().await {
-                let bytes = res_result.unwrap();
-                let resp = TrackerProtocol::from_bytes(&bytes).unwrap();
-                match resp {
-                    TrackerProtocol::ServersList(servers) => {
-                        assert!(servers.servers.is_empty());
-                    }
-                    _ => panic!("Unexpected response type"),
+            TrackerProtocol::GetServers.send(&mut stream).await.unwrap();
+            let response = TrackerProtocol::receive(&mut stream).await.unwrap();
+            match response {
+                TrackerProtocol::ServersList(servers) => {
+                    assert!(servers.servers.is_empty());
                 }
+                _ => panic!("Unexpected response type"),
             }
         }
 
         {
-            let stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
+            let mut stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
                 .await
                 .unwrap();
-            let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
 
-            let server = AdvertiseServer(Advertise {
+            AdvertiseServer(Advertise {
                 name: "Testing".to_string(),
                 description: "Testing".to_string(),
                 version,
@@ -1039,29 +1026,26 @@ mod tests {
                 url: String::new(),
                 key: server_verifying,
             })
-            .to_vec();
-            framed.send(Bytes::from(server)).await.unwrap();
+            .send(&mut stream)
+            .await
+            .unwrap();
         }
 
         {
-            let stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
+            let mut stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
                 .await
                 .unwrap();
-            let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
 
-            let serialized = TrackerProtocol::GetServers.to_vec();
-            framed.send(Bytes::from(serialized)).await.unwrap();
-            if let Some(res_result) = framed.next().await {
-                let bytes = res_result.unwrap();
-                let resp = TrackerProtocol::from_bytes(&bytes).unwrap();
-                match resp {
-                    TrackerProtocol::ServersList(servers) => {
-                        assert_eq!(servers.servers.len(), 1);
-                        assert_eq!(servers.servers[0].name, "Testing");
-                        assert!(!servers.signature_bytes().is_empty());
-                    }
-                    _ => panic!("Unexpected response type"),
+            TrackerProtocol::GetServers.send(&mut stream).await.unwrap();
+
+            let resp = TrackerProtocol::receive(&mut stream).await.unwrap();
+            match resp {
+                TrackerProtocol::ServersList(servers) => {
+                    assert_eq!(servers.servers.len(), 1);
+                    assert_eq!(servers.servers[0].name, "Testing");
+                    assert!(!servers.signature_bytes().is_empty());
                 }
+                _ => panic!("Unexpected response type"),
             }
         }
         assert_eq!(state.servers().servers.len(), 1);
@@ -1069,22 +1053,17 @@ mod tests {
         tokio::time::sleep(state.duration()).await;
 
         {
-            let stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
+            let mut stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
                 .await
                 .unwrap();
-            let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
 
-            let serialized = TrackerProtocol::GetServers.to_vec();
-            framed.send(Bytes::from(serialized)).await.unwrap();
-            if let Some(res_result) = framed.next().await {
-                let bytes = res_result.unwrap();
-                let resp = TrackerProtocol::from_bytes(&bytes).unwrap();
-                match resp {
-                    TrackerProtocol::ServersList(servers) => {
-                        assert!(servers.servers.is_empty());
-                    }
-                    _ => panic!("Unexpected response type"),
+            TrackerProtocol::GetServers.send(&mut stream).await.unwrap();
+            let resp = TrackerProtocol::receive(&mut stream).await.unwrap();
+            match resp {
+                TrackerProtocol::ServersList(servers) => {
+                    assert!(servers.servers.is_empty());
                 }
+                _ => panic!("Unexpected response type"),
             }
         }
         assert!(state.servers().servers.is_empty());

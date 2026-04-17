@@ -26,14 +26,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
 use anyhow::{Result, anyhow, bail, ensure};
-use bytes::Bytes;
 use dashmap::DashSet;
-use futures::{SinkExt, StreamExt};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use semver::Version;
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock};
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::{error, info, trace, warn};
 
 /// Conclave version
@@ -125,22 +122,14 @@ impl Client {
     ///
     /// Returns errors if there is a database error
     pub async fn add_tracker(&self, tracker_name: &str, tracker_port: u16) -> Result<()> {
-        let stream = TcpStream::connect(format!("{tracker_name}:{tracker_port}")).await?;
-        let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+        let mut stream = TcpStream::connect(format!("{tracker_name}:{tracker_port}")).await?;
 
-        framed
-            .send(Bytes::from(TrackerProtocol::KeyRequest.to_vec()))
-            .await?;
-        let tracker_key = if let Some(res_result) = framed.next().await {
-            let bytes = res_result?;
-            let resp = TrackerProtocol::from_bytes(&bytes)?;
-            if let TrackerProtocol::TrackerKey(key) = resp {
-                key
-            } else {
-                return Err(anyhow!("Unexpected response from tracker: {bytes:?}"));
-            }
-        } else {
-            bail!("Tracker did not respond with key");
+        TrackerProtocol::KeyRequest.send(&mut stream).await?;
+
+        let TrackerProtocol::TrackerKey(tracker_key) =
+            TrackerProtocol::receive(&mut stream).await?
+        else {
+            bail!("Unexpected");
         };
 
         let tracker_entry = Tracker {
@@ -206,7 +195,6 @@ impl Client {
     /// Errors may arise from network problems.
     pub async fn list_servers_from_trackers(&self) -> Result<HashSet<Advertise>> {
         let mut servers_set = HashSet::new();
-        let get_servers_bytes = TrackerProtocol::GetServers.to_vec();
 
         info!(
             "Requesting servers list from {} trackers",
@@ -214,37 +202,47 @@ impl Client {
         );
         for tracker in self.trackers.iter() {
             info!("Connecting to tracker {}:{}", tracker.name, tracker.port);
-            let stream = TcpStream::connect(format!("{}:{}", tracker.name, tracker.port)).await?;
-            let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+            let mut stream =
+                TcpStream::connect(format!("{}:{}", tracker.name, tracker.port)).await?;
 
-            framed.send(Bytes::from(get_servers_bytes.clone())).await?;
-            if let Some(res_result) = framed.next().await {
-                let bytes = res_result?;
-                let resp = TrackerProtocol::from_bytes(&bytes)?;
-                if let TrackerProtocol::ServersList(servers) = resp {
-                    info!(
-                        "Received {} servers list from tracker {}:{}: {:?}",
-                        servers.servers.len(),
-                        tracker.name,
-                        tracker.port,
-                        servers
-                            .servers
-                            .iter()
-                            .map(|s| s.name.clone())
-                            .collect::<Vec<_>>()
-                    );
-                    if servers.version > *VERSION {
-                        warn!(
-                            "Tracker version {} is newer than client version {}",
-                            servers.version, *VERSION
-                        );
-                    }
-                    if servers.verify(&tracker.key) {
-                        servers_set.extend(servers.servers);
-                    } else {
-                        warn!("Received server list from tracker but the signature was invalid.");
-                    }
+            if let Err(e) = TrackerProtocol::GetServers.send(&mut stream).await {
+                error!("Error sending server list request to tracker: {e}");
+                continue;
+            }
+
+            let servers = match TrackerProtocol::receive(&mut stream).await {
+                Ok(TrackerProtocol::ServersList(servers)) => servers,
+                Ok(_) => {
+                    error!("Error unexpected response from tracker");
+                    continue;
                 }
+                Err(e) => {
+                    error!("Error getting server list from tracker: {e}");
+                    continue;
+                }
+            };
+
+            info!(
+                "Received {} servers list from tracker {}:{}: {:?}",
+                servers.servers.len(),
+                tracker.name,
+                tracker.port,
+                servers
+                    .servers
+                    .iter()
+                    .map(|s| s.name.clone())
+                    .collect::<Vec<_>>()
+            );
+            if servers.version > *VERSION {
+                warn!(
+                    "Tracker version {} is newer than client version {}",
+                    servers.version, *VERSION
+                );
+            }
+            if servers.verify(&tracker.key) {
+                servers_set.extend(servers.servers);
+            } else {
+                warn!("Received server list from tracker but the signature was invalid.");
             }
         }
 

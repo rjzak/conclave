@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::hash::{Hash, Hasher};
-
+use anyhow::anyhow;
 use chrono::Duration;
 use ed25519_dalek::VerifyingKey;
 use pqcrypto_mldsa::mldsa87;
 use pqcrypto_traits::sign::SignedMessage;
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use std::hash::{Hash, Hasher};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 /// Response to protocol handshake
 pub const RESPONSE: &[u8] = b"Tracker";
@@ -195,25 +197,31 @@ impl std::fmt::Debug for TrackerProtocol {
 }
 
 impl TrackerProtocol {
-    /// Serialize with Postcard.
-    ///
-    /// # Panics
-    ///
-    /// A panic should be impossible.
-    #[inline]
-    #[must_use]
-    #[track_caller]
-    pub fn to_vec(&self) -> Vec<u8> {
-        postcard::to_stdvec(&self).expect("`TrackerProtocol` failed to serialize")
-    }
-
-    /// Deserialize with Postcard.
+    /// Send the message to the server
     ///
     /// # Errors
     ///
-    /// Postcard error is the data isn't valid or complete.
+    /// Networking errors are possible
     #[inline]
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, postcard::Error> {
-        postcard::from_bytes(bytes)
+    pub async fn send(&self, stream: &mut TcpStream) -> anyhow::Result<()> {
+        let bytes = postcard::to_stdvec(&self)?;
+        stream.write_u32(u32::try_from(bytes.len())?).await?;
+        stream.write_all(&bytes).await?;
+
+        Ok(())
+    }
+
+    /// Receive a message from the server
+    ///
+    /// # Errors
+    ///
+    /// Networking errors are possible
+    #[inline]
+    pub async fn receive(stream: &mut TcpStream) -> anyhow::Result<Self> {
+        let len = stream.read_u32().await?;
+        let mut bytes = vec![0u8; len as usize];
+        stream.read_exact(&mut bytes).await?;
+
+        postcard::from_bytes(&bytes).map_err(|e| anyhow!("Failed to deserialize message: {e}"))
     }
 }

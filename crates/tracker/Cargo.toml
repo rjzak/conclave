@@ -18,17 +18,14 @@ conclave-common = { workspace = true }
 
 # External
 anyhow = { workspace = true, features = ["std"] }
-bytes = { workspace = true, features = ["std"] }
 clap = { workspace = true, features = ["color", "derive", "help", "std", "suggestions"] }
 dashmap = { workspace = true, features = ["inline"] }
 eframe = { workspace = true, features = ["accesskit", "default_fonts", "wayland", "wgpu", "x11"], optional = true }
-futures = { workspace = true, features = ["alloc", "std"] }
 pqcrypto-mldsa = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync"] }
-tokio-util = { workspace = true, features = ["codec"] }
 toml = { workspace = true, features = ["display", "parse", "serde"] }
 tracing = { workspace = true, features = ["attributes", "std"] }
 wgpu = { workspace = true, features = ["std", "vulkan"], optional = true }

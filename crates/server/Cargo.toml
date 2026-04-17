@@ -21,18 +21,16 @@ anyhow = { workspace = true, features = ["std"] }
 argon2 = { workspace = true, features = ["alloc", "password-hash", "std", "zeroize"] }
 async-sqlite = { workspace = true, features = ["bundled", "fallible_uint"] }
 base64 = { workspace = true, features = ["alloc"] }
-bytes = { workspace = true, features = ["std"] }
 chrono = { workspace = true, features = ["clock", "std"] }
 clap = { workspace = true, features = ["color", "derive", "help", "std", "suggestions"] }
 dialoguer = { workspace = true, features = ["password"] }
 ed25519-dalek = { workspace = true, features = ["serde"] }
 eframe = { workspace = true, features = ["accesskit", "default_fonts", "wayland", "wgpu", "x11"], optional = true }
-futures = { workspace = true, features = ["alloc", "executor", "std"] }
+futures = { workspace = true, features = ["executor"] }
 hex = { workspace = true, features = ["alloc", "std"] }
 mdns-sd = { workspace = true }
 semver = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
-tokio-util = { workspace = true, features = ["codec"] }
 tracing = { workspace = true, features = ["attributes", "max_level_info", "std"] }
 uuid = { workspace = true, features = ["v4"] }
 wgpu = { workspace = true, features = ["std", "vulkan"], optional = true }

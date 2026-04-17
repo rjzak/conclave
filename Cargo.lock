@@ -838,13 +838,11 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "base64",
- "bytes",
  "chrono",
  "clap",
  "conclave-common",
  "dashmap",
  "eframe",
- "futures",
  "home",
  "mdns-sd",
  "pqcrypto-mldsa",
@@ -852,7 +850,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tokio-util",
  "toml",
  "tracing",
  "wgpu",
@@ -890,7 +887,6 @@ dependencies = [
  "argon2",
  "async-sqlite",
  "base64",
- "bytes",
  "chrono",
  "clap",
  "conclave-common",
@@ -904,7 +900,6 @@ dependencies = [
  "semver",
  "tempdir",
  "tokio",
- "tokio-util",
  "tracing",
  "uuid",
  "wgpu",
@@ -929,19 +924,16 @@ name = "conclave-tracker"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "bytes",
  "chrono",
  "clap",
  "conclave-common",
  "dashmap",
  "eframe",
- "futures",
  "pqcrypto-mldsa",
  "semver",
  "serde",
  "serde_json",
  "tokio",
- "tokio-util",
  "toml",
  "tracing",
  "wgpu",
@@ -4090,19 +4082,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "tokio-util"
-version = "0.7.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098"
-dependencies = [
- "bytes",
- "futures-core",
- "futures-sink",
- "pin-project-lite",
- "tokio",
 ]
 
 [[package]]

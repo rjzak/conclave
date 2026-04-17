@@ -17,15 +17,12 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, bail};
-use bytes::Bytes;
 use dashmap::DashMap;
-use futures::{SinkExt, StreamExt};
 use pqcrypto_mldsa::mldsa87;
 use pqcrypto_mldsa::mldsa87_keypair;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 /// Conclave version
 pub static VERSION: LazyLock<Version> =
@@ -184,64 +181,57 @@ impl<const DURATION_SECONDS: u64> State<DURATION_SECONDS> {
         let listener = TcpListener::bind((self.ip, self.port)).await?;
         self.serving.store(true, Ordering::Relaxed);
 
-        loop {
-            let (socket, client) = listener.accept().await.inspect_err(|e| {
+        while self.serving() {
+            let (mut socket, client) = listener.accept().await.inspect_err(|e| {
                 tracing::error!("Error accepting connection: {e}");
                 self.serving.store(false, Ordering::Relaxed);
             })?;
             let self_clone = self.clone();
 
-            tokio::spawn(async move {
-                let mut framed = Framed::new(socket, LengthDelimitedCodec::new());
+            let message = match TrackerProtocol::receive(&mut socket).await {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::error!("Error getting request: {e}");
+                    continue;
+                }
+            };
 
-                while let Some(result) = framed.next().await {
-                    match result {
-                        Ok(bytes) => {
-                            if let Ok(proto) = TrackerProtocol::from_bytes(&bytes) {
-                                match proto {
-                                    TrackerProtocol::KeyRequest => {
-                                        let response =
-                                            TrackerProtocol::TrackerKey(self_clone.keys.public_key)
-                                                .to_vec();
-                                        if let Err(e) = framed.send(Bytes::from(response)).await {
-                                            tracing::error!("Response error: {e}");
-                                        }
-                                    }
-                                    TrackerProtocol::GetServers => {
-                                        let response =
-                                            TrackerProtocol::ServersList(self_clone.servers())
-                                                .to_vec();
-                                        if let Err(e) = framed.send(Bytes::from(response)).await {
-                                            tracing::error!("Response error: {e}");
-                                        } else {
-                                            self_clone.queries.fetch_add(1, Ordering::Relaxed);
-                                        }
-                                    }
-                                    TrackerProtocol::AdvertiseServer(server) => {
-                                        let server = if server.url.contains("0.0.0.0") {
-                                            let mut fixed = server.clone();
-                                            fixed.url = fixed.url.replace(
-                                                "0.0.0.0",
-                                                client.ip().to_string().as_str(),
-                                            );
-                                            fixed
-                                        } else {
-                                            server
-                                        };
-                                        self_clone.servers.insert(server, SystemTime::now());
-                                    }
-                                    TrackerProtocol::TrackerKey(_)
-                                    | TrackerProtocol::ServersList(_) => {}
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Error decoding message from {client}: {e}");
-                        }
+            match message {
+                TrackerProtocol::KeyRequest => {
+                    if let Err(e) = TrackerProtocol::TrackerKey(self_clone.keys.public_key)
+                        .send(&mut socket)
+                        .await
+                    {
+                        tracing::error!("Error sending public key: {e}");
                     }
                 }
-            });
+                TrackerProtocol::GetServers => {
+                    if let Err(e) = TrackerProtocol::ServersList(self_clone.servers())
+                        .send(&mut socket)
+                        .await
+                    {
+                        tracing::error!("Error sending signed server list: {e}");
+                    } else {
+                        self_clone.queries.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                TrackerProtocol::AdvertiseServer(server) => {
+                    let server = if server.url.contains("0.0.0.0") {
+                        let mut fixed = server.clone();
+                        fixed.url = fixed
+                            .url
+                            .replace("0.0.0.0", client.ip().to_string().as_str());
+                        fixed
+                    } else {
+                        server
+                    };
+                    self_clone.servers.insert(server, SystemTime::now());
+                }
+                TrackerProtocol::TrackerKey(_) | TrackerProtocol::ServersList(_) => {}
+            }
         }
+
+        Ok(())
     }
 
     /// Number of queries received by the tracker
