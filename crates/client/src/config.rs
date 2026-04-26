@@ -9,23 +9,34 @@ use pqcrypto_mldsa::mldsa87;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-const DEFAULT_CLIENT_FILE: &str = "conclave.toml";
+/// Default client config file
+pub const DEFAULT_CLIENT_FILE: &str = "conclave.toml";
 
 /// Find a conf file, either in the home directory or in the current directory.
 ///
 /// # Errors
 ///
 /// Filesystem errors are possible.
-pub fn default_config_path() -> Result<PathBuf> {
+pub fn default_config_path() -> PathBuf {
+    if Path::new(DEFAULT_CLIENT_FILE).exists() {
+        return DEFAULT_CLIENT_FILE.into();
+    }
+
     if let Some(mut home_config) = home::home_dir() {
         home_config.push(".config");
-        if !home_config.exists() {
-            std::fs::create_dir_all(&home_config)?;
+        if !home_config.exists()
+            && let Err(e) = std::fs::create_dir_all(&home_config)
+        {
+            tracing::error!(
+                "Failed to create directory `.config` ({}): {e}",
+                home_config.display()
+            );
+            return PathBuf::from(DEFAULT_CLIENT_FILE);
         }
         home_config.push(DEFAULT_CLIENT_FILE);
-        Ok(home_config)
+        home_config
     } else {
-        Ok(PathBuf::from(DEFAULT_CLIENT_FILE))
+        PathBuf::from(DEFAULT_CLIENT_FILE)
     }
 }
 
@@ -40,6 +51,9 @@ pub struct ClientConfig {
 
     /// List of servers for easy access
     pub bookmarks: Vec<BookmarkEntry>,
+
+    /// Cached keys for servers previously connected to
+    pub known_hosts: Vec<KnownHost>,
 }
 
 impl Default for ClientConfig {
@@ -48,6 +62,7 @@ impl Default for ClientConfig {
             default_display_name: "Unnamed User".to_string(),
             trackers: Vec::new(),
             bookmarks: Vec::new(),
+            known_hosts: Vec::new(),
         }
     }
 }
@@ -139,14 +154,11 @@ impl std::hash::Hash for Tracker {
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 pub struct BookmarkEntry {
     /// Domain or IP address of the server
-    pub server: String,
+    #[serde(flatten)]
+    pub server: KnownHost,
 
     /// Name of the server
-    #[serde(default)]
     pub name: String,
-
-    /// Port of the server
-    pub port: Port,
 
     /// User's display name
     pub display_name: String,
@@ -154,14 +166,6 @@ pub struct BookmarkEntry {
     /// User's username
     #[serde(default)]
     pub auth: Option<UserAuth>,
-
-    /// Server's public key
-    #[serde(
-        serialize_with = "conclave_common::serde::serialize_dalek_public_key",
-        deserialize_with = "conclave_common::serde::deserialize_dalek_public_key"
-    )]
-    #[zeroize(skip)]
-    pub key: VerifyingKey,
 
     /// Share local time (and timezone, which provides location information) with the server.
     #[serde(default)]
@@ -178,15 +182,20 @@ pub struct UserAuth {
     pub password: String,
 }
 
-/// Port information
+/// Server and key for each server with which the client has successfully connected
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
-pub enum Port {
-    /// Unencrypted port
-    Unencrypted(u16),
+pub struct KnownHost {
+    /// Server IP or DNS
+    pub host: String,
 
-    /// Encrypted port
-    Encrypted(u16),
+    /// Port of the server
+    pub port: u16,
 
-    /// Encrypted and unencrypted port, in that order
-    EncryptedAndUnencrypted((u16, u16)),
+    /// Server's key
+    #[serde(
+        serialize_with = "conclave_common::serde::serialize_dalek_public_key",
+        deserialize_with = "conclave_common::serde::deserialize_dalek_public_key"
+    )]
+    #[zeroize(skip)]
+    pub key: VerifyingKey,
 }

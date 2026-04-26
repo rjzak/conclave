@@ -37,9 +37,6 @@ use tracing::{error, info, trace, warn};
 pub static VERSION: LazyLock<Version> =
     LazyLock::new(|| Version::parse(env!("CONCLAVE_VERSION")).unwrap());
 
-/// Default config file name.
-pub const DEFAULT_FILE: &str = "client.toml";
-
 /// Conclave client
 pub struct Client {
     /// Active connections to various services
@@ -69,7 +66,7 @@ impl std::fmt::Display for Client {
 
 impl Default for Client {
     fn default() -> Self {
-        Self::new(DEFAULT_FILE).unwrap()
+        Self::new(config::DEFAULT_CLIENT_FILE).unwrap()
     }
 }
 
@@ -281,7 +278,7 @@ impl Client {
             .write()
             .await
             .bookmarks
-            .retain(|b| b.server != server);
+            .retain(|b| b.server.host != server);
         let config_file = self.config_file.lock().await;
         self.config.read().await.save(&*config_file)
     }
@@ -307,7 +304,11 @@ impl Client {
     ///
     /// I/O errors may occur when writing to the config file.
     pub async fn remove_bookmark_by_key(&self, key: VerifyingKey) -> Result<()> {
-        self.config.write().await.bookmarks.retain(|b| b.key != key);
+        self.config
+            .write()
+            .await
+            .bookmarks
+            .retain(|b| b.server.key != key);
         let config_file = self.config_file.lock().await;
         self.config.read().await.save(&*config_file)
     }

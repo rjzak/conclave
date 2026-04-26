@@ -7,7 +7,7 @@
 
 mod gui;
 
-use conclave_client::{Client, DEFAULT_FILE};
+use conclave_client::{Client, config::DEFAULT_CLIENT_FILE};
 
 use std::path::PathBuf;
 
@@ -25,7 +25,7 @@ pub const VERSION: &str = concat!(
 #[command(author, about, version = VERSION)]
 struct Args {
     /// Config file path
-    #[arg(short, long, default_value = DEFAULT_FILE)]
+    #[arg(short, long, default_value = DEFAULT_CLIENT_FILE)]
     config: PathBuf,
 }
 
