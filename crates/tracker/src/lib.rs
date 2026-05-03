@@ -10,6 +10,8 @@
 use conclave_common::tracker::{Advertise, SignedServerList, TrackerProtocol};
 
 use std::fmt::{Debug, Display};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -95,7 +97,23 @@ impl Keys {
             Some(ext) => bail!("Unsupported file format {}", ext.display()),
             None => bail!("File {} has no extension", path.as_ref().display()),
         };
-        std::fs::write(path, contents)?;
+
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create(true)
+            .append(false)
+            .truncate(false);
+
+        #[cfg(target_family = "unix")]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            options.mode(0o600);
+        }
+
+        let mut file = options.open(&path)?;
+        write!(file, "{contents}")?;
         Ok(())
     }
 

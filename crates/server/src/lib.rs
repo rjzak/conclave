@@ -212,6 +212,15 @@ impl State {
                 "UPDATE USER SET password = ?1 WHERE username = 'admin'",
                 [hashed],
             )?;
+
+            #[cfg(target_family = "unix")]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                let mut perms = sqlite_path.as_ref().metadata()?.permissions();
+                perms.set_mode(0o600);
+                std::fs::set_permissions(&sqlite_path, perms)?;
+            }
         }
 
         let url = if let Some(advertised_domain) = advertised_domain {
