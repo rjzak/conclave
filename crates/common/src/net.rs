@@ -14,7 +14,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use pqcrypto_mlkem::mlkem1024;
 use pqcrypto_traits::kem::{Ciphertext as _, PublicKey as _, SharedSecret as _};
-use sha2::Sha256;
+use sha2::{Digest, Sha256, Sha384};
 use tokio::io::{AsyncRead, AsyncWrite, Interest, Ready};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::{
@@ -504,7 +504,8 @@ impl<const REKEY_INTERVAL: u16> std::fmt::Debug for EncryptedStream<REKEY_INTERV
 
 #[inline]
 fn derive_key(info: &[u8], shared: &[u8]) -> [u8; 32] {
-    let hk = Hkdf::<Sha256>::new(None, shared);
+    let sha384 = Sha384::digest(shared);
+    let hk = Hkdf::<Sha256>::new(Some(&sha384), shared);
     let mut key = [0u8; 32];
     hk.expand(info, &mut key).unwrap();
     key
