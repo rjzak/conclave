@@ -112,7 +112,7 @@ impl ClientConfig {
             .write(true)
             .create(true)
             .append(false)
-            .truncate(false);
+            .truncate(true);
 
         #[cfg(target_family = "unix")]
         {
