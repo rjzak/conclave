@@ -33,7 +33,7 @@ struct Args {
 async fn main() -> eframe::Result {
     conclave_common::init_tracing();
     let args = Args::parse();
-    let _client = Client::new(args.config).unwrap();
+    let client = Client::new(args.config).unwrap();
 
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -44,6 +44,6 @@ async fn main() -> eframe::Result {
     eframe::run_native(
         "Conclave",
         native_options,
-        Box::new(|cc| Ok(Box::new(gui::ConclaveClient::new(cc)))),
+        Box::new(|cc| Ok(Box::new(gui::ConclaveClient::new(client, cc)))),
     )
 }

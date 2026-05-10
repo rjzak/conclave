@@ -185,6 +185,12 @@ impl Client {
         Ok(())
     }
 
+    /// Get the client's trackers to show to the user. Creates a clone of each tracker.
+    #[inline]
+    pub fn list_trackers(&self) -> Vec<Tracker> {
+        self.trackers.as_ref().iter().map(|t| t.clone()).collect()
+    }
+
     /// Get a list of unique servers from all the known trackers.
     ///
     /// # Errors
