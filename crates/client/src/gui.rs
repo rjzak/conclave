@@ -48,7 +48,7 @@ fn do_start_discovery(
 }
 
 /// GUI client state
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ConclaveClient {
     client: Arc<Client>,
     show_advertised_servers_list: bool,
@@ -66,7 +66,15 @@ impl ConclaveClient {
     pub fn new(client: Client, _cc: &eframe::CreationContext<'_>) -> Self {
         Self {
             client: Arc::new(client),
-            ..Default::default()
+            show_advertised_servers_list: false,
+            show_tracker_list: false,
+            discovered_servers: Arc::new(RwLock::new(HashSet::new())),
+            discovery_running: Arc::new(AtomicBool::new(false)),
+            discovery_error: Arc::new(RwLock::new(None)),
+            discovery_viewport_closed: Arc::new(AtomicBool::new(false)),
+            tracker_viewport_closed: Arc::new(AtomicBool::new(false)),
+            tracker_error: Arc::new(RwLock::new(None)),
+            tracker_op_pending: Arc::new(AtomicBool::new(false)),
         }
     }
 }

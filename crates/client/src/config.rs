@@ -101,8 +101,8 @@ impl ClientConfig {
     /// Returns an error if the file cannot be written or if the extension doesn't indicate a JSON or TOML format.
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         let contents = match path.as_ref().extension() {
-            Some(ext) if ext == "toml" => toml::to_string(&self)?,
-            Some(ext) if ext == "json" => serde_json::to_string(&self)?,
+            Some(ext) if ext == "toml" => toml::to_string_pretty(&self)?,
+            Some(ext) if ext == "json" => serde_json::to_string_pretty(&self)?,
             Some(ext) => bail!("Unsupported file format {}", ext.display()),
             None => bail!("File {} has no extension", path.as_ref().display()),
         };

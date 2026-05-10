@@ -30,7 +30,7 @@ use dashmap::DashSet;
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use semver::Version;
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tracing::{error, info, trace, warn};
 
 /// Conclave version
@@ -46,7 +46,7 @@ pub struct Client {
     trackers: Arc<DashSet<Tracker>>,
 
     /// Config file path
-    config_file: Mutex<PathBuf>,
+    config_file: PathBuf,
 
     /// Client's config
     config: Arc<RwLock<ClientConfig>>,
@@ -61,12 +61,6 @@ impl std::fmt::Debug for Client {
 impl std::fmt::Display for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Conclave Client")
-    }
-}
-
-impl Default for Client {
-    fn default() -> Self {
-        Self::new(config::DEFAULT_CLIENT_FILE).unwrap()
     }
 }
 
@@ -93,7 +87,7 @@ impl Client {
         Ok(Self {
             connection: Arc::new(RwLock::new(Vec::new())),
             trackers: Arc::new(DashSet::from_iter(config.trackers.clone())),
-            config_file: Mutex::new(path),
+            config_file: path,
             config: Arc::new(RwLock::new(config)),
         })
     }
@@ -109,8 +103,7 @@ impl Client {
             .await
             .default_display_name
             .clone_from(username);
-        let config_file = self.config_file.lock().await;
-        self.config.read().await.save(&*config_file)
+        self.config.read().await.save(&self.config_file)
     }
 
     /// Add a tracker to the list of known trackers and update the database
@@ -145,8 +138,7 @@ impl Client {
             );
             self.trackers.insert(tracker_entry.clone());
             self.config.write().await.trackers.push(tracker_entry);
-            let config_file = self.config_file.lock().await;
-            self.config.read().await.save(&*config_file)?;
+            self.config.read().await.save(&self.config_file)?;
         }
 
         Ok(())
@@ -179,14 +171,14 @@ impl Client {
             .await
             .trackers
             .retain(|t| t.name != tracker_name || t.port != tracker_port);
-        let config_file = self.config_file.lock().await;
-        self.config.read().await.save(&*config_file)?;
+        self.config.read().await.save(&self.config_file)?;
 
         Ok(())
     }
 
     /// Get the client's trackers to show to the user. Creates a clone of each tracker.
     #[inline]
+    #[must_use]
     pub fn list_trackers(&self) -> Vec<Tracker> {
         self.trackers.as_ref().iter().map(|t| t.clone()).collect()
     }
@@ -259,8 +251,7 @@ impl Client {
     /// I/O errors may occur when writing to the config file.
     pub async fn add_bookmark(&self, bookmark: &BookmarkEntry) -> Result<()> {
         self.config.write().await.bookmarks.push(bookmark.clone());
-        let config_file = self.config_file.lock().await;
-        self.config.read().await.save(&*config_file)
+        self.config.read().await.save(&self.config_file)
     }
 
     /// Remove a server bookmark by server's index in the list
@@ -270,8 +261,7 @@ impl Client {
     /// I/O errors may occur when writing to the config file.
     pub async fn remove_bookmark_by_index(&self, index: usize) -> Result<()> {
         self.config.write().await.bookmarks.remove(index);
-        let config_file = self.config_file.lock().await;
-        self.config.read().await.save(&*config_file)
+        self.config.read().await.save(&self.config_file)
     }
 
     /// Remove a server bookmark by server's IP address or domain name
@@ -285,8 +275,7 @@ impl Client {
             .await
             .bookmarks
             .retain(|b| b.server.host != server);
-        let config_file = self.config_file.lock().await;
-        self.config.read().await.save(&*config_file)
+        self.config.read().await.save(&self.config_file)
     }
 
     /// Remove a server bookmark by server's name
@@ -300,8 +289,7 @@ impl Client {
             .await
             .bookmarks
             .retain(|b| b.name != name);
-        let config_file = self.config_file.lock().await;
-        self.config.read().await.save(&*config_file)
+        self.config.read().await.save(&self.config_file)
     }
 
     /// Remove a server bookmark by server's key
@@ -315,8 +303,7 @@ impl Client {
             .await
             .bookmarks
             .retain(|b| b.server.key != key);
-        let config_file = self.config_file.lock().await;
-        self.config.read().await.save(&*config_file)
+        self.config.read().await.save(&self.config_file)
     }
 
     /// Connect to a server
