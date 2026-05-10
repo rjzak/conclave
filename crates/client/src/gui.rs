@@ -349,8 +349,17 @@ impl eframe::App for ConclaveClient {
                         };
                         form_port.clear();
 
+                        let Ok(tracker_result) = futures::executor::block_on(
+                            conclave_client::get_tracker_key(&name, port),
+                        ) else {
+                            if let Ok(mut err) = err_arc.write() {
+                                *err = Some(format!("Failed to get tracker key for {name}:{port}"));
+                            }
+                            return;
+                        };
+
                         tokio::spawn(async move {
-                            if let Err(e) = client.add_tracker(&name, port).await
+                            if let Err(e) = client.add_tracker(tracker_result).await
                                 && let Ok(mut err) = err_arc.write()
                             {
                                 *err = Some(e.to_string());

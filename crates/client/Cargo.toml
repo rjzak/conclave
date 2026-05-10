@@ -20,6 +20,7 @@ clap = { workspace = true, features = ["color", "derive", "help", "std", "sugges
 chrono = { workspace = true, features = ["clock", "serde", "std"] }
 dashmap = { workspace = true, features = ["inline"] }
 eframe = { workspace = true, features = ["accesskit", "default_fonts", "serde", "wayland", "wgpu", "x11"] }
+futures = { workspace = true, features = ["executor"] }
 home = { workspace = true }
 mdns-sd = { workspace = true }
 pqcrypto-mldsa = { workspace = true }

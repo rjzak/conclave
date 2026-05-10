@@ -89,10 +89,11 @@ async fn integration() {
     server.anonymous_clients_enabled(false).await.unwrap();
     assert!(!server.anonymous_clients_allowed().await.unwrap());
 
-    client
-        .add_tracker(LOCALHOST.to_string().as_str(), TRACKER_PORT)
-        .await
-        .unwrap();
+    let tracker_info =
+        conclave_client::get_tracker_key(LOCALHOST.to_string().as_str(), TRACKER_PORT)
+            .await
+            .unwrap();
+    client.add_tracker(tracker_info).await.unwrap();
 
     eprintln!("Client: added tracker, querying tracker(s)");
     assert_eq!(client.list_servers_from_trackers().await.unwrap().len(), 1);

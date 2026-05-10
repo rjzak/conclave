@@ -111,33 +111,17 @@ impl Client {
     /// # Errors
     ///
     /// Returns errors if there is a database error
-    pub async fn add_tracker(&self, tracker_name: &str, tracker_port: u16) -> Result<()> {
-        let mut stream = TcpStream::connect(format!("{tracker_name}:{tracker_port}")).await?;
-
-        TrackerProtocol::KeyRequest.send(&mut stream).await?;
-
-        let TrackerProtocol::TrackerKey(tracker_key) =
-            TrackerProtocol::receive(&mut stream).await?
-        else {
-            bail!("Unexpected");
-        };
-
-        let tracker_entry = Tracker {
-            name: tracker_name.to_string(),
-            port: tracker_port,
-            key: tracker_key,
-        };
-
-        if let Some(existing_entry) = self.trackers.get(&tracker_entry) {
-            trace!("Tracker {tracker_name}:{tracker_port} already known");
-            ensure!(existing_entry.key == tracker_key, "Tracker key mismatch!");
+    pub async fn add_tracker(&self, tracker: Tracker) -> Result<()> {
+        if let Some(existing_entry) = self.trackers.get(&tracker) {
+            trace!("Tracker {}:{} already known", tracker.name, tracker.port);
+            ensure!(existing_entry.key == tracker.key, "Tracker key mismatch!");
         } else {
             trace!(
                 "Adding tracker {}:{} to database",
-                tracker_name, tracker_port
+                tracker.name, tracker.port
             );
-            self.trackers.insert(tracker_entry.clone());
-            self.config.write().await.trackers.push(tracker_entry);
+            self.trackers.insert(tracker.clone());
+            self.config.write().await.trackers.push(tracker);
             self.config.read().await.save(&self.config_file)?;
         }
 
@@ -402,6 +386,28 @@ impl Client {
             }
         }
     }
+}
+
+/// Query a tracker for its public key
+///
+/// # Errors
+///
+/// Returns errors if there is a network error
+pub async fn get_tracker_key(tracker_name: &str, tracker_port: u16) -> Result<Tracker> {
+    let mut stream = TcpStream::connect(format!("{tracker_name}:{tracker_port}")).await?;
+
+    TrackerProtocol::KeyRequest.send(&mut stream).await?;
+
+    let TrackerProtocol::TrackerKey(tracker_key) = TrackerProtocol::receive(&mut stream).await?
+    else {
+        bail!("Unexpected response from tracker {tracker_name}:{tracker_port}");
+    };
+
+    Ok(Tracker {
+        name: tracker_name.to_string(),
+        port: tracker_port,
+        key: tracker_key,
+    })
 }
 
 /// Local Conclave servers discovered by Multicast DNS

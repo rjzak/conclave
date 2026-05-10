@@ -843,6 +843,7 @@ dependencies = [
  "conclave-common",
  "dashmap",
  "eframe",
+ "futures",
  "home",
  "mdns-sd",
  "pqcrypto-mldsa",
