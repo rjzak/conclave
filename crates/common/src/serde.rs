@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use base64::Engine;
 use ed25519_dalek::VerifyingKey;
 use pqcrypto_mldsa::mldsa87;
 use pqcrypto_traits::sign::{PublicKey, SecretKey};
@@ -18,7 +19,7 @@ pub fn serialize_mldsa_public_key<S>(
 where
     S: Serializer,
 {
-    let key = hex::encode(k.as_bytes());
+    let key = base64::engine::general_purpose::STANDARD.encode(k.as_bytes());
     s.serialize_str(&key)
 }
 
@@ -35,7 +36,7 @@ pub fn serialize_mldsa_private_key<S>(
 where
     S: Serializer,
 {
-    let key = hex::encode(k.as_bytes());
+    let key = base64::engine::general_purpose::STANDARD.encode(k.as_bytes());
     s.serialize_str(&key)
 }
 
@@ -58,7 +59,9 @@ where
         return Err(Error::custom("Public key is empty!"));
     }
 
-    let key = hex::decode(key).map_err(Error::custom)?;
+    let key = base64::engine::general_purpose::STANDARD
+        .decode(key)
+        .map_err(Error::custom)?;
     mldsa87::PublicKey::from_bytes(&key).map_err(Error::custom)
 }
 
@@ -81,7 +84,9 @@ where
         return Err(Error::custom("Private key is empty!"));
     }
 
-    let key = hex::decode(key).map_err(Error::custom)?;
+    let key = base64::engine::general_purpose::STANDARD
+        .decode(key)
+        .map_err(Error::custom)?;
     mldsa87::SecretKey::from_bytes(&key).map_err(Error::custom)
 }
 
@@ -95,7 +100,7 @@ pub fn serialize_dalek_public_key<S>(k: &VerifyingKey, s: S) -> anyhow::Result<S
 where
     S: Serializer,
 {
-    let key = hex::encode(k.as_bytes());
+    let key = base64::engine::general_purpose::STANDARD.encode(k.as_bytes());
     s.serialize_str(&key)
 }
 
@@ -118,7 +123,9 @@ where
         return Err(Error::custom("Public key is empty!"));
     }
 
-    let key = hex::decode(key).map_err(Error::custom)?;
+    let key = base64::engine::general_purpose::STANDARD
+        .decode(key)
+        .map_err(Error::custom)?;
     if key.len() != 32 {
         return Err(Error::custom(format!(
             "Public key was {} bytes long instead of the expected 32 bytes!",
