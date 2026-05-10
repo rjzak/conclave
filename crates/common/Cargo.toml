@@ -4,6 +4,7 @@ description = "Common data structures for the Conclave communications environmen
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 repository.workspace = true
 version.workspace = true
 

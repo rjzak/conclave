@@ -5,6 +5,7 @@ description = "Client application for the Conclave communications environment"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 repository.workspace = true
 version.workspace = true
 

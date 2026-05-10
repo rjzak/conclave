@@ -5,6 +5,7 @@ description = "Tracker for the Conclave communications environment, so clients m
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 repository.workspace = true
 version.workspace = true
 
