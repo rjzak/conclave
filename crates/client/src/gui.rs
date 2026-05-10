@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use conclave_client::config::Tracker;
 use conclave_client::{Client, DiscoveredServer, discover_servers};
 
 use std::collections::HashSet;
@@ -7,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use eframe::{Frame, egui};
+use sha2::{Digest, Sha256};
 use tracing::error;
 
 fn do_start_discovery(
@@ -49,20 +51,42 @@ fn do_start_discovery(
 
 /// GUI client state
 #[derive(Debug)]
-pub struct ConclaveClient {
+pub struct ConclaveGUI {
+    /// Conclave client
     client: Arc<Client>,
+
+    /// Showing the window displaying local Conclave servers
     show_advertised_servers_list: bool,
+
+    /// Showing the window displaying known Conclave trackers
     show_tracker_list: bool,
+
+    /// Discovered local Conclave servers
     discovered_servers: Arc<RwLock<HashSet<DiscoveredServer>>>,
+
+    /// Whether we're searching for local Conclave servers via mDNS
     discovery_running: Arc<AtomicBool>,
+
+    /// Any errors encountered during discovery
     discovery_error: Arc<RwLock<Option<String>>>,
+
+    /// Local server discovery window closed
     discovery_viewport_closed: Arc<AtomicBool>,
+
+    /// Tracker window closed
     tracker_viewport_closed: Arc<AtomicBool>,
+
+    /// Any errors encountered trying to add a tracker
     tracker_error: Arc<RwLock<Option<String>>>,
+
+    /// Tracker addition pending
     tracker_op_pending: Arc<AtomicBool>,
+
+    /// Tracker fetched from network, awaiting user confirmation before adding
+    pending_tracker_info: Arc<RwLock<Option<Tracker>>>,
 }
 
-impl ConclaveClient {
+impl ConclaveGUI {
     pub fn new(client: Client, _cc: &eframe::CreationContext<'_>) -> Self {
         Self {
             client: Arc::new(client),
@@ -75,11 +99,12 @@ impl ConclaveClient {
             tracker_viewport_closed: Arc::new(AtomicBool::new(false)),
             tracker_error: Arc::new(RwLock::new(None)),
             tracker_op_pending: Arc::new(AtomicBool::new(false)),
+            pending_tracker_info: Arc::new(RwLock::new(None)),
         }
     }
 }
 
-impl eframe::App for ConclaveClient {
+impl eframe::App for ConclaveGUI {
     #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut Frame) {
         if self.discovery_viewport_closed.swap(false, Ordering::SeqCst) {
@@ -204,13 +229,11 @@ impl eframe::App for ConclaveClient {
 
         // Tracker List viewport
         if self.show_tracker_list {
-            // Capture the tokio handle here, in fn ui(), which is called from the main
-            // thread inside tokio's block_on. The deferred closure may run on a different
-            // thread without a tokio context, so Handle::current() must not be called there.
             let closed_arc = self.tracker_viewport_closed.clone();
             let error_arc = self.tracker_error.clone();
             let op_pending_arc = self.tracker_op_pending.clone();
             let client_arc = self.client.clone();
+            let pending_info_arc = self.pending_tracker_info.clone();
 
             ui.ctx().show_viewport_deferred(
                 egui::ViewportId::from_hash_of("tracker_list"),
@@ -303,7 +326,10 @@ impl eframe::App for ConclaveClient {
                             ui.label("Port:");
                             ui.add(egui::TextEdit::singleline(&mut form_port).desired_width(60.0));
                         });
+                        let has_pending_info =
+                            pending_info_arc.read().ok().is_some_and(|g| g.is_some());
                         let can_add = !is_pending
+                            && !has_pending_info
                             && !form_host.is_empty()
                             && form_port.parse::<u16>().is_ok();
                         ui.add_space(4.0);
@@ -311,6 +337,76 @@ impl eframe::App for ConclaveClient {
                             add_request = true;
                         }
                     });
+
+                    // Confirmation dialog: shown after the tracker key has been fetched
+                    let maybe_tracker = pending_info_arc.read().ok().and_then(|g| g.clone());
+                    if let Some(ref tracker) = maybe_tracker {
+                        use base64::Engine as _;
+                        use pqcrypto_traits::sign::PublicKey as _;
+                        let key_b64 = base64::engine::general_purpose::STANDARD
+                            .encode(tracker.key.as_bytes());
+                        let key_sha256 = hex::encode(Sha256::digest(tracker.key.as_bytes()));
+
+                        let mut confirmed = false;
+                        let mut cancelled = false;
+
+                        egui::Window::new("Confirm Tracker")
+                            .collapsible(false)
+                            .resizable(true)
+                            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                            .show(ctx, |ui| {
+                                ui.label(format!("Add tracker {}:{}?", tracker.name, tracker.port));
+                                ui.separator();
+                                ui.label(egui::RichText::new("Public Key (SHA256):").strong());
+                                ui.label(key_sha256);
+                                ui.label(egui::RichText::new("Public Key (base64):").strong());
+                                egui::ScrollArea::vertical()
+                                    .id_salt("tracker_key_scroll")
+                                    .max_height(120.0)
+                                    .show(ui, |ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(&key_b64)
+                                                    .monospace()
+                                                    .size(10.0),
+                                            )
+                                            .wrap(),
+                                        );
+                                    });
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    if ui.button("Add").clicked() {
+                                        confirmed = true;
+                                    }
+                                    if ui.button("Cancel").clicked() {
+                                        cancelled = true;
+                                    }
+                                });
+                            });
+
+                        if confirmed {
+                            if let Some(tracker) = maybe_tracker {
+                                let client = client_arc.clone();
+                                let err_arc = error_arc.clone();
+                                let pending = op_pending_arc.clone();
+                                let info_arc = pending_info_arc.clone();
+                                pending.store(true, Ordering::SeqCst);
+                                tokio::spawn(async move {
+                                    if let Err(e) = client.add_tracker(tracker).await
+                                        && let Ok(mut err) = err_arc.write()
+                                    {
+                                        *err = Some(e.to_string());
+                                    }
+                                    if let Ok(mut info) = info_arc.write() {
+                                        *info = None;
+                                    }
+                                    pending.store(false, Ordering::SeqCst);
+                                });
+                            }
+                        } else if cancelled && let Ok(mut info) = pending_info_arc.write() {
+                            *info = None;
+                        }
+                    }
 
                     if let Some((name, port)) = remove_request {
                         let client = client_arc.clone();
@@ -328,41 +424,41 @@ impl eframe::App for ConclaveClient {
                     }
 
                     if add_request {
-                        let client = client_arc.clone();
                         let err_arc = error_arc.clone();
                         let pending = op_pending_arc.clone();
+                        let info_arc = pending_info_arc.clone();
                         pending.store(true, Ordering::SeqCst);
-                        {
-                            // Can't hold the lock for too long.
-                            if let Ok(mut err) = err_arc.write() {
-                                *err = None;
-                            }
+                        if let Ok(mut err) = err_arc.write() {
+                            *err = None;
                         }
 
                         let name = std::mem::take(&mut form_host);
-                        let Ok(port) = form_port.parse::<u16>() else {
-                            error!("Invalid port: {form_port}");
+                        let port_str = std::mem::take(&mut form_port);
+                        let Ok(port) = port_str.parse::<u16>() else {
+                            error!("Invalid port: {port_str}");
                             if let Ok(mut err) = err_arc.write() {
-                                *err = Some(format!("Invalid port: {form_port}"));
+                                *err = Some(format!("Invalid port: {port_str}"));
                             }
-                            return;
-                        };
-                        form_port.clear();
-
-                        let Ok(tracker_result) = futures::executor::block_on(
-                            conclave_client::get_tracker_key(&name, port),
-                        ) else {
-                            if let Ok(mut err) = err_arc.write() {
-                                *err = Some(format!("Failed to get tracker key for {name}:{port}"));
-                            }
+                            pending.store(false, Ordering::SeqCst);
+                            ctx.data_mut(|d| {
+                                d.insert_temp(form_host_id, name);
+                                d.insert_temp(form_port_id, port_str);
+                            });
                             return;
                         };
 
                         tokio::spawn(async move {
-                            if let Err(e) = client.add_tracker(tracker_result).await
-                                && let Ok(mut err) = err_arc.write()
-                            {
-                                *err = Some(e.to_string());
+                            match conclave_client::get_tracker_key(&name, port).await {
+                                Ok(tracker) => {
+                                    if let Ok(mut info) = info_arc.write() {
+                                        *info = Some(tracker);
+                                    }
+                                }
+                                Err(e) => {
+                                    if let Ok(mut err) = err_arc.write() {
+                                        *err = Some(format!("Failed to get tracker key: {e}"));
+                                    }
+                                }
                             }
                             pending.store(false, Ordering::SeqCst);
                         });

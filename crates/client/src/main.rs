@@ -44,6 +44,6 @@ async fn main() -> eframe::Result {
     eframe::run_native(
         "Conclave",
         native_options,
-        Box::new(|cc| Ok(Box::new(gui::ConclaveClient::new(client, cc)))),
+        Box::new(|cc| Ok(Box::new(gui::ConclaveGUI::new(client, cc)))),
     )
 }
