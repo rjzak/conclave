@@ -2,6 +2,7 @@
 
 use conclave_client::config::Tracker;
 use conclave_client::{Client, DiscoveredServer, discover_servers};
+use conclave_common::tracker::Advertise;
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -49,6 +50,19 @@ fn do_start_discovery(
     });
 }
 
+fn format_uptime(d: chrono::Duration) -> String {
+    let hours = d.num_hours();
+    let mins = d.num_minutes() % 60;
+    let secs = d.num_seconds() % 60;
+    if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else if mins > 0 {
+        format!("{mins}m {secs}s")
+    } else {
+        format!("{secs}s")
+    }
+}
+
 /// GUI client state
 #[derive(Debug)]
 pub struct ConclaveGUI {
@@ -60,6 +74,9 @@ pub struct ConclaveGUI {
 
     /// Showing the window displaying known Conclave trackers
     show_tracker_list: bool,
+
+    /// Showing the window displaying servers advertised via trackers
+    show_tracker_servers: bool,
 
     /// Discovered local Conclave servers
     discovered_servers: Arc<RwLock<HashSet<DiscoveredServer>>>,
@@ -84,6 +101,18 @@ pub struct ConclaveGUI {
 
     /// Tracker fetched from network, awaiting user confirmation before adding
     pending_tracker_info: Arc<RwLock<Option<Tracker>>>,
+
+    /// Tracker servers window closed
+    tracker_servers_viewport_closed: Arc<AtomicBool>,
+
+    /// Servers discovered via trackers
+    tracker_servers: Arc<RwLock<Vec<Advertise>>>,
+
+    /// Whether we're fetching servers from trackers
+    tracker_servers_running: Arc<AtomicBool>,
+
+    /// Any errors encountered fetching servers from trackers
+    tracker_servers_error: Arc<RwLock<Option<String>>>,
 }
 
 impl ConclaveGUI {
@@ -92,6 +121,7 @@ impl ConclaveGUI {
             client: Arc::new(client),
             show_advertised_servers_list: false,
             show_tracker_list: false,
+            show_tracker_servers: false,
             discovered_servers: Arc::new(RwLock::new(HashSet::new())),
             discovery_running: Arc::new(AtomicBool::new(false)),
             discovery_error: Arc::new(RwLock::new(None)),
@@ -100,6 +130,10 @@ impl ConclaveGUI {
             tracker_error: Arc::new(RwLock::new(None)),
             tracker_op_pending: Arc::new(AtomicBool::new(false)),
             pending_tracker_info: Arc::new(RwLock::new(None)),
+            tracker_servers_viewport_closed: Arc::new(AtomicBool::new(false)),
+            tracker_servers: Arc::new(RwLock::new(Vec::new())),
+            tracker_servers_running: Arc::new(AtomicBool::new(false)),
+            tracker_servers_error: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -112,6 +146,12 @@ impl eframe::App for ConclaveGUI {
         }
         if self.tracker_viewport_closed.swap(false, Ordering::SeqCst) {
             self.show_tracker_list = false;
+        }
+        if self
+            .tracker_servers_viewport_closed
+            .swap(false, Ordering::SeqCst)
+        {
+            self.show_tracker_servers = false;
         }
 
         if self.discovery_running.load(Ordering::SeqCst) {
@@ -126,8 +166,12 @@ impl eframe::App for ConclaveGUI {
                     }
                 });
                 ui.menu_button("View", |ui| {
-                    ui.checkbox(&mut self.show_advertised_servers_list, "Server Discovery");
+                    ui.checkbox(
+                        &mut self.show_advertised_servers_list,
+                        "Local Server Discovery",
+                    );
                     ui.checkbox(&mut self.show_tracker_list, "Trackers");
+                    ui.checkbox(&mut self.show_tracker_servers, "Servers Listing");
                 });
                 ui.add_space(16.0);
                 egui::widgets::global_theme_preference_buttons(ui);
@@ -467,6 +511,139 @@ impl eframe::App for ConclaveGUI {
                     ctx.data_mut(|d| {
                         d.insert_temp(form_host_id, form_host);
                         d.insert_temp(form_port_id, form_port);
+                    });
+                },
+            );
+        }
+
+        // Tracker Servers viewport
+        if self.show_tracker_servers {
+            let closed_arc = self.tracker_servers_viewport_closed.clone();
+            let running_arc = self.tracker_servers_running.clone();
+            let servers_arc = self.tracker_servers.clone();
+            let error_arc = self.tracker_servers_error.clone();
+            let client_arc = self.client.clone();
+
+            ui.ctx().show_viewport_deferred(
+                egui::ViewportId::from_hash_of("tracker_servers"),
+                egui::ViewportBuilder::default()
+                    .with_title("Tracker Servers")
+                    .with_inner_size([700.0, 400.0])
+                    .with_resizable(true),
+                move |ctx, _class| {
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        closed_arc.store(true, Ordering::SeqCst);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    if running_arc.load(Ordering::SeqCst) {
+                        ctx.request_repaint();
+                    }
+
+                    let is_running = running_arc.load(Ordering::SeqCst);
+
+                    egui::CentralPanel::default().show_inside(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.heading("Servers via Trackers");
+                            ui.add_space(8.0);
+                            if is_running {
+                                ui.add(egui::Spinner::new());
+                            } else if ui.button("Refresh").clicked()
+                                && !running_arc.swap(true, Ordering::SeqCst)
+                            {
+                                if let Ok(mut err) = error_arc.write() {
+                                    *err = None;
+                                }
+                                if let Ok(mut servers) = servers_arc.write() {
+                                    servers.clear();
+                                }
+                                let client = client_arc.clone();
+                                let srv = servers_arc.clone();
+                                let err = error_arc.clone();
+                                let run = running_arc.clone();
+                                tokio::spawn(async move {
+                                    match client.list_servers_from_trackers().await {
+                                        Ok(found) => {
+                                            if let Ok(mut servers) = srv.write() {
+                                                *servers =
+                                                    found.into_iter().collect::<Vec<_>>();
+                                                servers.sort_by(|a, b| a.name.cmp(&b.name));
+                                            }
+                                        }
+                                        Err(e) => {
+                                            if let Ok(mut err) = err.write() {
+                                                *err = Some(e.to_string());
+                                            }
+                                        }
+                                    }
+                                    run.store(false, Ordering::SeqCst);
+                                });
+                            }
+                        });
+                        ui.separator();
+
+                        {
+                            let Ok(error) = error_arc.read() else {
+                                error!("Failed to read tracker servers error state");
+                                return;
+                            };
+                            if let Some(err) = error.as_ref() {
+                                ui.colored_label(egui::Color32::RED, format!("Error: {err}"));
+                                return;
+                            }
+                        }
+
+                        let Ok(servers) = servers_arc.read() else {
+                            error!("Failed to read tracker servers");
+                            return;
+                        };
+
+                        if is_running {
+                            ui.label("Fetching servers from trackers...");
+                        } else if servers.is_empty() {
+                            ui.label("No servers found. Make sure trackers are configured and reachable.");
+                        } else {
+                            egui::ScrollArea::both().show(ui, |ui| {
+                                egui::Grid::new("tracker_servers_grid")
+                                    .striped(true)
+                                    .spacing([12.0, 4.0])
+                                    .show(ui, |ui| {
+                                        // Header row
+                                        ui.label(egui::RichText::new("Name").strong());
+                                        ui.label(egui::RichText::new("Version").strong());
+                                        ui.label(egui::RichText::new("Address").strong());
+                                        ui.label(egui::RichText::new("Users").strong());
+                                        ui.label(egui::RichText::new("Guests").strong());
+                                        ui.label(egui::RichText::new("Uptime").strong());
+                                        ui.label(egui::RichText::new("Description").strong());
+                                        ui.end_row();
+
+                                        for server in servers.iter() {
+                                            ui.label(
+                                                egui::RichText::new(&server.name).strong(),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "v{}",
+                                                    server.version
+                                                ))
+                                                .monospace(),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(&server.url).monospace(),
+                                            );
+                                            ui.label(server.users_connected.to_string());
+                                            ui.label(if server.anonymous {
+                                                "Yes"
+                                            } else {
+                                                "No"
+                                            });
+                                            ui.label(format_uptime(server.uptime));
+                                            ui.label(&server.description);
+                                            ui.end_row();
+                                        }
+                                    });
+                            });
+                        }
                     });
                 },
             );
