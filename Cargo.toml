@@ -12,7 +12,7 @@ conclave-tracker = { path = "crates/tracker", version = "0.0", default-features 
 # External
 anyhow = { version = "1.0.102", default-features = false }
 argon2 = { version = "0.5.3", default-features = false }
-async-sqlite = { version = "0.5.7", default-features = false }
+async-sqlite = { version = "0.6.0", default-features = false }
 base64 = { version = "0.22.1", default-features = false }
 chacha20poly1305 = { version = "0.10.1", default-features = false }
 chrono = { version = "0.4.44", default-features = false }
@@ -20,12 +20,12 @@ clap = { version = "4.6.1", default-features = false }
 dashmap = { version = "6.1.0", default-features = false }
 dialoguer = { version = "0.12.0", default-features = false }
 ed25519-dalek = { version = "2.2.0", default-features = false }
-eframe = { version = "0.34.2", default-features = false }
+eframe = { version = "0.34.3", default-features = false }
 futures = { version = "0.3.32", default-features = false }
 hex = { version = "0.4.3", default-features = false }
 hkdf = { version = "0.13.0", default-features = false }
 home = { version = "0.5.12", default-features = false }
-mdns-sd = { version = "0.19.1", default-features = false }
+mdns-sd = { version = "0.20.0", default-features = false }
 pqcrypto-mldsa = { version = "0.1.2", default-features = false }
 pqcrypto-mlkem = { version = "0.1.1", default-features = false }
 pqcrypto-traits = { version = "0.3.5", default-features = false }
@@ -39,7 +39,7 @@ tokio = { version = "1.52.3", default-features = false }
 toml = { version = "1.1.2", default-features = false }
 tracing = { version = "0.1.44", default-features = false }
 tracing-subscriber = { version = "0.3.23", default-features = false }
-uuid = { version = "1.23.1", default-features = false }
+uuid = { version = "1.23.2", default-features = false }
 wgpu = { version = "29", default-features = false } # Needs to be the same version used by egui
 zeroize = { version = "1.8.2", default-features = false }
 
