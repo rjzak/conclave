@@ -28,7 +28,7 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --all-features
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@50b4a718b59c718df4ef27a3b445f86cd57b9f00 # v2.80.0
+        uses: taiki-e/install-action@6887963ccf37a9ddcd8c5fa4baeb3e1e5fd61fa1 # v2.81.2
         with:
           tool: cargo-llvm-cov
         if: ${{ matrix.platform.runner == 'ubuntu-latest' }}
