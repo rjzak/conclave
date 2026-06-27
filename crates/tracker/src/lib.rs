@@ -326,7 +326,7 @@ impl<const DURATION_SECONDS: u64> eframe::App for State<DURATION_SECONDS> {
     fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
         ui.request_repaint();
 
-        eframe::egui::CentralPanel::default().show_inside(ui, |ui| {
+        eframe::egui::CentralPanel::default().show(ui, |ui| {
             ui.label(format!("Servers: {}", self.servers.len()));
             ui.label(format!("Queries: {}", self.queries()));
             ui.separator();

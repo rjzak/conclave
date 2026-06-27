@@ -325,7 +325,7 @@ impl eframe::App for ConclaveGUI {
         }
 
         // ── Top-bar menu ──────────────────────────────────────────────────
-        egui::Panel::top("top_panel").show_inside(ui, |ui| {
+        egui::Panel::top("top_panel").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Quit").clicked() {
@@ -371,7 +371,7 @@ impl eframe::App for ConclaveGUI {
                     }
 
                     let is_running = running_arc.load(Ordering::SeqCst);
-                    egui::CentralPanel::default().show_inside(ctx, |ui| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
                         ui.horizontal(|ui| {
                             ui.heading("Local Servers");
                             ui.add_space(8.0);
@@ -493,7 +493,7 @@ impl eframe::App for ConclaveGUI {
                     let mut remove_request: Option<(String, u16)> = None;
                     let mut add_request = false;
 
-                    egui::CentralPanel::default().show_inside(ctx, |ui| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
                         if is_pending {
                             ui.horizontal(|ui| {
                                 ui.add(egui::Spinner::new());
@@ -729,7 +729,7 @@ impl eframe::App for ConclaveGUI {
 
                     let is_running = running_arc.load(Ordering::SeqCst);
 
-                    egui::CentralPanel::default().show_inside(ctx, |ui| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
                         ui.horizontal(|ui| {
                             ui.heading("Servers via Trackers");
                             ui.add_space(8.0);
@@ -916,7 +916,7 @@ impl eframe::App for ConclaveGUI {
                     let mut connect_clicked = false;
                     let mut cancel_clicked = false;
 
-                    egui::CentralPanel::default().show_inside(ctx, |ui| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
                         ui.label(format!(
                             "{}  ({}:{})",
                             server.name, server.host, server.port
@@ -1085,7 +1085,7 @@ impl eframe::App for ConclaveGUI {
                     let mut disconnect_key: Option<String> = None;
                     let mut repaint_root = false;
 
-                    egui::CentralPanel::default().show_inside(ctx, |ui| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
                         ui.heading("Servers");
                         ui.separator();
 
@@ -1189,7 +1189,7 @@ impl eframe::App for ConclaveGUI {
                         .try_get_server_info()
                         .map_or_else(|| String::from("Server"), |s| s.name);
 
-                    egui::CentralPanel::default().show_inside(ctx, |ui| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
                         ui.heading(format!("Users on {server_name}"));
                         ui.separator();
 
@@ -1233,7 +1233,7 @@ impl eframe::App for ConclaveGUI {
         }
 
         // ── Root window: connection launcher ──────────────────────────────
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             if has_connections {
                 ui.horizontal(|ui| {
                     ui.label(format!("Connected to {} server(s).", conn_snapshots.len()));

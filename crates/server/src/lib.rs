@@ -907,7 +907,7 @@ impl eframe::App for State {
         ui.request_repaint();
 
         let connections = futures::executor::block_on(self.connections.read()).len();
-        eframe::egui::CentralPanel::default().show_inside(ui, |ui| {
+        eframe::egui::CentralPanel::default().show(ui, |ui| {
             ui.label(format!("Current clients: {connections}"));
             ui.label(format!(
                 "Total connections: {}",
@@ -931,7 +931,7 @@ impl eframe::App for State {
                         .with_inner_size([320.0, 100.0]),
                     move |context, _class| {
                         let text_buff_str = futures::executor::block_on(text_buff.read()).clone();
-                        eframe::egui::CentralPanel::default().show_inside(context, |inner_ui| {
+                        eframe::egui::CentralPanel::default().show(context, |inner_ui| {
                             inner_ui.label("Below is the initial admin password for this server.");
                             inner_ui.text_edit_singleline(&mut text_buff_str.as_str());
 
@@ -954,7 +954,7 @@ impl eframe::App for State {
                         .with_close_button(false)
                         .with_inner_size([200.0, 100.0]),
                     |context, _class| {
-                        eframe::egui::CentralPanel::default().show_inside(context, |inner_ui| {
+                        eframe::egui::CentralPanel::default().show(context, |inner_ui| {
                             inner_ui.label("Log will go here");
                         });
                     },
