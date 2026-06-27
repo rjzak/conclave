@@ -290,6 +290,24 @@ impl Client {
         self.config.read().await.save(&self.config_file)
     }
 
+    /// Read the user's configured default display name without blocking.
+    #[must_use]
+    pub fn default_display_name(&self) -> String {
+        self.config
+            .try_read()
+            .map(|c| c.default_display_name.clone())
+            .unwrap_or_default()
+    }
+
+    /// Read the user's saved server bookmarks without blocking.
+    #[must_use]
+    pub fn bookmarks(&self) -> Vec<BookmarkEntry> {
+        self.config
+            .try_read()
+            .map(|c| c.bookmarks.clone())
+            .unwrap_or_default()
+    }
+
     /// Connect to a server
     ///
     /// # Errors
@@ -303,7 +321,7 @@ impl Client {
         display_name: String,
         auth: Option<UserAuthentication>,
         key: Option<VerifyingKey>,
-    ) -> Result<usize> {
+    ) -> Result<ConclaveConnection> {
         let key = if let Some(key) = key {
             key
         } else {
@@ -359,9 +377,8 @@ impl Client {
                     );
                 }
                 let conn = ConclaveConnection::new(encrypted_stream, server_info, &display_name);
-                let mut conns = self.connection.write().await;
-                conns.push(conn);
-                Ok(conns.len())
+                self.connection.write().await.push(conn.clone());
+                Ok(conn)
             }
             ClientMessagesEncrypted::Error(error) => Err(error.into()),
             x => Err(anyhow!("Unexpected message from server: {x:?}")),

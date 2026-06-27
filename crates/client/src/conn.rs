@@ -167,6 +167,21 @@ impl ConclaveConnection {
         self.listen_handle.abort();
         Ok(())
     }
+
+    /// Non-blocking snapshot of the connected users; returns an empty vec if the lock is contended.
+    #[must_use]
+    pub fn try_get_connected_users(&self) -> Vec<ConnectedUser> {
+        self.connected_users
+            .try_read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    /// Non-blocking snapshot of the server information; returns `None` if the lock is contended.
+    #[must_use]
+    pub fn try_get_server_info(&self) -> Option<ServerInformation> {
+        self.server_info.try_read().ok().map(|g| g.clone())
+    }
 }
 
 impl std::fmt::Debug for ConclaveConnection {
