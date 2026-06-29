@@ -1017,25 +1017,23 @@ impl eframe::App for ConclaveGUI {
         // ── Snapshot active connections ───────────────────────────────────
         // (stable key = hash of the server's public key, display name,
         //  still-connected flag, and a clone of the connection).
-        let conn_snapshots: Vec<(String, String, bool, ConclaveConnection)> = self
+        // Clone the handles out from under the std RwLock first so the guard is
+        // released before building the snapshot. server_info()/connected_users()
+        // are synchronous reads, so no async runtime is touched on this thread.
+        let conns: Vec<ConclaveConnection> = self
             .active_connections
             .read()
-            .map(|conns| {
-                conns
-                    .iter()
-                    .enumerate()
-                    .map(|(i, conn)| {
-                        let info = conn.try_get_server_info();
-                        let key = info
-                            .as_ref()
-                            .map_or_else(|| format!("conn{i}"), |s| hex::encode(s.key.as_bytes()));
-                        let name = info.map_or_else(|| String::from("Server"), |s| s.name);
-                        let active = conn.connected_since().is_some();
-                        (key, name, active, conn.clone())
-                    })
-                    .collect()
-            })
+            .map(|c| c.clone())
             .unwrap_or_default();
+
+        let conn_snapshots: Vec<(String, String, bool, ConclaveConnection)> = conns
+            .into_iter()
+            .map(|conn| {
+                let info = conn.server_info();
+                let active = conn.connected_since().is_some();
+                (hex::encode(info.key.as_bytes()), info.name, active, conn)
+            })
+            .collect();
 
         let has_connections = !conn_snapshots.is_empty();
 
@@ -1127,18 +1125,14 @@ impl eframe::App for ConclaveGUI {
                     }
 
                     if let Some(key) = disconnect_key {
-                        let removed = {
-                            let mut conns = active_conns.write().ok();
-                            conns.as_mut().and_then(|c| {
-                                let idx = c.iter().position(|conn| {
-                                    conn.try_get_server_info()
-                                        .map(|s| hex::encode(s.key.as_bytes()))
-                                        .as_deref()
-                                        == Some(key.as_str())
-                                });
-                                idx.map(|i| c.remove(i))
-                            })
-                        };
+                        // server_info() is a synchronous (std-lock) read, so it is safe
+                        // to match on it while briefly holding the connections write lock.
+                        let removed = active_conns.write().ok().and_then(|mut c| {
+                            let idx = c
+                                .iter()
+                                .position(|conn| hex::encode(conn.server_info().key) == key);
+                            idx.map(|i| c.remove(i))
+                        });
                         if let Some(conn) = removed {
                             if let Ok(mut o) = open_windows.write() {
                                 o.remove(&key);
@@ -1184,19 +1178,15 @@ impl eframe::App for ConclaveGUI {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
 
-                    let users = conn.try_get_connected_users();
-                    let server_name = conn
-                        .try_get_server_info()
-                        .map_or_else(|| String::from("Server"), |s| s.name);
+                    let server_info = conn.server_info();
+                    let users = conn.get_connected_users();
 
                     egui::CentralPanel::default().show(ctx, |ui| {
-                        ui.heading(format!("Users on {server_name}"));
+                        ui.heading(format!("Users on {}", server_info.name));
                         ui.separator();
 
                         if users.is_empty() {
-                            ui.label(
-                                egui::RichText::new("No users visible — press Refresh.").weak(),
-                            );
+                            ui.label(egui::RichText::new("No users connected yet.").weak());
                         } else {
                             egui::ScrollArea::vertical().show(ui, |ui| {
                                 egui::Grid::new(format!("users_grid:{key_owned}"))
@@ -1217,17 +1207,11 @@ impl eframe::App for ConclaveGUI {
                                     });
                             });
                         }
-
-                        ui.add_space(8.0);
-                        if ui.button("Refresh").clicked() {
-                            let conn = conn.clone();
-                            tokio::spawn(async move {
-                                let _ = conn.update_connected_users().await;
-                            });
-                        }
                     });
 
-                    ctx.request_repaint_after(std::time::Duration::from_secs(5));
+                    // The server pushes roster changes automatically; repaint
+                    // periodically so those updates are picked up promptly.
+                    ctx.request_repaint_after(std::time::Duration::from_secs(2));
                 },
             );
         }

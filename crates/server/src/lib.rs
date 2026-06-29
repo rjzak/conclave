@@ -8,7 +8,9 @@
 #![forbid(unsafe_code)]
 
 use conclave_common::URL_PROTOCOL;
-use conclave_common::net::{DefaultEncryptedStream, random_keypair};
+use conclave_common::net::{
+    DEFAULT_REKEY_INTERVAL, DefaultEncryptedStream, EncryptedRead, EncryptedWrite, random_keypair,
+};
 use conclave_common::server::{
     ClientMessagesEncrypted, ConnectedUser, ServerError, ServerInformation,
     ServerMessagesEncrypted, UserAuthentication, unencrypted,
@@ -48,8 +50,9 @@ pub static VERSION: LazyLock<Version> =
 
 /// Client connection
 struct ClientConnection {
-    /// Encrypted connection to the client
-    conn: Arc<RwLock<DefaultEncryptedStream>>,
+    /// Write half of the encrypted connection to the client. The read half is
+    /// owned by the per-client task spawned in [`State::serve`].
+    conn: Arc<RwLock<EncryptedWrite<DEFAULT_REKEY_INTERVAL>>>,
 
     /// User information
     user: Arc<ConnectedUser>,
@@ -635,7 +638,7 @@ impl State {
 
         let disconnect_bytes = ServerMessagesEncrypted::Disconnect.to_vec();
         let listener = TcpListener::bind((self.ip, self.port)).await?;
-        tokio::spawn(async move {
+        let accept_handle = tokio::spawn(async move {
             while self_clone.serving.load(Ordering::Relaxed) {
                 match listener.accept().await {
                     Ok((mut socket, client)) => {
@@ -750,8 +753,11 @@ impl State {
                                                 continue;
                                             }
 
+                                            let (read_half, write_half) = stream.into_split();
+                                            let write = Arc::new(RwLock::new(write_half));
+                                            let addr = Arc::new(client);
                                             let connection = ClientConnection {
-                                                conn: Arc::new(RwLock::new(stream)),
+                                                conn: write.clone(),
                                                 user: Arc::new(ConnectedUser {
                                                     display_name,
                                                     admin: false,
@@ -759,9 +765,28 @@ impl State {
                                                     user_id,
                                                     timezone: user_local_time,
                                                 }),
-                                                addr: Arc::new(client),
+                                                addr: addr.clone(),
                                             };
                                             self_clone.connections.write().await.push(connection);
+                                            self_clone.total_visits.fetch_add(1, Ordering::Relaxed);
+
+                                            // Service this client on its own task so a slow
+                                            // or idle client can't stall the others and a
+                                            // disconnect is noticed as soon as it happens.
+                                            let client_state = self_clone.clone();
+                                            tokio::spawn(async move {
+                                                client_state
+                                                    .handle_client(read_half, write, addr)
+                                                    .await;
+                                            });
+
+                                            // Push the updated roster to every client,
+                                            // off the accept path so a slow client can't
+                                            // hold up new connections.
+                                            let broadcaster = self_clone.clone();
+                                            tokio::spawn(async move {
+                                                broadcaster.broadcast_user_list().await;
+                                            });
                                         }
                                         Ok(_) => {
                                             if let Err(e) = stream.send(&disconnect_bytes).await {
@@ -789,77 +814,109 @@ impl State {
             }
         });
 
+        accept_handle.await?;
+
+        Ok(())
+    }
+
+    /// Service a single client on its own task: read messages and respond until
+    /// the client disconnects or the socket errors, then drop it from the roster
+    /// and notify the remaining clients. The read half is owned here; the write
+    /// half is shared so the server can also push roster updates to this client.
+    async fn handle_client(
+        &self,
+        mut read: EncryptedRead<DEFAULT_REKEY_INTERVAL>,
+        write: Arc<RwLock<EncryptedWrite<DEFAULT_REKEY_INTERVAL>>>,
+        addr: Arc<SocketAddr>,
+    ) {
         let keep_alive_bytes = ServerMessagesEncrypted::KeepAlive.to_vec();
 
-        while self.serving.load(Ordering::Relaxed) {
-            let mut to_disconnect = Vec::new();
-            for (index, client) in self.connections.read().await.iter().enumerate() {
-                let mut conn = client.conn.write().await;
-                let Ok(message) = conn.recv().await else {
-                    continue;
-                };
-                match ServerMessagesEncrypted::from_bytes(&message) {
-                    Ok(ServerMessagesEncrypted::KeepAlive) => {
-                        if let Err(e) = conn.send(&keep_alive_bytes).await {
-                            error!("Failed to send keep alive: {e}");
-                        }
-                    }
+        loop {
+            let message = match read.recv().await {
+                Ok(message) => message,
+                // EOF here is the normal path for a client that drops without
+                // sending `Disconnect`; treat it as an ordinary disconnect.
+                Err(e) => {
+                    info!("Connection {addr:?} closed: {e}");
+                    break;
+                }
+            };
 
-                    Ok(ServerMessagesEncrypted::ServerInformationRequest) => {
-                        let connections = self.connections.read().await;
-                        let info =
-                            ClientMessagesEncrypted::ServerInformationResponse(ServerInformation {
-                                name: self.name.clone(),
-                                description: self.description.clone(),
-                                url: self.url.clone(),
-                                key: self.public_key,
-                                version: VERSION.clone(),
-                                anonymous: false,
-                                users_connected: u32::try_from(connections.len())
-                                    .unwrap_or_default(),
-                            })
-                            .to_vec();
-                        if let Err(e) = conn.send(&info).await {
-                            error!("Failed to send server info response: {e}");
-                        }
-                    }
-
-                    Ok(ServerMessagesEncrypted::Disconnect) => {
-                        to_disconnect.push(index);
-                    }
-
-                    Ok(ServerMessagesEncrypted::ListConnectedUsersRequest) => {
-                        let connected_users = self.connected_users().await;
-                        let response =
-                            ClientMessagesEncrypted::ListConnectedUsersResponse(connected_users)
-                                .to_vec();
-                        if let Err(e) = conn.send(&response).await {
-                            error!("Failed to send list connected users response: {e}");
-                        }
-                    }
-
-                    Ok(x) => {
-                        error!("Unexpected message from {client:?}: {x:?}");
-                        break;
-                    }
-                    Err(e) => {
-                        error!("Error decoding message from {client:?}: {e}");
-                        break;
+            match ServerMessagesEncrypted::from_bytes(&message) {
+                Ok(ServerMessagesEncrypted::KeepAlive) => {
+                    if let Err(e) = write.write().await.send(&keep_alive_bytes).await {
+                        error!("Failed to send keep alive to {addr:?}: {e}");
                     }
                 }
-            }
 
-            if !to_disconnect.is_empty() {
-                let mut connections = self.connections.write().await;
-                to_disconnect.sort_unstable();
-                to_disconnect.reverse();
-                for index in to_disconnect {
-                    connections.remove(index);
+                Ok(ServerMessagesEncrypted::ServerInformationRequest) => {
+                    let info =
+                        ClientMessagesEncrypted::ServerInformationResponse(ServerInformation {
+                            name: self.name.clone(),
+                            description: self.description.clone(),
+                            url: self.url.clone(),
+                            key: self.public_key,
+                            version: VERSION.clone(),
+                            anonymous: false,
+                            users_connected: u32::try_from(self.connections.read().await.len())
+                                .unwrap_or_default(),
+                        })
+                        .to_vec();
+                    if let Err(e) = write.write().await.send(&info).await {
+                        error!("Failed to send server info to {addr:?}: {e}");
+                    }
+                }
+
+                Ok(ServerMessagesEncrypted::ListConnectedUsersRequest) => {
+                    let response = ClientMessagesEncrypted::ListConnectedUsersResponse(
+                        self.connected_users().await,
+                    )
+                    .to_vec();
+                    if let Err(e) = write.write().await.send(&response).await {
+                        error!("Failed to send connected users to {addr:?}: {e}");
+                    }
+                }
+
+                Ok(ServerMessagesEncrypted::Disconnect) => break,
+
+                Ok(x) => {
+                    error!("Unexpected message from {addr:?}: {x:?}");
+                    break;
+                }
+                Err(e) => {
+                    error!("Error decoding message from {addr:?}: {e}");
+                    break;
                 }
             }
         }
 
-        Ok(())
+        // The client is gone: drop it from the roster and tell everyone else.
+        self.connections.write().await.retain(|c| c.addr != addr);
+        self.broadcast_user_list().await;
+    }
+
+    /// Send the current connected-users list to every connected client so their
+    /// rosters update automatically when someone joins or leaves.
+    async fn broadcast_user_list(&self) {
+        let response =
+            ClientMessagesEncrypted::ListConnectedUsersResponse(self.connected_users().await)
+                .to_vec();
+
+        // Clone the write-half handles out from under the read lock, then send
+        // without holding the connections lock.
+        let writers: Vec<_> = self
+            .connections
+            .read()
+            .await
+            .iter()
+            .map(|c| c.conn.clone())
+            .collect();
+
+        for writer in writers {
+            if let Err(e) = writer.write().await.send(&response).await {
+                error!("Failed to broadcast user list: {e}");
+            }
+        }
     }
 
     /// Get a list of connected users

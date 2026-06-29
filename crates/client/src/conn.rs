@@ -8,10 +8,14 @@ use std::ops::Not;
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, Local};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
+
+/// Maximum time to wait for a request to be written to the server. A stalled or
+/// half-open socket would otherwise hold the connection's write lock forever.
+const SEND_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10);
 
 /// Connection information
 #[allow(dead_code)]
@@ -21,11 +25,13 @@ pub struct ConclaveConnection {
     pub(crate) connection:
         Arc<RwLock<EncryptedWrite<{ conclave_common::net::DEFAULT_REKEY_INTERVAL }>>>,
 
-    /// Server information
-    pub(crate) server_info: Arc<RwLock<ServerInformation>>,
+    /// Server information. A `std` lock (never held across an `.await`) so the
+    /// GUI can read it synchronously without `block_on` on the render thread.
+    pub(crate) server_info: Arc<std::sync::RwLock<ServerInformation>>,
 
-    /// List of connected users
-    pub(crate) connected_users: Arc<RwLock<Vec<ConnectedUser>>>,
+    /// List of connected users. A `std` lock (never held across an `.await`) so
+    /// the GUI can read it synchronously without `block_on` on the render thread.
+    pub(crate) connected_users: Arc<std::sync::RwLock<Vec<ConnectedUser>>>,
 
     /// Display name shown for the user on this server
     pub(crate) display_name: Arc<RwLock<String>>,
@@ -41,8 +47,8 @@ impl ConclaveConnection {
     /// Create a connection object
     pub fn new(conn: DefaultEncryptedStream, info: ServerInformation, display_name: &str) -> Self {
         let (mut read, write) = conn.into_split();
-        let server_info = Arc::new(RwLock::new(info));
-        let connected_users = Arc::new(RwLock::new(Vec::new()));
+        let server_info = Arc::new(std::sync::RwLock::new(info));
+        let connected_users = Arc::new(std::sync::RwLock::new(Vec::new()));
 
         let mut conn = ConclaveConnection {
             connection: Arc::new(RwLock::new(write)),
@@ -60,9 +66,15 @@ impl ConclaveConnection {
             loop {
                 let data = match read.recv().await {
                     Ok(data) => data,
+                    // A recv error (EOF on disconnect, network failure, or a
+                    // desynced cipher) is unrecoverable. End the task instead of
+                    // `continue`-ing: on a closed socket `recv()` returns `Err`
+                    // immediately every iteration, which would busy-spin a worker
+                    // and flood the logs. Ending it also makes `connected_since()`
+                    // report the connection as gone.
                     Err(e) => {
-                        tracing::error!("Error reading from encrypted stream: {e:?}");
-                        continue;
+                        tracing::info!("Connection closed: {e}");
+                        break;
                     }
                 };
 
@@ -79,10 +91,18 @@ impl ConclaveConnection {
                     ClientMessagesEncrypted::KeepAlive => (),
                     ClientMessagesEncrypted::Disconnect => break,
                     ClientMessagesEncrypted::ServerInformationResponse(info) => {
-                        conn_clone.server_info.write().await.clone_from(&info);
+                        conn_clone
+                            .server_info
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone_from(&info);
                     }
                     ClientMessagesEncrypted::ListConnectedUsersResponse(users) => {
-                        conn_clone.connected_users.write().await.clone_from(&users);
+                        conn_clone
+                            .connected_users
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone_from(&users);
                     }
                     x => tracing::warn!("Received unexpected encrypted message: {x:?}"),
                 }
@@ -93,6 +113,16 @@ impl ConclaveConnection {
         conn
     }
 
+    /// Send an encrypted request to the server, bounded by [`SEND_TIMEOUT`] so a
+    /// dead or unresponsive socket surfaces as an error instead of wedging the
+    /// connection's write lock.
+    async fn send_request(&self, request: &[u8]) -> Result<()> {
+        let mut guard = self.connection.write().await;
+        tokio::time::timeout(SEND_TIMEOUT, guard.send(request))
+            .await
+            .map_err(|_| anyhow!("Timed out sending request to server"))?
+    }
+
     /// Update server information
     ///
     /// # Errors
@@ -100,13 +130,17 @@ impl ConclaveConnection {
     /// Network errors are possible
     pub async fn update_server_info(&self) -> Result<()> {
         let request = ServerMessagesEncrypted::ServerInformationRequest.to_vec();
-        self.connection.write().await.send(&request).await?;
-        Ok(())
+        self.send_request(&request).await
     }
 
-    /// Get a copy of the server information
-    pub async fn server_info(&self) -> ServerInformation {
-        self.server_info.read().await.clone()
+    /// Get a copy of the server information. Synchronous: callable directly from
+    /// the GUI render thread without blocking on the async runtime.
+    #[must_use]
+    pub fn server_info(&self) -> ServerInformation {
+        self.server_info
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Get users connected to the server
@@ -116,13 +150,17 @@ impl ConclaveConnection {
     /// Network errors are possible
     pub async fn update_connected_users(&self) -> Result<()> {
         let request = ServerMessagesEncrypted::ListConnectedUsersRequest.to_vec();
-        self.connection.write().await.send(&request).await?;
-        Ok(())
+        self.send_request(&request).await
     }
 
-    /// Get a copy of the connected users
-    pub async fn get_connected_users(&self) -> Vec<ConnectedUser> {
-        self.connected_users.read().await.clone()
+    /// Get a copy of the connected users. Synchronous: callable directly from the
+    /// GUI render thread without blocking on the async runtime.
+    #[must_use]
+    pub fn get_connected_users(&self) -> Vec<ConnectedUser> {
+        self.connected_users
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Send a keep-alive message to the server
@@ -132,8 +170,7 @@ impl ConclaveConnection {
     /// Network errors are possible
     pub async fn send_keep_alive(&self) -> Result<()> {
         let request = ServerMessagesEncrypted::KeepAlive.to_vec();
-        self.connection.write().await.send(&request).await?;
-        Ok(())
+        self.send_request(&request).await
     }
 
     /// When the connection was established, if still connected.
@@ -163,24 +200,9 @@ impl ConclaveConnection {
     /// Network errors are possible
     pub async fn disconnect(&self) -> Result<()> {
         let request = ServerMessagesEncrypted::Disconnect.to_vec();
-        self.connection.write().await.send(&request).await?;
+        let result = self.send_request(&request).await;
         self.listen_handle.abort();
-        Ok(())
-    }
-
-    /// Non-blocking snapshot of the connected users; returns an empty vec if the lock is contended.
-    #[must_use]
-    pub fn try_get_connected_users(&self) -> Vec<ConnectedUser> {
-        self.connected_users
-            .try_read()
-            .map(|g| g.clone())
-            .unwrap_or_default()
-    }
-
-    /// Non-blocking snapshot of the server information; returns `None` if the lock is contended.
-    #[must_use]
-    pub fn try_get_server_info(&self) -> Option<ServerInformation> {
-        self.server_info.try_read().ok().map(|g| g.clone())
+        result
     }
 }
 

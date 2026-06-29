@@ -396,10 +396,7 @@ impl Client {
         let mut conns = self.connection.write().await;
         for conn in conns.drain(..) {
             if let Err(e) = conn.disconnect().await {
-                error!(
-                    "Error disconnecting from {}: {e}",
-                    conn.server_info.read().await.name
-                );
+                error!("Error disconnecting from {}: {e}", conn.server_info().name);
             }
         }
     }
