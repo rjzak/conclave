@@ -28,11 +28,7 @@ async fn integration() {
 
     // Set up the tracker
     let keys = conclave_tracker::Keys::default();
-    let tracker = Arc::new(conclave_tracker::DefaultState::new(
-        LOCALHOST,
-        TRACKER_PORT,
-        keys,
-    ));
+    let tracker = Arc::new(conclave_tracker::State::new(LOCALHOST, TRACKER_PORT, keys));
     let tracker_clone = tracker.clone();
     let tracker_process = tokio::spawn(async move {
         eprintln!("Tracker process starting");

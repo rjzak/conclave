@@ -186,11 +186,9 @@ pub struct ConclaveGUI {
     /// Servers discovered via trackers
     tracker_servers: Arc<RwLock<Vec<Advertise>>>,
 
-    /// Whether we're fetching servers from trackers
-    tracker_servers_running: Arc<AtomicBool>,
-
-    /// Any errors encountered fetching servers from trackers
-    tracker_servers_error: Arc<RwLock<Option<String>>>,
+    /// Stop handle for the live tracker-server subscription; `Some` while the
+    /// tracker-servers window is open. Dropping it stops the subscription.
+    tracker_servers_watch: Option<tokio::sync::watch::Sender<bool>>,
 
     /// Server chosen by the user, pending authentication
     pending_server: Arc<RwLock<Option<PendingServer>>>,
@@ -253,8 +251,7 @@ impl ConclaveGUI {
             pending_tracker_info: Arc::new(RwLock::new(None)),
             tracker_servers_viewport_closed: Arc::new(AtomicBool::new(false)),
             tracker_servers: Arc::new(RwLock::new(Vec::new())),
-            tracker_servers_running: Arc::new(AtomicBool::new(false)),
-            tracker_servers_error: Arc::new(RwLock::new(None)),
+            tracker_servers_watch: None,
             pending_server: Arc::new(RwLock::new(None)),
             connect_pending: Arc::new(AtomicBool::new(false)),
             connect_error: Arc::new(RwLock::new(None)),
@@ -288,6 +285,24 @@ impl eframe::App for ConclaveGUI {
             .swap(false, Ordering::SeqCst)
         {
             self.show_tracker_servers = false;
+        }
+
+        // Keep the live tracker-server subscription running exactly while the
+        // window is open: start it on open, stop it (drop the handle) on close.
+        if self.show_tracker_servers {
+            if self.tracker_servers_watch.is_none() {
+                if let Ok(mut servers) = self.tracker_servers.write() {
+                    servers.clear();
+                }
+                self.tracker_servers_watch = Some(
+                    self.client
+                        .watch_servers_from_trackers(&self.tracker_servers),
+                );
+            }
+        } else if self.tracker_servers_watch.take().is_some()
+            && let Ok(mut servers) = self.tracker_servers.write()
+        {
+            servers.clear();
         }
         if self.login_window_closed.swap(false, Ordering::SeqCst) {
             if let Ok(mut p) = self.pending_server.write() {
@@ -330,7 +345,6 @@ impl eframe::App for ConclaveGUI {
         // ── Request repaint while async operations run ────────────────────
         if self.discovery_running.load(Ordering::SeqCst)
             || self.connect_pending.load(Ordering::SeqCst)
-            || self.tracker_servers_running.load(Ordering::SeqCst)
             || self.tracker_op_pending.load(Ordering::SeqCst)
         {
             ui.ctx().request_repaint();
@@ -718,10 +732,7 @@ impl eframe::App for ConclaveGUI {
         // ── Tracker Servers viewport ──────────────────────────────────────
         if self.show_tracker_servers {
             let closed_arc = self.tracker_servers_viewport_closed.clone();
-            let running_arc = self.tracker_servers_running.clone();
             let servers_arc = self.tracker_servers.clone();
-            let error_arc = self.tracker_servers_error.clone();
-            let client_arc = self.client.clone();
             let pending_server_arc = self.pending_server.clone();
             let connect_error_arc = self.connect_error.clone();
 
@@ -736,74 +747,28 @@ impl eframe::App for ConclaveGUI {
                         closed_arc.store(true, Ordering::SeqCst);
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
-                    if running_arc.load(Ordering::SeqCst) {
-                        ctx.request_repaint();
-                    }
-
-                    let is_running = running_arc.load(Ordering::SeqCst);
+                    // The listing is pushed by the trackers; repaint periodically
+                    // so those updates show up promptly.
+                    ctx.request_repaint_after(std::time::Duration::from_millis(500));
 
                     egui::CentralPanel::default().show(ctx, |ui| {
                         ui.horizontal(|ui| {
                             ui.heading("Servers via Trackers");
                             ui.add_space(8.0);
-                            if is_running {
-                                ui.add(egui::Spinner::new());
-                            } else if ui.button("Refresh").clicked()
-                                && !running_arc.swap(true, Ordering::SeqCst)
-                            {
-                                if let Ok(mut err) = error_arc.write() {
-                                    *err = None;
-                                }
-                                if let Ok(mut servers) = servers_arc.write() {
-                                    servers.clear();
-                                }
-                                let client = client_arc.clone();
-                                let srv = servers_arc.clone();
-                                let err = error_arc.clone();
-                                let run = running_arc.clone();
-                                tokio::spawn(async move {
-                                    match client.list_servers_from_trackers().await {
-                                        Ok(found) => {
-                                            if let Ok(mut servers) = srv.write() {
-                                                *servers =
-                                                    found.into_iter().collect::<Vec<_>>();
-                                                servers.sort_by(|a, b| a.name.cmp(&b.name));
-                                            }
-                                        }
-                                        Err(e) => {
-                                            if let Ok(mut err) = err.write() {
-                                                *err = Some(e.to_string());
-                                            }
-                                        }
-                                    }
-                                    run.store(false, Ordering::SeqCst);
-                                });
-                            }
+                            ui.label(
+                                egui::RichText::new("live")
+                                    .small()
+                                    .color(egui::Color32::from_rgb(0x4c, 0xaf, 0x50)),
+                            );
                         });
                         ui.separator();
-
-                        {
-                            let Ok(error) = error_arc.read() else {
-                                error!("Failed to read tracker servers error state");
-                                return;
-                            };
-                            if let Some(err) = error.as_ref() {
-                                ui.colored_label(
-                                    egui::Color32::RED,
-                                    format!("Error: {err}"),
-                                );
-                                return;
-                            }
-                        }
 
                         let Ok(servers) = servers_arc.read() else {
                             error!("Failed to read tracker servers");
                             return;
                         };
 
-                        if is_running {
-                            ui.label("Fetching servers from trackers...");
-                        } else if servers.is_empty() {
+                        if servers.is_empty() {
                             ui.label(
                                 "No servers found. Make sure trackers are configured and reachable.",
                             );
@@ -1621,31 +1586,10 @@ impl eframe::App for ConclaveGUI {
                         }
 
                         if ui.button("Find via Trackers").clicked() {
+                            // Opening the window starts a live subscription that
+                            // keeps the listing updated (see the reconcile logic
+                            // at the top of `update`).
                             self.show_tracker_servers = true;
-                            // Auto-fetch if idle.
-                            if !self.tracker_servers_running.load(Ordering::SeqCst) {
-                                let run_arc = self.tracker_servers_running.clone();
-                                let srv_arc = self.tracker_servers.clone();
-                                let err_arc = self.tracker_servers_error.clone();
-                                let client_arc = self.client.clone();
-                                run_arc.store(true, Ordering::SeqCst);
-                                tokio::spawn(async move {
-                                    match client_arc.list_servers_from_trackers().await {
-                                        Ok(found) => {
-                                            if let Ok(mut servers) = srv_arc.write() {
-                                                *servers = found.into_iter().collect::<Vec<_>>();
-                                                servers.sort_by(|a, b| a.name.cmp(&b.name));
-                                            }
-                                        }
-                                        Err(e) => {
-                                            if let Ok(mut err) = err_arc.write() {
-                                                *err = Some(e.to_string());
-                                            }
-                                        }
-                                    }
-                                    run_arc.store(false, Ordering::SeqCst);
-                                });
-                            }
                         }
 
                         if ui.button("Direct Connect").clicked() {

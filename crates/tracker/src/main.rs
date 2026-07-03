@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             std::process::exit(1);
         })
         .unwrap();
-    let tracker = conclave_tracker::DefaultState::new(args.ip, args.port, keys);
+    let tracker = conclave_tracker::State::new(args.ip, args.port, keys);
     println!("Listening on {}:{}", args.ip, args.port);
     tracker.serve().await?;
     Ok(std::process::ExitCode::SUCCESS)
@@ -59,11 +59,11 @@ fn main() -> eframe::Result {
             std::process::exit(1);
         })
         .unwrap();
-    let tracker = conclave_tracker::DefaultState::new(args.ip, args.port, keys);
+    let tracker = conclave_tracker::State::new(args.ip, args.port, keys);
     println!("Listening on {}:{}", args.ip, args.port);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_io()
+        .enable_all()
         .build()
         .unwrap();
     let tracker_copy = tracker.clone();

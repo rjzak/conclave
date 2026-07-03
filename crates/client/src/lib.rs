@@ -244,6 +244,98 @@ impl Client {
         Ok(servers_set)
     }
 
+    /// Subscribe to every configured tracker for a live server listing.
+    ///
+    /// Spawns a background task per tracker that holds a persistent connection
+    /// and rewrites `out` with the merged, de-duplicated set of advertised
+    /// servers each time any tracker pushes a change. Dropping the returned
+    /// handle (or sending `true` on it) stops every task.
+    #[must_use]
+    pub fn watch_servers_from_trackers(
+        &self,
+        out: &Arc<std::sync::RwLock<Vec<Advertise>>>,
+    ) -> tokio::sync::watch::Sender<bool> {
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        // Latest listing per tracker (keyed by address), merged into `out`.
+        let latest: Arc<RwLock<std::collections::HashMap<String, Vec<Advertise>>>> =
+            Arc::new(RwLock::new(std::collections::HashMap::new()));
+
+        for tracker in self.list_trackers() {
+            let out = out.clone();
+            let latest = latest.clone();
+            let stop_rx = stop_rx.clone();
+            tokio::spawn(async move {
+                Self::watch_one_tracker(tracker, out, latest, stop_rx).await;
+            });
+        }
+
+        stop_tx
+    }
+
+    /// Hold a persistent subscription to a single tracker, applying every pushed
+    /// listing until stopped. Reconnects with a short delay after any drop.
+    async fn watch_one_tracker(
+        tracker: TrackerWithKey,
+        out: Arc<std::sync::RwLock<Vec<Advertise>>>,
+        latest: Arc<RwLock<std::collections::HashMap<String, Vec<Advertise>>>>,
+        mut stop: tokio::sync::watch::Receiver<bool>,
+    ) {
+        let addr = format!("{}:{}", tracker.host, tracker.port);
+
+        while !*stop.borrow() {
+            let mut stream = match TcpStream::connect(&addr).await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    error!("Failed to connect to tracker {addr}: {e}");
+                    if stop_or_delay(&mut stop).await {
+                        return;
+                    }
+                    continue;
+                }
+            };
+
+            if let Err(e) = TrackerProtocol::Subscribe.send(&mut stream).await {
+                error!("Failed to subscribe to tracker {addr}: {e}");
+                if stop_or_delay(&mut stop).await {
+                    return;
+                }
+                continue;
+            }
+
+            loop {
+                tokio::select! {
+                    // Stop signalled, or the sender was dropped: exit and let the
+                    // in-flight read be cancelled (the stream is discarded).
+                    _ = stop.changed() => return,
+                    message = TrackerProtocol::receive(&mut stream) => {
+                        match message {
+                            Ok(TrackerProtocol::ServersList(list)) => {
+                                if list.verify(&tracker.key) {
+                                    latest.write().await.insert(addr.clone(), list.servers);
+                                    merge_trackers(&latest, &out).await;
+                                } else {
+                                    warn!("Invalid signature from tracker {addr}");
+                                }
+                            }
+                            Ok(_) => {}
+                            // Disconnected: reconnect after a delay.
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+
+            // Forget this tracker's servers so they don't linger while we're
+            // disconnected, then push the merged view.
+            latest.write().await.remove(&addr);
+            merge_trackers(&latest, &out).await;
+
+            if stop_or_delay(&mut stop).await {
+                return;
+            }
+        }
+    }
+
     /// Add a server bookmark to the config file
     ///
     /// # Errors
@@ -533,4 +625,34 @@ pub fn discover_servers() -> Result<Vec<DiscoveredServer>> {
     }
 
     Ok(servers.into_iter().collect())
+}
+
+/// Merge every tracker's latest listing into `out`, de-duplicated by server URL
+/// and sorted by name.
+async fn merge_trackers(
+    latest: &RwLock<std::collections::HashMap<String, Vec<Advertise>>>,
+    out: &std::sync::RwLock<Vec<Advertise>>,
+) {
+    let mut by_url: std::collections::HashMap<String, Advertise> = std::collections::HashMap::new();
+    for servers in latest.read().await.values() {
+        for server in servers {
+            by_url.insert(server.url.clone(), server.clone());
+        }
+    }
+    let mut merged: Vec<Advertise> = by_url.into_values().collect();
+    merged.sort_by(|a, b| a.name.cmp(&b.name));
+    *out.write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = merged;
+}
+
+/// Wait out the reconnect delay, returning `true` early if the subscription was
+/// asked to stop (or its stop handle was dropped).
+async fn stop_or_delay(stop: &mut tokio::sync::watch::Receiver<bool>) -> bool {
+    /// Delay before reconnecting to a tracker after a failure or disconnect.
+    const RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+
+    tokio::select! {
+        _ = stop.changed() => true,
+        () = tokio::time::sleep(RECONNECT_DELAY) => false,
+    }
 }

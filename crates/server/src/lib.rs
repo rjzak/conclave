@@ -27,7 +27,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock};
 
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Result, anyhow, ensure};
 use argon2::password_hash::{SaltString, rand_core::OsRng};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use async_sqlite::rusqlite::fallible_iterator::FallibleIterator;
@@ -116,8 +116,13 @@ pub struct State {
     /// Trackers, expected to be IP:PORT
     trackers: Arc<RwLock<Vec<Tracker>>>,
 
-    /// Whether the tracker advertisements should be running
-    tracker_advertise: Arc<AtomicBool>,
+    /// Trackers we currently hold a persistent advertising connection to, so we
+    /// don't start a second task for the same tracker.
+    advertising: Arc<RwLock<std::collections::HashSet<Tracker>>>,
+
+    /// Bumped whenever advertised information changes (name, description, guest
+    /// policy, connected-user count) so the advertising tasks re-send at once.
+    tracker_update: Arc<tokio::sync::watch::Sender<u64>>,
 
     /// Active connections
     connections: Arc<RwLock<Vec<ClientConnection>>>,
@@ -257,7 +262,8 @@ impl State {
                 private_key,
                 sqlite,
                 trackers: Arc::new(RwLock::new(Vec::new())),
-                tracker_advertise: Arc::new(AtomicBool::new(false)),
+                advertising: Arc::new(RwLock::new(std::collections::HashSet::new())),
+                tracker_update: Arc::new(tokio::sync::watch::channel(0u64).0),
                 connections: Arc::new(RwLock::new(Vec::new())),
                 total_visits: Arc::new(AtomicU32::new(0)),
                 allow_anonymous: Arc::new(AtomicBool::new(true)), // Database default
@@ -397,7 +403,8 @@ impl State {
             private_key,
             sqlite,
             trackers: Arc::new(RwLock::new(trackers)),
-            tracker_advertise: Arc::new(AtomicBool::new(false)),
+            advertising: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            tracker_update: Arc::new(tokio::sync::watch::channel(0u64).0),
             connections: Arc::new(RwLock::new(Vec::new())),
             total_visits: Arc::new(AtomicU32::new(0)),
             allow_anonymous: Arc::new(AtomicBool::new(allow_anonymous)),
@@ -470,6 +477,7 @@ impl State {
             })
             .await?;
         self.allow_anonymous.store(anon, Ordering::Relaxed);
+        self.notify_trackers();
         Ok(())
     }
 
@@ -541,6 +549,7 @@ impl State {
             .conn(move |conn| conn.execute("UPDATE SERVER_CONFIG SET name = ?1", [name]))
             .await?;
         self.broadcast_server_info().await;
+        self.notify_trackers();
         Ok(())
     }
 
@@ -562,6 +571,7 @@ impl State {
             })
             .await?;
         self.broadcast_server_info().await;
+        self.notify_trackers();
         Ok(())
     }
 
@@ -770,12 +780,17 @@ impl State {
     ///
     /// Returns an error on a database failure.
     pub async fn add_tracker_host(&self, host: String, port: u16) -> Result<()> {
+        let tracker: Tracker = (host, port).into();
         {
-            let tracker = (host, port).into();
             let mut trackers = self.trackers.write().await;
-            if !trackers.iter().any(|t| t == &tracker) {
-                trackers.push(tracker);
+            if trackers.iter().any(|t| t == &tracker) {
+                return self.persist_trackers().await;
             }
+            trackers.push(tracker.clone());
+        }
+        // Start advertising to the new tracker right away if we're running.
+        if self.serving.load(Ordering::Relaxed) {
+            self.spawn_advertiser(tracker);
         }
         self.persist_trackers().await
     }
@@ -885,74 +900,137 @@ impl State {
     ///
     /// An error might occur if there's a database update problem.
     pub async fn add_tracker(&self, ip: IpAddr, port: u16) -> Result<()> {
-        let tracker = (ip, port).into();
-        let mut trackers = self.trackers.write().await;
-        trackers.push(tracker);
-
-        let trackers = trackers
-            .iter()
-            .map(Tracker::as_string)
-            .collect::<Vec<_>>()
-            .join("|");
+        let tracker: Tracker = (ip, port).into();
+        let joined = {
+            let mut trackers = self.trackers.write().await;
+            trackers.push(tracker.clone());
+            trackers
+                .iter()
+                .map(Tracker::as_string)
+                .collect::<Vec<_>>()
+                .join("|")
+        };
+        // If already serving, start advertising to the new tracker immediately;
+        // otherwise `serve` will start it for every configured tracker.
+        if self.serving.load(Ordering::Relaxed) {
+            self.spawn_advertiser(tracker);
+        }
         self.sqlite
             .conn(move |conn| {
                 let mut stmt = conn.prepare("UPDATE SERVER_CONFIG SET trackers = ?1")?;
-                stmt.execute([&trackers])
+                stmt.execute([&joined])
             })
             .await?;
 
         Ok(())
     }
 
-    /// Advertise the server to tracker(s).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if there's a network problem.
-    fn advertise_trackers(&self) -> Result<()> {
-        if self.tracker_advertise.load(Ordering::Relaxed) {
-            bail!("Already advertising to trackers");
+    /// The server's current advertisement for trackers.
+    async fn advertisement(&self) -> Advertise {
+        Advertise {
+            name: self.server_name(),
+            description: self.server_description(),
+            version: VERSION.clone(),
+            anonymous: self.allow_anonymous.load(Ordering::Relaxed),
+            users_connected: u32::try_from(self.connections.read().await.len()).unwrap_or_default(),
+            uptime: self.since(),
+            url: self.url.clone(),
+            key: self.public_key,
         }
+    }
 
-        self.tracker_advertise.store(true, Ordering::Relaxed);
+    /// Whether a tracker is currently configured.
+    async fn has_tracker(&self, tracker: &Tracker) -> bool {
+        self.trackers.read().await.iter().any(|t| t == tracker)
+    }
+
+    /// Wake the advertising tasks so they re-send the current advertisement to
+    /// their trackers immediately.
+    fn notify_trackers(&self) {
+        self.tracker_update.send_modify(|version| {
+            *version = version.wrapping_add(1);
+        });
+    }
+
+    /// Ensure a persistent advertising task is running for every configured
+    /// tracker.
+    async fn start_tracker_advertising(&self) {
+        for tracker in self.trackers.read().await.clone() {
+            self.spawn_advertiser(tracker);
+        }
+    }
+
+    /// Spawn a persistent advertising task for a tracker, unless one is already
+    /// running for it.
+    fn spawn_advertiser(&self, tracker: Tracker) {
         let self_clone = self.clone();
-
         tokio::spawn(async move {
+            // Claim the tracker so a concurrent add can't start a second task.
+            if !self_clone.advertising.write().await.insert(tracker.clone()) {
+                return;
+            }
+            self_clone.advertise_to_tracker(&tracker).await;
+            self_clone.advertising.write().await.remove(&tracker);
+        });
+    }
+
+    /// Maintain a persistent advertising connection to a single tracker: connect,
+    /// send the advertisement, and re-send it whenever our information changes.
+    /// Dropping the connection (on shutdown or when the tracker is removed) tells
+    /// the tracker we are gone. Reconnects with a short delay after any failure.
+    async fn advertise_to_tracker(&self, tracker: &Tracker) {
+        /// Delay before reconnecting after a connection failure.
+        const RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+        /// How often to re-check that this tracker is still configured.
+        const LIVENESS_CHECK: std::time::Duration = std::time::Duration::from_secs(10);
+
+        let mut updates = self.tracker_update.subscribe();
+
+        while self.serving.load(Ordering::Relaxed) && self.has_tracker(tracker).await {
+            let mut stream = match TcpStream::connect(tracker.as_string()).await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    error!("Failed to connect to tracker {}: {e}", tracker.as_string());
+                    tokio::time::sleep(RECONNECT_DELAY).await;
+                    continue;
+                }
+            };
+
+            let advert = AdvertiseServer(self.advertisement().await);
+            if let Err(e) = advert.send(&mut stream).await {
+                error!(
+                    "Failed to advertise to tracker {}: {e}",
+                    tracker.as_string()
+                );
+                tokio::time::sleep(RECONNECT_DELAY).await;
+                continue;
+            }
+
+            // Hold the connection open, re-advertising on every change, until we
+            // stop serving, the tracker is removed, or the connection breaks.
             loop {
-                let self_clone = self_clone.clone();
-                let advert = AdvertiseServer(Advertise {
-                    name: self_clone.server_name(),
-                    description: self_clone.server_description(),
-                    version: VERSION.clone(),
-                    anonymous: self_clone.allow_anonymous.load(Ordering::Relaxed),
-                    users_connected: u32::try_from(self_clone.connected_users().await.len())
-                        .unwrap_or_default(),
-                    uptime: self_clone.since(),
-                    url: self_clone.url.clone(),
-                    key: self_clone.public_key,
-                });
-
-                for tracker in self_clone.trackers.read().await.iter() {
-                    let Ok(mut stream) = TcpStream::connect(tracker.as_string()).await else {
-                        error!("Failed to connect to tracker {}", tracker.as_string());
-                        continue;
-                    };
-
-                    if let Err(e) = advert.send(&mut stream).await {
-                        error!("Failed to send advertise message: {e}");
+                tokio::select! {
+                    changed = updates.changed() => {
+                        if changed.is_err() {
+                            return; // state dropped: shutting down
+                        }
+                        let advert = AdvertiseServer(self.advertisement().await);
+                        if advert.send(&mut stream).await.is_err() {
+                            break; // reconnect
+                        }
+                    }
+                    () = tokio::time::sleep(LIVENESS_CHECK) => {
+                        if !self.serving.load(Ordering::Relaxed)
+                            || !self.has_tracker(tracker).await
+                        {
+                            return;
+                        }
                     }
                 }
-
-                if !self_clone.tracker_advertise.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                tokio::time::sleep(Duration::seconds(30).to_std().unwrap()).await;
             }
-        });
 
-        self.tracker_advertise.store(false, Ordering::Relaxed);
-        Ok(())
+            tokio::time::sleep(RECONNECT_DELAY).await;
+        }
     }
 
     /// Run the server logic, does not return.
@@ -963,8 +1041,10 @@ impl State {
     #[allow(clippy::too_many_lines)]
     #[tracing::instrument]
     pub async fn serve(&self) -> Result<()> {
-        self.advertise_trackers()?;
+        // Mark ourselves serving before starting the advertising tasks, which
+        // check this flag to decide whether to keep running.
         self.serving.store(true, Ordering::Relaxed);
+        self.start_tracker_advertising().await;
         let self_clone = self.clone();
 
         if let Some(mdns) = &self_clone.mdns {
@@ -1126,11 +1206,13 @@ impl State {
 
                                             // Push the updated roster to every client,
                                             // off the accept path so a slow client can't
-                                            // hold up new connections.
+                                            // hold up new connections, and refresh the
+                                            // user count advertised to trackers.
                                             let broadcaster = self_clone.clone();
                                             tokio::spawn(async move {
                                                 broadcaster.broadcast_user_list().await;
                                             });
+                                            self_clone.notify_trackers();
                                         }
                                         Ok(_) => {
                                             if let Err(e) = stream.send(&disconnect_bytes).await {
@@ -1243,9 +1325,11 @@ impl State {
             }
         }
 
-        // The client is gone: drop it from the roster and tell everyone else.
+        // The client is gone: drop it from the roster, tell everyone else, and
+        // refresh the user count advertised to trackers.
         self.connections.write().await.retain(|c| c.addr != addr);
         self.broadcast_user_list().await;
+        self.notify_trackers();
     }
 
     /// Perform an administrative request and reply to the requester. The caller
@@ -1401,6 +1485,70 @@ impl State {
     }
 }
 
+/// In-memory tail of the most recent log output, shown in the GUI log window.
+#[cfg(feature = "gui")]
+static LOG_BUFFER: LazyLock<std::sync::Mutex<Vec<u8>>> =
+    LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+/// A `tracing` writer that appends formatted log lines to [`LOG_BUFFER`], keeping
+/// only the most recent output so memory stays bounded.
+#[cfg(feature = "gui")]
+#[derive(Clone)]
+struct LogBufferWriter;
+
+#[cfg(feature = "gui")]
+impl std::io::Write for LogBufferWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        /// Keep at most this many bytes of recent log output.
+        const CAP: usize = 64 * 1024;
+
+        let mut guard = LOG_BUFFER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.extend_from_slice(buf);
+        if guard.len() > CAP {
+            // Drop whole lines from the front so the window never shows a
+            // truncated first line.
+            let over = guard.len() - CAP;
+            let cut = guard[over..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(guard.len(), |i| over + i + 1);
+            guard.drain(..cut);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "gui")]
+impl tracing_subscriber::fmt::MakeWriter<'_> for LogBufferWriter {
+    type Writer = LogBufferWriter;
+
+    fn make_writer(&self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Initialize tracing for GUI mode so log output goes both to stdout and to the
+/// in-app log window (via [`LOG_BUFFER`]).
+#[cfg(feature = "gui")]
+pub fn init_gui_tracing() {
+    use tracing_subscriber::prelude::*;
+
+    let _ = tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(LogBufferWriter),
+        )
+        .try_init();
+}
+
 #[cfg(feature = "gui")]
 impl eframe::App for State {
     fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
@@ -1454,11 +1602,28 @@ impl eframe::App for State {
                         .with_resizable(true)
                         .with_clamp_size_to_monitor_size(true)
                         .with_close_button(false)
-                        .with_inner_size([200.0, 100.0]),
+                        .with_inner_size([480.0, 320.0]),
                     |context, _class| {
                         eframe::egui::CentralPanel::default().show(context, |inner_ui| {
-                            inner_ui.label("Log will go here");
+                            let log = {
+                                let guard = LOG_BUFFER
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                String::from_utf8_lossy(&guard).into_owned()
+                            };
+                            eframe::egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .stick_to_bottom(true)
+                                .show(inner_ui, |inner_ui| {
+                                    inner_ui.add(
+                                        eframe::egui::TextEdit::multiline(&mut log.as_str())
+                                            .desired_width(f32::INFINITY)
+                                            .font(eframe::egui::TextStyle::Monospace),
+                                    );
+                                });
                         });
+                        // Repaint periodically so new log lines appear live.
+                        context.request_repaint_after(std::time::Duration::from_millis(500));
                     },
                 );
             }
@@ -1508,7 +1673,7 @@ mod tests {
 
         let version = env!("CARGO_PKG_VERSION").parse().unwrap();
         let keys = conclave_tracker::Keys::default();
-        let state = conclave_tracker::State::<15>::new(IpAddr::V4(Ipv4Addr::LOCALHOST), PORT, keys);
+        let state = conclave_tracker::State::new(IpAddr::V4(Ipv4Addr::LOCALHOST), PORT, keys);
         let (_server_signing, server_verifying) = random_keypair();
 
         let state_clone = state.clone();
@@ -1533,25 +1698,27 @@ mod tests {
             }
         }
 
-        {
-            let mut stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
-                .await
-                .unwrap();
-
-            AdvertiseServer(Advertise {
-                name: "Testing".to_string(),
-                description: "Testing".to_string(),
-                version,
-                anonymous: false,
-                users_connected: 0,
-                uptime: Duration::seconds(0),
-                url: String::new(),
-                key: server_verifying,
-            })
-            .send(&mut stream)
+        // Advertise over a persistent connection. The server is listed for as
+        // long as this connection stays open.
+        let mut advertiser = TcpStream::connect(format!("127.0.0.1:{PORT}"))
             .await
             .unwrap();
-        }
+        AdvertiseServer(Advertise {
+            name: "Testing".to_string(),
+            description: "Testing".to_string(),
+            version,
+            anonymous: false,
+            users_connected: 0,
+            uptime: Duration::seconds(0),
+            url: String::new(),
+            key: server_verifying,
+        })
+        .send(&mut advertiser)
+        .await
+        .unwrap();
+
+        // Give the tracker a moment to register the advertiser.
+        tokio::time::sleep(Duration::milliseconds(300).to_std().unwrap()).await;
 
         {
             let mut stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
@@ -1572,7 +1739,9 @@ mod tests {
         }
         assert_eq!(state.servers().servers.len(), 1);
 
-        tokio::time::sleep(state.duration()).await;
+        // Closing the advertiser's connection removes the server immediately.
+        drop(advertiser);
+        tokio::time::sleep(Duration::milliseconds(10).to_std().unwrap()).await;
 
         {
             let mut stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))

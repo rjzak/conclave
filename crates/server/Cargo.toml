@@ -12,7 +12,7 @@ version.workspace = true
 
 [features]
 default = []
-gui = ["dep:eframe", "dep:wgpu"]
+gui = ["dep:eframe", "dep:wgpu", "dep:tracing-subscriber"]
 
 [dependencies]
 # Internal
@@ -32,8 +32,9 @@ futures = { workspace = true, features = ["executor"] }
 hex = { workspace = true, features = ["alloc", "std"] }
 mdns-sd = { workspace = true }
 semver = { workspace = true }
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tracing = { workspace = true, features = ["attributes", "max_level_info", "std"] }
+tracing-subscriber = { workspace = true, features = ["fmt", "registry", "std"], optional = true }
 uuid = { workspace = true, features = ["v4"] }
 wgpu = { workspace = true, features = ["std", "vulkan"], optional = true }
 zeroize = { workspace = true, features = ["aarch64", "alloc", "std"] }

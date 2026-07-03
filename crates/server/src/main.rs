@@ -125,10 +125,10 @@ async fn main() -> Result<std::process::ExitCode> {
 #[allow(unused_variables)]
 #[cfg(feature = "gui")]
 fn main() -> eframe::Result {
-    conclave_common::init_tracing();
+    conclave_server::init_gui_tracing();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_io()
+        .enable_all()
         .build()
         .unwrap();
 

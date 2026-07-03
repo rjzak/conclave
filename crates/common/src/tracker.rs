@@ -10,14 +10,11 @@ use pqcrypto_mldsa::mldsa87;
 use pqcrypto_traits::sign::SignedMessage;
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// Response to protocol handshake
 pub const RESPONSE: &[u8] = b"Tracker";
-
-/// One-minute expiration for a server's advertisement on a tracker.
-pub const SERVER_EXPIRATION: std::time::Duration = std::time::Duration::from_mins(1);
 
 /// Tracker information
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -270,8 +267,14 @@ impl std::fmt::Debug for SignedServerList {
 #[allow(clippy::large_enum_variant)]
 #[derive(Deserialize, Serialize)]
 pub enum TrackerProtocol {
-    /// When the client wants to get a list of servers
+    /// When the client wants to get a list of servers once.
     GetServers,
+
+    /// When the client wants a continuously updated list of servers: the tracker
+    /// replies with the current [`SignedServerList`] immediately and then pushes
+    /// a new one every time the set of advertised servers changes, for as long as
+    /// the connection stays open.
+    Subscribe,
 
     /// When the client wants to get a tracker's public key
     KeyRequest,
@@ -292,6 +295,7 @@ impl std::fmt::Debug for TrackerProtocol {
 
         match self {
             TrackerProtocol::GetServers => f.write_str("TrackerProtocol::GetServers"),
+            TrackerProtocol::Subscribe => f.write_str("TrackerProtocol::Subscribe"),
             TrackerProtocol::KeyRequest => f.write_str("TrackerProtocol::KeyRequest"),
             TrackerProtocol::AdvertiseServer(server) => f
                 .debug_struct("TrackerProtocol::AdvertiseServer")
@@ -310,27 +314,28 @@ impl std::fmt::Debug for TrackerProtocol {
 }
 
 impl TrackerProtocol {
-    /// Send the message to the server
+    /// Send the message over a stream (or a write half of one).
     ///
     /// # Errors
     ///
     /// Networking errors are possible
     #[inline]
-    pub async fn send(&self, stream: &mut TcpStream) -> anyhow::Result<()> {
+    pub async fn send<W: AsyncWrite + Unpin>(&self, stream: &mut W) -> anyhow::Result<()> {
         let bytes = postcard::to_stdvec(&self)?;
         stream.write_u32(u32::try_from(bytes.len())?).await?;
         stream.write_all(&bytes).await?;
+        stream.flush().await?;
 
         Ok(())
     }
 
-    /// Receive a message from the server
+    /// Receive a message from a stream (or a read half of one).
     ///
     /// # Errors
     ///
     /// Networking errors are possible
     #[inline]
-    pub async fn receive(stream: &mut TcpStream) -> anyhow::Result<Self> {
+    pub async fn receive<R: AsyncRead + Unpin>(stream: &mut R) -> anyhow::Result<Self> {
         let len = stream.read_u32().await?;
         let mut bytes = vec![0u8; len as usize];
         stream.read_exact(&mut bytes).await?;

@@ -12,11 +12,10 @@ use conclave_common::tracker::{Advertise, SignedServerList, TrackerProtocol};
 use std::fmt::{Debug, Display};
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
-use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, bail};
 use dashmap::DashMap;
@@ -24,13 +23,12 @@ use pqcrypto_mldsa::mldsa87;
 use pqcrypto_mldsa::mldsa87_keypair;
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 
 /// Conclave version
 pub static VERSION: LazyLock<Version> =
     LazyLock::new(|| Version::parse(env!("CONCLAVE_VERSION")).unwrap());
-
-const TRACKER_SERVER_EXPIRATION: u64 = conclave_common::tracker::SERVER_EXPIRATION.as_secs();
 
 /// Tracker keypair
 #[derive(Serialize, Deserialize)]
@@ -137,13 +135,19 @@ impl Keys {
     }
 }
 
-/// Tracker state with server record duration of one minute
-pub type DefaultState = State<TRACKER_SERVER_EXPIRATION>;
-
 /// Tracker state
-pub struct State<const DURATION_SECONDS: u64> {
-    /// List of servers advertised by the tracker
-    servers: Arc<DashMap<Advertise, SystemTime>>,
+pub struct State {
+    /// Servers currently advertised, keyed by the id of the advertiser
+    /// connection. An entry lives exactly as long as that connection: the server
+    /// is added when it connects and removed the moment the connection closes.
+    servers: Arc<DashMap<u64, Advertise>>,
+
+    /// Source of unique ids for advertiser connections.
+    next_id: Arc<AtomicU64>,
+
+    /// Bumped whenever the set of advertised servers changes so that subscribers
+    /// can be pushed an updated listing.
+    changes: Arc<watch::Sender<u64>>,
 
     /// IP Address and port to listen on
     ip: IpAddr,
@@ -161,10 +165,12 @@ pub struct State<const DURATION_SECONDS: u64> {
     keys: Arc<Keys>,
 }
 
-impl<const DURATION_SECONDS: u64> Clone for State<DURATION_SECONDS> {
+impl Clone for State {
     fn clone(&self) -> Self {
         Self {
             servers: self.servers.clone(),
+            next_id: self.next_id.clone(),
+            changes: self.changes.clone(),
             ip: self.ip,
             port: self.port,
             queries: self.queries.clone(),
@@ -174,13 +180,15 @@ impl<const DURATION_SECONDS: u64> Clone for State<DURATION_SECONDS> {
     }
 }
 
-impl<const DURATION_SECONDS: u64> State<DURATION_SECONDS> {
+impl State {
     /// Create a new Tracker object
     #[must_use]
-    #[allow(clippy::needless_pass_by_value)]
     pub fn new(ip: IpAddr, port: u16, keys: Keys) -> Self {
+        let (changes, _) = watch::channel(0u64);
         Self {
             servers: Arc::new(DashMap::new()),
+            next_id: Arc::new(AtomicU64::new(0)),
+            changes: Arc::new(changes),
             ip,
             port,
             queries: Arc::new(AtomicU32::new(0)),
@@ -200,56 +208,145 @@ impl<const DURATION_SECONDS: u64> State<DURATION_SECONDS> {
         self.serving.store(true, Ordering::Relaxed);
 
         while self.serving() {
-            let (mut socket, client) = listener.accept().await.inspect_err(|e| {
+            let (socket, client) = listener.accept().await.inspect_err(|e| {
                 tracing::error!("Error accepting connection: {e}");
                 self.serving.store(false, Ordering::Relaxed);
             })?;
-            let self_clone = self.clone();
 
-            let message = match TrackerProtocol::receive(&mut socket).await {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::error!("Error getting request: {e}");
-                    continue;
-                }
+            // Every connection is persistent and handled on its own task so that
+            // subscribers can be pushed updates and advertisers can be dropped
+            // the instant they disconnect.
+            let self_clone = self.clone();
+            tokio::spawn(async move {
+                self_clone.handle_connection(socket, client).await;
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Handle a single persistent connection until it closes.
+    async fn handle_connection(&self, mut socket: TcpStream, client: SocketAddr) {
+        loop {
+            // EOF or a broken socket means the peer is gone.
+            let Ok(message) = TrackerProtocol::receive(&mut socket).await else {
+                break;
             };
 
             match message {
                 TrackerProtocol::KeyRequest => {
-                    if let Err(e) = TrackerProtocol::TrackerKey(self_clone.keys.public_key)
+                    if let Err(e) = TrackerProtocol::TrackerKey(self.keys.public_key)
                         .send(&mut socket)
                         .await
                     {
                         tracing::error!("Error sending public key: {e}");
+                        break;
                     }
                 }
                 TrackerProtocol::GetServers => {
-                    if let Err(e) = TrackerProtocol::ServersList(self_clone.servers())
+                    if let Err(e) = TrackerProtocol::ServersList(self.servers())
                         .send(&mut socket)
                         .await
                     {
                         tracing::error!("Error sending signed server list: {e}");
-                    } else {
-                        self_clone.queries.fetch_add(1, Ordering::Relaxed);
+                        break;
                     }
+                    self.queries.fetch_add(1, Ordering::Relaxed);
                 }
-                TrackerProtocol::AdvertiseServer(server) => {
-                    let server = if server.url.contains("0.0.0.0") {
-                        let mut fixed = server.clone();
-                        fixed.url = fixed
-                            .url
-                            .replace("0.0.0.0", client.ip().to_string().as_str());
-                        fixed
-                    } else {
-                        server
-                    };
-                    self_clone.servers.insert(server, SystemTime::now());
+                // These take over the connection for its remaining lifetime.
+                TrackerProtocol::Subscribe => {
+                    self.run_subscriber(&mut socket).await;
+                    break;
+                }
+                TrackerProtocol::AdvertiseServer(advertise) => {
+                    self.run_advertiser(&mut socket, advertise, client).await;
+                    break;
                 }
                 TrackerProtocol::TrackerKey(_) | TrackerProtocol::ServersList(_) => {}
             }
         }
+    }
 
-        Ok(())
+    /// Serve a subscriber: send the current listing immediately, then push a new
+    /// one every time the set of advertised servers changes, until the client
+    /// disconnects.
+    async fn run_subscriber(&self, socket: &mut TcpStream) {
+        self.queries.fetch_add(1, Ordering::Relaxed);
+        let mut updates = self.changes.subscribe();
+        let (mut read, mut write) = socket.split();
+
+        if TrackerProtocol::ServersList(self.servers())
+            .send(&mut write)
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        loop {
+            tokio::select! {
+                changed = updates.changed() => {
+                    if changed.is_err() {
+                        break; // tracker shutting down
+                    }
+                    if TrackerProtocol::ServersList(self.servers())
+                        .send(&mut write)
+                        .await
+                        .is_err()
+                    {
+                        break; // subscriber went away mid-send
+                    }
+                }
+                // Reading serves only to notice the client disconnecting; any
+                // message it sends is ignored.
+                incoming = TrackerProtocol::receive(&mut read) => {
+                    if incoming.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Serve an advertiser: register the server for the lifetime of the
+    /// connection, applying any updated advertisements in place, and remove it
+    /// the moment the connection closes.
+    async fn run_advertiser(&self, socket: &mut TcpStream, first: Advertise, client: SocketAddr) {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.servers.insert(id, Self::fixup_url(first, client));
+        self.bump();
+
+        loop {
+            match TrackerProtocol::receive(socket).await {
+                Ok(TrackerProtocol::AdvertiseServer(update)) => {
+                    self.servers.insert(id, Self::fixup_url(update, client));
+                    self.bump();
+                }
+                // Ignore anything else the advertiser might send.
+                Ok(_) => {}
+                // Disconnected: drop the server from the listing immediately.
+                Err(_) => break,
+            }
+        }
+
+        self.servers.remove(&id);
+        self.bump();
+        tracing::info!("Advertiser {client} disconnected; server removed from tracker");
+    }
+
+    /// Replace an unspecified advertised address with the peer's actual address.
+    fn fixup_url(mut advertise: Advertise, client: SocketAddr) -> Advertise {
+        if advertise.url.contains("0.0.0.0") {
+            advertise.url = advertise.url.replace("0.0.0.0", &client.ip().to_string());
+        }
+        advertise
+    }
+
+    /// Signal every subscriber that the server listing changed.
+    fn bump(&self) {
+        self.changes.send_modify(|version| {
+            *version = version.wrapping_add(1);
+        });
     }
 
     /// Number of queries received by the tracker
@@ -266,50 +363,28 @@ impl<const DURATION_SECONDS: u64> State<DURATION_SECONDS> {
         self.serving.load(Ordering::Relaxed)
     }
 
-    /// List of servers advertised by the tracker, and expire old ones
+    /// The current signed list of advertised servers. Presence is tied to each
+    /// advertiser's connection, so no expiration sweep is needed here.
     #[must_use]
     #[tracing::instrument]
     pub fn servers(&self) -> SignedServerList {
-        let mut to_remove = Vec::new();
-
-        for entry in self.servers.iter() {
-            if let Ok(duration) = entry.value().elapsed()
-                && duration >= self.duration()
-            {
-                to_remove.push(entry.key().clone());
-            }
-        }
-
-        for server in to_remove {
-            tracing::info!("Removing expired server: {}", server.name);
-            self.servers.remove(&server);
-        }
-
         let servers = self
             .servers
             .iter()
-            .map(|e| e.key().clone())
+            .map(|entry| entry.value().clone())
             .collect::<Vec<_>>();
 
         SignedServerList::new(servers, VERSION.clone(), &self.keys.private_key)
     }
-
-    /// Tracker's expiration duration for server advertisements
-    #[inline]
-    #[must_use]
-    #[allow(clippy::unused_self)]
-    pub const fn duration(&self) -> Duration {
-        Duration::from_secs(DURATION_SECONDS)
-    }
 }
 
-impl<const DURATION_SECONDS: u64> Debug for State<DURATION_SECONDS> {
+impl Debug for State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Tracker:{}", self.servers.len())
     }
 }
 
-impl<const DURATION_SECONDS: u64> Display for State<DURATION_SECONDS> {
+impl Display for State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -322,7 +397,7 @@ impl<const DURATION_SECONDS: u64> Display for State<DURATION_SECONDS> {
 }
 
 #[cfg(feature = "gui")]
-impl<const DURATION_SECONDS: u64> eframe::App for State<DURATION_SECONDS> {
+impl eframe::App for State {
     fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
         ui.request_repaint();
 

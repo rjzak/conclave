@@ -928,6 +928,7 @@ dependencies = [
  "tempdir",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "wgpu",
  "zeroize",
