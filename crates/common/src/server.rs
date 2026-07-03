@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::admin::server::ServerAdminMessagesEncrypted;
+use crate::admin::server::{ClientAdminMessagesEncrypted, ServerAdminMessagesEncrypted};
 
-use chrono::{DateTime, Duration, Local, Utc};
+use chrono::{DateTime, Duration, Local};
 pub use ed25519_dalek::VerifyingKey;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -180,31 +180,6 @@ pub struct ConnectedUser {
     pub timezone: Option<DateTime<Local>>,
 }
 
-/// A user account as seen by an administrator.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AdminUser {
-    /// Database id of the account
-    pub id: u32,
-
-    /// Login name
-    pub username: String,
-
-    /// Whether the account belongs to the administrators group
-    pub admin: bool,
-
-    /// Whether the account is enabled (a disabled account has no password set)
-    pub enabled: bool,
-
-    /// Whether the account is read-only (cannot make changes: upload, post, delete, etc. despite permissions)
-    pub readonly: bool,
-
-    /// Account creation date
-    pub created: DateTime<Utc>,
-
-    /// Groups for which the account has membership
-    pub groups: Vec<String>,
-}
-
 /// Client to Server messages for encrypted connections
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Deserialize, Serialize)]
@@ -284,14 +259,8 @@ pub enum ClientMessagesEncrypted {
         admin: bool,
     },
 
-    /// (Admin) The list of user accounts.
-    AdminUsersResponse(Vec<AdminUser>),
-
-    /// (Admin) The configured trackers as `(host, port)` pairs.
-    AdminTrackersResponse(Vec<(String, u16)>),
-
-    /// (Admin) Acknowledges that an administrative action succeeded.
-    AdminActionOk,
+    /// Container for administrative responses.
+    AdministrativeResponse(ClientAdminMessagesEncrypted),
 }
 
 impl ClientMessagesEncrypted {

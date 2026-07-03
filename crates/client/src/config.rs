@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use conclave_common::server::VerifyingKey;
+use conclave_common::tracker::TrackerWithKey;
 
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
-use pqcrypto_mldsa::mldsa87;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -49,7 +49,7 @@ pub struct ClientConfig {
     pub default_display_name: String,
 
     /// List of trackers to use
-    pub trackers: Vec<Tracker>,
+    pub trackers: Vec<TrackerWithKey>,
 
     /// List of servers for easy access
     pub bookmarks: Vec<BookmarkEntry>,
@@ -125,47 +125,6 @@ impl ClientConfig {
         write!(file, "{contents}")?;
 
         Ok(())
-    }
-}
-
-/// Tracker listing entry
-#[derive(Clone, Deserialize, Serialize)]
-pub struct Tracker {
-    /// Domain or IP address of the tracker
-    pub name: String,
-
-    /// Port of the tracker
-    pub port: u16,
-
-    /// Tracker's public key
-    #[serde(
-        serialize_with = "conclave_common::serde::serialize_mldsa_public_key",
-        deserialize_with = "conclave_common::serde::deserialize_mldsa_public_key"
-    )]
-    pub key: mldsa87::PublicKey,
-}
-
-impl std::fmt::Debug for Tracker {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Tracker")
-            .field("server", &self.name)
-            .field("port", &self.port)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Eq for Tracker {}
-
-impl PartialEq for Tracker {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.port == other.port
-    }
-}
-
-impl std::hash::Hash for Tracker {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.name.hash(state);
-        self.port.hash(state);
     }
 }
 

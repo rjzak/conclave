@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use conclave_client::config::Tracker;
 use conclave_client::conn::ConclaveConnection;
 use conclave_client::{Client, DiscoveredServer, discover_servers};
 use conclave_common::server::{UserAuthentication, VerifyingKey};
-use conclave_common::tracker::Advertise;
+use conclave_common::tracker::{Advertise, Tracker, TrackerWithKey};
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -187,7 +186,7 @@ pub struct ConclaveGUI {
     tracker_op_pending: Arc<AtomicBool>,
 
     /// Tracker fetched from network, awaiting user confirmation before adding
-    pending_tracker_info: Arc<RwLock<Option<Tracker>>>,
+    pending_tracker_info: Arc<RwLock<Option<TrackerWithKey>>>,
 
     /// Tracker servers window closed
     tracker_servers_viewport_closed: Arc<AtomicBool>,
@@ -544,7 +543,7 @@ impl eframe::App for ConclaveGUI {
                                                 ui.label(
                                                     egui::RichText::new(format!(
                                                         "{}:{}",
-                                                        tracker.name, tracker.port
+                                                        tracker.host, tracker.port
                                                     ))
                                                     .monospace(),
                                                 );
@@ -557,7 +556,7 @@ impl eframe::App for ConclaveGUI {
                                                             && ui.button("Remove").clicked()
                                                         {
                                                             remove_request = Some((
-                                                                tracker.name.clone(),
+                                                                tracker.host.clone(),
                                                                 tracker.port,
                                                             ));
                                                         }
@@ -606,7 +605,7 @@ impl eframe::App for ConclaveGUI {
                             .resizable(true)
                             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                             .show(ctx, |ui| {
-                                ui.label(format!("Add tracker {}:{}?", tracker.name, tracker.port));
+                                ui.label(format!("Add tracker {}:{}?", tracker.host, tracker.port));
                                 ui.separator();
                                 ui.label(egui::RichText::new("Public Key (SHA256):").strong());
                                 ui.label(key_sha256);
@@ -643,7 +642,7 @@ impl eframe::App for ConclaveGUI {
                                 let info_arc = pending_info_arc.clone();
                                 pending.store(true, Ordering::SeqCst);
                                 tokio::spawn(async move {
-                                    if let Err(e) = client.add_tracker(tracker).await
+                                    if let Err(e) = client.add_tracker_with_key(tracker).await
                                         && let Ok(mut err) = err_arc.write()
                                     {
                                         *err = Some(e.to_string());
@@ -699,7 +698,8 @@ impl eframe::App for ConclaveGUI {
                         };
 
                         tokio::spawn(async move {
-                            match conclave_client::get_tracker_key(&name, port).await {
+                            let tracker = Tracker { host: name, port };
+                            match tracker.as_with_key().await {
                                 Ok(tracker) => {
                                     if let Ok(mut info) = info_arc.write() {
                                         *info = Some(tracker);
@@ -1296,12 +1296,14 @@ impl eframe::App for ConclaveGUI {
                         let c = conn.clone();
                         tokio::spawn(async move {
                             let _ = c.admin_list_users().await;
+                            let _ = c.admin_list_groups().await;
                             let _ = c.admin_list_trackers().await;
                         });
                     }
 
                     let info = conn.server_info();
                     let users = conn.admin_users();
+                    let groups = conn.admin_groups();
                     let trackers = conn.admin_trackers();
                     let admin_error = conn.admin_error();
 
@@ -1310,7 +1312,7 @@ impl eframe::App for ConclaveGUI {
                     let desc_id = egui::Id::new(format!("admin_desc:{key_owned}"));
                     let new_user_id = egui::Id::new(format!("admin_nu:{key_owned}"));
                     let new_pass_id = egui::Id::new(format!("admin_np:{key_owned}"));
-                    let new_admin_id = egui::Id::new(format!("admin_na:{key_owned}"));
+                    let new_groups_id = egui::Id::new(format!("admin_ng:{key_owned}"));
                     let tracker_host_id = egui::Id::new(format!("admin_th:{key_owned}"));
                     let tracker_port_id = egui::Id::new(format!("admin_tp:{key_owned}"));
 
@@ -1324,8 +1326,8 @@ impl eframe::App for ConclaveGUI {
                         ctx.data(|d| d.get_temp(new_user_id).unwrap_or_default());
                     let mut new_pass: String =
                         ctx.data(|d| d.get_temp(new_pass_id).unwrap_or_default());
-                    let mut new_admin: bool =
-                        ctx.data(|d| d.get_temp(new_admin_id).unwrap_or(false));
+                    let mut new_groups: HashSet<String> =
+                        ctx.data(|d| d.get_temp(new_groups_id).unwrap_or_default());
                     let mut tracker_host: String =
                         ctx.data(|d| d.get_temp(tracker_host_id).unwrap_or_default());
                     let mut tracker_port: String = ctx.data(|d| {
@@ -1337,6 +1339,8 @@ impl eframe::App for ConclaveGUI {
                     let mut save_server = false;
                     let mut create_user = false;
                     let mut delete_user: Option<u32> = None;
+                    // (uid, gid, add?) membership toggles queued this frame.
+                    let mut group_changes: Vec<(u32, u32, bool)> = Vec::new();
                     let mut add_tracker = false;
                     let mut remove_tracker: Option<(String, u16)> = None;
                     let mut refresh = false;
@@ -1370,6 +1374,7 @@ impl eframe::App for ConclaveGUI {
                         egui::CollapsingHeader::new("User accounts")
                             .default_open(true)
                             .show(ui, |ui| {
+                                // ── Create a new account ──────────────────────
                                 ui.horizontal(|ui| {
                                     ui.label("New:");
                                     ui.text_edit_singleline(&mut new_user);
@@ -1379,35 +1384,92 @@ impl eframe::App for ConclaveGUI {
                                             .desired_width(120.0)
                                             .hint_text("password"),
                                     );
-                                    ui.checkbox(&mut new_admin, "admin");
                                     let can = !new_user.is_empty() && !new_pass.is_empty();
                                     if ui.add_enabled(can, egui::Button::new("Create")).clicked() {
                                         create_user = true;
                                     }
                                 });
-                                ui.separator();
-                                egui::Grid::new(format!("admin_users_grid:{key_owned}"))
-                                    .striped(true)
-                                    .num_columns(4)
-                                    .spacing([12.0, 4.0])
-                                    .show(ui, |ui| {
-                                        ui.label(egui::RichText::new("User").strong());
-                                        ui.label(egui::RichText::new("Admin").strong());
-                                        ui.label(egui::RichText::new("Enabled").strong());
-                                        ui.label("");
-                                        ui.end_row();
-                                        for u in &users {
-                                            ui.label(&u.username);
-                                            ui.label(if u.admin { "✓" } else { "" });
-                                            ui.label(if u.enabled { "✓" } else { "" });
-                                            if u.username == "admin" {
-                                                ui.label("");
-                                            } else if ui.small_button("Delete").clicked() {
-                                                delete_user = Some(u.id);
+                                // Initial group memberships for the new account.
+                                if groups.is_empty() {
+                                    ui.label(egui::RichText::new("No groups available.").weak());
+                                } else {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label("Groups:");
+                                        for g in &groups {
+                                            let mut member = new_groups.contains(&g.name);
+                                            let mut check = ui.checkbox(&mut member, &g.name);
+                                            if let Some(desc) = &g.description {
+                                                check = check.on_hover_text(desc);
                                             }
-                                            ui.end_row();
+                                            if check.changed() {
+                                                if member {
+                                                    new_groups.insert(g.name.clone());
+                                                } else {
+                                                    new_groups.remove(&g.name);
+                                                }
+                                            }
                                         }
                                     });
+                                }
+
+                                ui.separator();
+
+                                // ── Existing accounts ─────────────────────────
+                                if users.is_empty() {
+                                    ui.label(egui::RichText::new("No user accounts.").weak());
+                                }
+                                for u in &users {
+                                    let title = if u.admin {
+                                        format!("{} (admin)", u.username)
+                                    } else {
+                                        u.username.clone()
+                                    };
+                                    egui::CollapsingHeader::new(title)
+                                        .id_salt(format!("admin_user:{key_owned}:{}", u.id))
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.label(if u.enabled {
+                                                    "Enabled"
+                                                } else {
+                                                    "Disabled"
+                                                });
+                                                // The built-in admin (id 0) cannot be deleted.
+                                                if u.id != 0 && ui.small_button("Delete").clicked()
+                                                {
+                                                    delete_user = Some(u.id);
+                                                }
+                                            });
+                                            if groups.is_empty() {
+                                                ui.label(
+                                                    egui::RichText::new("No groups available.")
+                                                        .weak(),
+                                                );
+                                            } else {
+                                                ui.horizontal_wrapped(|ui| {
+                                                    ui.label("Groups:");
+                                                    for g in &groups {
+                                                        let mut member = u.groups.contains(&g.name);
+                                                        // The built-in admin can't leave admin.
+                                                        let locked = u.id == 0 && g.name == "admin";
+                                                        let mut check = ui.add_enabled(
+                                                            !locked,
+                                                            egui::Checkbox::new(
+                                                                &mut member,
+                                                                &g.name,
+                                                            ),
+                                                        );
+                                                        if let Some(desc) = &g.description {
+                                                            check = check.on_hover_text(desc);
+                                                        }
+                                                        if check.changed() {
+                                                            group_changes
+                                                                .push((u.id, g.id, member));
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                        });
+                                }
                             });
 
                         egui::CollapsingHeader::new("Trackers")
@@ -1431,14 +1493,18 @@ impl eframe::App for ConclaveGUI {
                                 if trackers.is_empty() {
                                     ui.label(egui::RichText::new("No trackers configured.").weak());
                                 }
-                                for (host, port) in &trackers {
+                                for tracker in &trackers {
                                     ui.horizontal(|ui| {
                                         ui.label(
-                                            egui::RichText::new(format!("{host}:{port}"))
-                                                .monospace(),
+                                            egui::RichText::new(format!(
+                                                "{}:{}",
+                                                tracker.host, tracker.port
+                                            ))
+                                            .monospace(),
                                         );
                                         if ui.small_button("Remove").clicked() {
-                                            remove_tracker = Some((host.clone(), *port));
+                                            remove_tracker =
+                                                Some((tracker.host.clone(), tracker.port));
                                         }
                                     });
                                 }
@@ -1461,13 +1527,13 @@ impl eframe::App for ConclaveGUI {
                     }
                     if create_user {
                         let c = conn.clone();
-                        let (u, p, a) = (new_user.clone(), new_pass.clone(), new_admin);
+                        let (u, p) = (new_user.clone(), new_pass.clone());
+                        let selected: Vec<String> = new_groups.iter().cloned().collect();
                         new_user.clear();
                         new_pass.clear();
+                        new_groups.clear();
                         tokio::spawn(async move {
-                            // TODO: User will select groups from a list for membership
-                            let groups = if a { vec!["admin".to_string()] } else { vec![] };
-                            let _ = c.admin_create_user(u, p, groups).await;
+                            let _ = c.admin_create_user(u, p, selected).await;
                             let _ = c.admin_list_users().await;
                         });
                     }
@@ -1475,6 +1541,17 @@ impl eframe::App for ConclaveGUI {
                         let c = conn.clone();
                         tokio::spawn(async move {
                             let _ = c.admin_delete_user(username).await;
+                            let _ = c.admin_list_users().await;
+                        });
+                    }
+                    for (uid, gid, add) in group_changes {
+                        let c = conn.clone();
+                        tokio::spawn(async move {
+                            if add {
+                                let _ = c.admin_add_user_to_group(uid, gid).await;
+                            } else {
+                                let _ = c.admin_remove_user_from_group(uid, gid).await;
+                            }
                             let _ = c.admin_list_users().await;
                         });
                     }
@@ -1498,6 +1575,7 @@ impl eframe::App for ConclaveGUI {
                         let c = conn.clone();
                         tokio::spawn(async move {
                             let _ = c.admin_list_users().await;
+                            let _ = c.admin_list_groups().await;
                             let _ = c.admin_list_trackers().await;
                         });
                     }
@@ -1508,7 +1586,7 @@ impl eframe::App for ConclaveGUI {
                         d.insert_temp(desc_id, server_desc);
                         d.insert_temp(new_user_id, new_user);
                         d.insert_temp(new_pass_id, new_pass);
-                        d.insert_temp(new_admin_id, new_admin);
+                        d.insert_temp(new_groups_id, new_groups);
                         d.insert_temp(tracker_host_id, tracker_host);
                         d.insert_temp(tracker_port_id, tracker_port);
                     });

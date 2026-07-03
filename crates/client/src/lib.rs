@@ -13,13 +13,13 @@ pub mod config;
 /// Server connection management and protocol handling.
 pub mod conn;
 
-use crate::config::{BookmarkEntry, ClientConfig, Tracker};
+use crate::config::{BookmarkEntry, ClientConfig};
 use crate::conn::ConclaveConnection;
 use conclave_common::net::EncryptedStream;
 use conclave_common::server::{
     ClientMessagesEncrypted, ServerMessagesEncrypted, UserAuthentication, VerifyingKey, unencrypted,
 };
-use conclave_common::tracker::{Advertise, TrackerProtocol};
+use conclave_common::tracker::{Advertise, Tracker, TrackerProtocol, TrackerWithKey};
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -43,7 +43,7 @@ pub struct Client {
     connection: Arc<RwLock<Vec<ConclaveConnection>>>,
 
     /// Trackers, domain or IP and port
-    trackers: Arc<DashSet<Tracker>>,
+    trackers: Arc<DashSet<TrackerWithKey>>,
 
     /// Config file path
     config_file: PathBuf,
@@ -111,17 +111,33 @@ impl Client {
     /// # Errors
     ///
     /// Returns errors if there is a database error
-    pub async fn add_tracker(&self, tracker: Tracker) -> Result<()> {
-        if let Some(existing_entry) = self.trackers.get(&tracker) {
-            trace!("Tracker {}:{} already known", tracker.name, tracker.port);
-            ensure!(existing_entry.key == tracker.key, "Tracker key mismatch!");
+    pub async fn add_tracker(&self, tracker: &Tracker) -> Result<()> {
+        let tracker_with_key = tracker.as_with_key().await?;
+        self.add_tracker_with_key(tracker_with_key).await
+    }
+
+    /// Add a tracker to the list of known trackers and update the database
+    ///
+    /// # Errors
+    ///
+    /// Returns errors if there is a database error
+    pub async fn add_tracker_with_key(&self, tracker_with_key: TrackerWithKey) -> Result<()> {
+        if let Some(existing_entry) = self.trackers.get(&tracker_with_key) {
+            trace!(
+                "Tracker {}:{} already known",
+                tracker_with_key.host, tracker_with_key.port
+            );
+            ensure!(
+                existing_entry.key == tracker_with_key.key,
+                "Tracker key mismatch!"
+            );
         } else {
             trace!(
                 "Adding tracker {}:{} to database",
-                tracker.name, tracker.port
+                tracker_with_key.host, tracker_with_key.port
             );
-            self.trackers.insert(tracker.clone());
-            self.config.write().await.trackers.push(tracker);
+            self.trackers.insert(tracker_with_key.clone());
+            self.config.write().await.trackers.push(tracker_with_key);
             self.config.read().await.save(&self.config_file)?;
         }
 
@@ -136,7 +152,7 @@ impl Client {
     pub async fn remove_tracker(&self, tracker_name: &str, tracker_port: u16) -> Result<()> {
         let mut to_remove = None;
         for tracker in self.trackers.iter() {
-            if tracker.name == tracker_name && tracker.port == tracker_port {
+            if tracker.host == tracker_name && tracker.port == tracker_port {
                 to_remove = Some(tracker.clone());
                 break;
             }
@@ -154,7 +170,7 @@ impl Client {
             .write()
             .await
             .trackers
-            .retain(|t| t.name != tracker_name || t.port != tracker_port);
+            .retain(|t| t.host != tracker_name || t.port != tracker_port);
         self.config.read().await.save(&self.config_file)?;
 
         Ok(())
@@ -163,7 +179,7 @@ impl Client {
     /// Get the client's trackers to show to the user. Creates a clone of each tracker.
     #[inline]
     #[must_use]
-    pub fn list_trackers(&self) -> Vec<Tracker> {
+    pub fn list_trackers(&self) -> Vec<TrackerWithKey> {
         self.trackers.as_ref().iter().map(|t| t.clone()).collect()
     }
 
@@ -180,9 +196,9 @@ impl Client {
             self.trackers.len()
         );
         for tracker in self.trackers.iter() {
-            info!("Connecting to tracker {}:{}", tracker.name, tracker.port);
+            info!("Connecting to tracker {}:{}", tracker.host, tracker.port);
             let mut stream =
-                TcpStream::connect(format!("{}:{}", tracker.name, tracker.port)).await?;
+                TcpStream::connect(format!("{}:{}", tracker.host, tracker.port)).await?;
 
             if let Err(e) = TrackerProtocol::GetServers.send(&mut stream).await {
                 error!("Error sending server list request to tracker: {e}");
@@ -204,7 +220,7 @@ impl Client {
             info!(
                 "Received {} servers list from tracker {}:{}: {:?}",
                 servers.servers.len(),
-                tracker.name,
+                tracker.host,
                 tracker.port,
                 servers
                     .servers
@@ -400,28 +416,6 @@ impl Client {
             }
         }
     }
-}
-
-/// Query a tracker for its public key
-///
-/// # Errors
-///
-/// Returns errors if there is a network error
-pub async fn get_tracker_key(tracker_name: &str, tracker_port: u16) -> Result<Tracker> {
-    let mut stream = TcpStream::connect(format!("{tracker_name}:{tracker_port}")).await?;
-
-    TrackerProtocol::KeyRequest.send(&mut stream).await?;
-
-    let TrackerProtocol::TrackerKey(tracker_key) = TrackerProtocol::receive(&mut stream).await?
-    else {
-        bail!("Unexpected response from tracker {tracker_name}:{tracker_port}");
-    };
-
-    Ok(Tracker {
-        name: tracker_name.to_string(),
-        port: tracker_port,
-        key: tracker_key,
-    })
 }
 
 /// Local Conclave servers discovered by Multicast DNS

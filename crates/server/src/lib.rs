@@ -8,16 +8,18 @@
 #![forbid(unsafe_code)]
 
 use conclave_common::URL_PROTOCOL;
-use conclave_common::admin::server::ServerAdminMessagesEncrypted;
+use conclave_common::admin::server::{
+    AdminUser, ClientAdminMessagesEncrypted, Group, ServerAdminMessagesEncrypted,
+};
 use conclave_common::net::{
     DEFAULT_REKEY_INTERVAL, DefaultEncryptedStream, EncryptedRead, EncryptedWrite, random_keypair,
 };
 use conclave_common::server::{
-    AdminUser, ClientMessagesEncrypted, ConnectedUser, ServerError, ServerInformation,
+    ClientMessagesEncrypted, ConnectedUser, ServerError, ServerInformation,
     ServerMessagesEncrypted, UserAuthentication, unencrypted,
 };
-use conclave_common::tracker::Advertise;
 use conclave_common::tracker::TrackerProtocol::AdvertiseServer;
+use conclave_common::tracker::{Advertise, Tracker};
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -112,7 +114,7 @@ pub struct State {
     sqlite: Client,
 
     /// Trackers, expected to be IP:PORT
-    trackers: Arc<RwLock<Vec<(String, u16)>>>,
+    trackers: Arc<RwLock<Vec<Tracker>>>,
 
     /// Whether the tracker advertisements should be running
     tracker_advertise: Arc<AtomicBool>,
@@ -344,7 +346,7 @@ impl State {
                         .next()
                         .ok_or_else(|| anyhow!("Invalid tracker port"))?
                         .parse()?;
-                    trackers.push((ip.to_string(), port));
+                    trackers.push((ip, port).into());
                 }
             }
 
@@ -563,7 +565,7 @@ impl State {
             .sqlite
             .conn(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT u.id, u.username, (u.password IS NOT NULL) AS enabled, u.readonly, u.created \
+                    "SELECT u.id, u.username, (u.password IS NOT NULL) AS enabled, u.readonly, u.created, \
                      EXISTS(SELECT 1 FROM USERGROUP ug JOIN GRP g ON ug.gid = g.id \
                             WHERE ug.uid = u.id AND g.name = 'admin') AS admin \
                      FROM USER u ORDER BY u.id;",
@@ -608,11 +610,12 @@ impl State {
             .collect())
     }
 
-    /// (Admin) Create a user account, optionally granting administrator rights.
+    /// (Admin) Create a user account and grant its initial group memberships.
     ///
     /// # Errors
     ///
-    /// Returns an error if the username already exists or on a database failure.
+    /// Returns an error if the username already exists, a named group does not
+    /// exist, or on a database failure.
     pub async fn create_user_admin(
         &self,
         username: String,
@@ -621,16 +624,96 @@ impl State {
     ) -> Result<()> {
         let uid = self.create_user(username.clone(), password).await?;
         for group in groups {
-            self.sqlite
-                .conn(move |conn| {
-                    conn.execute(
-                        "INSERT INTO USERGROUP(?1, gid) \
-                         SELECT (SELECT id FROM GRP WHERE name = '?2');",
-                        params![uid, group],
-                    )
-                })
-                .await?;
+            let gid = self.group_id(&group).await?;
+            self.add_user_to_group(uid, gid).await?;
         }
+        Ok(())
+    }
+
+    /// (Admin) The groups a user account may belong to.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on a database failure.
+    pub async fn admin_list_groups(&self) -> Result<Vec<Group>> {
+        let groups = self
+            .sqlite
+            .conn(move |conn| {
+                let mut statement =
+                    conn.prepare("SELECT id, name, description FROM GRP ORDER BY name;")?;
+                statement
+                    .query_map([], |row| {
+                        Ok(Group {
+                            id: row.get::<_, u32>(0)?,
+                            name: row.get::<_, String>(1)?,
+                            description: row.get::<_, Option<String>>(2)?,
+                        })
+                    })?
+                    .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()
+            })
+            .await?;
+        Ok(groups)
+    }
+
+    /// Resolve a group name to its id, erroring if no such group exists.
+    async fn group_id(&self, group: &str) -> Result<u32> {
+        let group_owned = group.to_string();
+        let id = self
+            .sqlite
+            .conn(move |conn| {
+                conn.query_one(
+                    "SELECT id FROM GRP WHERE name = ?1;",
+                    [group_owned],
+                    |row| row.get::<_, u32>(0),
+                )
+                .optional()
+            })
+            .await?;
+        id.ok_or_else(|| anyhow!("No such group: {group}"))
+    }
+
+    /// (Admin) Add a user account to a group by id. Adding a membership the user
+    /// already has is a no-op, and an unknown group id is also a no-op (the
+    /// `SELECT` yields no row to insert).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on a database failure.
+    pub async fn add_user_to_group(&self, uid: u32, gid: u32) -> Result<()> {
+        self.sqlite
+            .conn(move |conn| {
+                conn.execute(
+                    "INSERT OR IGNORE INTO USERGROUP(uid, gid) \
+                     SELECT ?1, id FROM GRP WHERE id = ?2;",
+                    params![uid, gid],
+                )
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// (Admin) Remove a user account from a group by id. The built-in `admin`
+    /// account (id 0) cannot be removed from the built-in `admin` group (id 0),
+    /// so the server can't be locked out of its own administration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when removing the built-in admin from the admin group or
+    /// on a database failure.
+    pub async fn remove_user_from_group(&self, uid: u32, gid: u32) -> Result<()> {
+        // The schema seeds both the admin user and admin group with id 0.
+        ensure!(
+            !(uid == 0 && gid == 0),
+            "The built-in admin account cannot be removed from the admin group"
+        );
+        self.sqlite
+            .conn(move |conn| {
+                conn.execute(
+                    "DELETE FROM USERGROUP WHERE uid = ?1 AND gid = ?2;",
+                    params![uid, gid],
+                )
+            })
+            .await?;
         Ok(())
     }
 
@@ -665,7 +748,7 @@ impl State {
     }
 
     /// (Admin) The configured trackers as `(host, port)` pairs.
-    pub async fn list_trackers(&self) -> Vec<(String, u16)> {
+    pub async fn list_trackers(&self) -> Vec<Tracker> {
         self.trackers.read().await.clone()
     }
 
@@ -676,9 +759,10 @@ impl State {
     /// Returns an error on a database failure.
     pub async fn add_tracker_host(&self, host: String, port: u16) -> Result<()> {
         {
+            let tracker = (host, port).into();
             let mut trackers = self.trackers.write().await;
-            if !trackers.iter().any(|(h, p)| h == &host && *p == port) {
-                trackers.push((host, port));
+            if !trackers.iter().any(|t| t == &tracker) {
+                trackers.push(tracker);
             }
         }
         self.persist_trackers().await
@@ -691,8 +775,9 @@ impl State {
     /// Returns an error on a database failure.
     pub async fn remove_tracker_host(&self, host: &str, port: u16) -> Result<()> {
         {
+            let tracker = (host, port).into();
             let mut trackers = self.trackers.write().await;
-            trackers.retain(|(h, p)| !(h == host && *p == port));
+            trackers.retain(|t| t != &tracker);
         }
         self.persist_trackers().await
     }
@@ -704,7 +789,7 @@ impl State {
             .read()
             .await
             .iter()
-            .map(|(host, port)| format!("{host}:{port}"))
+            .map(Tracker::as_string)
             .collect::<Vec<_>>()
             .join("|");
         self.sqlite
@@ -788,12 +873,13 @@ impl State {
     ///
     /// An error might occur if there's a database update problem.
     pub async fn add_tracker(&self, ip: IpAddr, port: u16) -> Result<()> {
+        let tracker = (ip, port).into();
         let mut trackers = self.trackers.write().await;
-        trackers.push((ip.to_string(), port));
+        trackers.push(tracker);
 
         let trackers = trackers
             .iter()
-            .map(|(ip, port)| format!("{ip}:{port}"))
+            .map(Tracker::as_string)
             .collect::<Vec<_>>()
             .join("|");
         self.sqlite
@@ -837,11 +923,9 @@ impl State {
                     key: self_clone.public_key,
                 });
 
-                for (tracker_host, tracker_port) in self_clone.trackers.read().await.iter() {
-                    let Ok(mut stream) =
-                        TcpStream::connect(format!("{tracker_host}:{tracker_port}")).await
-                    else {
-                        error!("Failed to connect to tracker {tracker_host}:{tracker_port}");
+                for tracker in self_clone.trackers.read().await.iter() {
+                    let Ok(mut stream) = TcpStream::connect(tracker.as_string()).await else {
+                        error!("Failed to connect to tracker {}", tracker.as_string());
                         continue;
                     };
 
@@ -1188,8 +1272,8 @@ impl State {
         write: &Arc<RwLock<EncryptedWrite<DEFAULT_REKEY_INTERVAL>>>,
         addr: &SocketAddr,
     ) {
-        let ok = ClientMessagesEncrypted::AdminActionOk;
-        let result: Result<ClientMessagesEncrypted> = match msg {
+        let ok = ClientAdminMessagesEncrypted::ActionOk;
+        let result: Result<ClientAdminMessagesEncrypted> = match msg {
             ServerAdminMessagesEncrypted::SetServerName(name) => {
                 self.set_server_name(name).await.map(|()| ok)
             }
@@ -1199,7 +1283,11 @@ impl State {
             ServerAdminMessagesEncrypted::ListUsers => self
                 .admin_list_users()
                 .await
-                .map(ClientMessagesEncrypted::AdminUsersResponse),
+                .map(ClientAdminMessagesEncrypted::UsersResponse),
+            ServerAdminMessagesEncrypted::ListGroups => self
+                .admin_list_groups()
+                .await
+                .map(ClientAdminMessagesEncrypted::GroupsResponse),
             ServerAdminMessagesEncrypted::CreateUser(user) => self
                 .create_user_admin(user.username, &user.password, user.groups)
                 .await
@@ -1207,8 +1295,14 @@ impl State {
             ServerAdminMessagesEncrypted::DeleteUser(uid) => {
                 self.delete_user(uid).await.map(|()| ok)
             }
+            ServerAdminMessagesEncrypted::AddUserToGroup(m) => {
+                self.add_user_to_group(m.uid, m.gid).await.map(|()| ok)
+            }
+            ServerAdminMessagesEncrypted::RemoveUserFromGroup(m) => {
+                self.remove_user_from_group(m.uid, m.gid).await.map(|()| ok)
+            }
             ServerAdminMessagesEncrypted::ListTrackers => Ok(
-                ClientMessagesEncrypted::AdminTrackersResponse(self.list_trackers().await),
+                ClientAdminMessagesEncrypted::TrackersResponse(self.list_trackers().await),
             ),
             ServerAdminMessagesEncrypted::AddTracker(tracker) => self
                 .add_tracker_host(tracker.host, tracker.port)
@@ -1222,10 +1316,13 @@ impl State {
             _ => return,
         };
 
-        let response = result.unwrap_or_else(|e| {
-            warn!("Admin action failed for {addr:?}: {e}");
-            ClientMessagesEncrypted::Error(ServerError::ActionFailed(e.to_string()))
-        });
+        let response = result.map_or_else(
+            |e| {
+                warn!("Admin action failed for {addr:?}: {e}");
+                ClientMessagesEncrypted::Error(ServerError::ActionFailed(e.to_string()))
+            },
+            ClientMessagesEncrypted::AdministrativeResponse,
+        );
         reply(write, addr, &response).await;
     }
 

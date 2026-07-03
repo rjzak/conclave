@@ -2,7 +2,7 @@
 
 use conclave_common::net::{DefaultEncryptedStream, EncryptedWrite};
 use conclave_common::server::{
-    AdminUser, ClientMessagesEncrypted, ConnectedUser, ServerInformation, ServerMessagesEncrypted,
+    ClientMessagesEncrypted, ConnectedUser, ServerInformation, ServerMessagesEncrypted,
 };
 use std::ops::Not;
 
@@ -11,7 +11,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, Local};
-use conclave_common::admin::server::{CreateUser, ServerAdminMessagesEncrypted, Tracker};
+use conclave_common::admin::server::{
+    AdminUser, ClientAdminMessagesEncrypted, CreateUser, Group, GroupMembership,
+    ServerAdminMessagesEncrypted,
+};
+use conclave_common::tracker::Tracker;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
@@ -44,8 +48,11 @@ pub struct ConclaveConnection {
     /// Latest administrative user list (populated for admins on request).
     pub(crate) admin_users: Arc<std::sync::RwLock<Vec<AdminUser>>>,
 
+    /// Latest administrative group list (populated for admins on request).
+    pub(crate) admin_groups: Arc<std::sync::RwLock<Vec<Group>>>,
+
     /// Latest administrative tracker list (populated for admins on request).
-    pub(crate) admin_trackers: Arc<std::sync::RwLock<Vec<(String, u16)>>>,
+    pub(crate) admin_trackers: Arc<std::sync::RwLock<Vec<Tracker>>>,
 
     /// Most recent administrative action error, if any.
     pub(crate) admin_error: Arc<std::sync::RwLock<Option<String>>>,
@@ -71,6 +78,7 @@ impl ConclaveConnection {
             display_name: Arc::new(RwLock::new(display_name.to_string())),
             is_admin: Arc::new(AtomicBool::new(false)),
             admin_users: Arc::new(std::sync::RwLock::new(Vec::new())),
+            admin_groups: Arc::new(std::sync::RwLock::new(Vec::new())),
             admin_trackers: Arc::new(std::sync::RwLock::new(Vec::new())),
             admin_error: Arc::new(std::sync::RwLock::new(None)),
             listen_handle: Arc::new(tokio::spawn(tokio::time::sleep(
@@ -125,24 +133,35 @@ impl ConclaveConnection {
                     ClientMessagesEncrypted::SessionInfo { admin, .. } => {
                         conn_clone.is_admin.store(admin, Ordering::SeqCst);
                     }
-                    ClientMessagesEncrypted::AdminUsersResponse(users) => {
-                        *conn_clone
-                            .admin_users
-                            .write()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) = users;
-                    }
-                    ClientMessagesEncrypted::AdminTrackersResponse(trackers) => {
-                        *conn_clone
-                            .admin_trackers
-                            .write()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) = trackers;
-                    }
-                    ClientMessagesEncrypted::AdminActionOk => {
-                        *conn_clone
-                            .admin_error
-                            .write()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-                    }
+                    ClientMessagesEncrypted::AdministrativeResponse(admin_msg) => match admin_msg {
+                        ClientAdminMessagesEncrypted::UsersResponse(users) => {
+                            *conn_clone
+                                .admin_users
+                                .write()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = users;
+                        }
+                        ClientAdminMessagesEncrypted::GroupsResponse(groups) => {
+                            *conn_clone
+                                .admin_groups
+                                .write()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = groups;
+                        }
+                        ClientAdminMessagesEncrypted::TrackersResponse(trackers) => {
+                            *conn_clone
+                                .admin_trackers
+                                .write()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = trackers;
+                        }
+                        ClientAdminMessagesEncrypted::ActionOk => {
+                            *conn_clone
+                                .admin_error
+                                .write()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                        }
+                        x => {
+                            tracing::warn!("Received unexpected admin message: {x:?}");
+                        }
+                    },
                     ClientMessagesEncrypted::Error(e) => {
                         *conn_clone
                             .admin_error
@@ -224,9 +243,18 @@ impl ConclaveConnection {
             .clone()
     }
 
+    /// The most recently received administrative group list.
+    #[must_use]
+    pub fn admin_groups(&self) -> Vec<Group> {
+        self.admin_groups
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// The most recently received administrative tracker list.
     #[must_use]
-    pub fn admin_trackers(&self) -> Vec<(String, u16)> {
+    pub fn admin_trackers(&self) -> Vec<Tracker> {
         self.admin_trackers
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -288,7 +316,53 @@ impl ConclaveConnection {
         .await
     }
 
-    /// (Admin) Create a user account, optionally granting administrator rights.
+    /// (Admin) Request the list of groups a user may belong to; the reply
+    /// arrives asynchronously and is available from [`Self::admin_groups`].
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_list_groups(&self) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::ListGroups,
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Add an existing user account to a group by id.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_add_user_to_group(&self, uid: u32, gid: u32) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::AddUserToGroup(GroupMembership { uid, gid }),
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Remove an existing user account from a group by id.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_remove_user_from_group(&self, uid: u32, gid: u32) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::RemoveUserFromGroup(GroupMembership { uid, gid }),
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Create a user account with initial group memberships.
     ///
     /// # Errors
     ///

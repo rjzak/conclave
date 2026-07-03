@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::anyhow;
+use std::hash::{Hash, Hasher};
+use std::net::IpAddr;
+
+use anyhow::{anyhow, bail};
 use chrono::Duration;
 use ed25519_dalek::VerifyingKey;
 use pqcrypto_mldsa::mldsa87;
 use pqcrypto_traits::sign::SignedMessage;
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use std::hash::{Hash, Hasher};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -16,6 +18,117 @@ pub const RESPONSE: &[u8] = b"Tracker";
 
 /// One-minute expiration for a server's advertisement on a tracker.
 pub const SERVER_EXPIRATION: std::time::Duration = std::time::Duration::from_mins(1);
+
+/// Tracker information
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub struct Tracker {
+    /// Tracker host (domain or IP)
+    pub host: String,
+
+    /// Tracker port
+    pub port: u16,
+}
+
+impl Tracker {
+    /// Query the tracker for its key, returning the version of the tracker data with the key
+    ///
+    /// # Errors
+    ///
+    /// Network errors may result
+    pub async fn as_with_key(&self) -> anyhow::Result<TrackerWithKey> {
+        let mut stream = TcpStream::connect(format!("{}:{}", self.host, self.port)).await?;
+
+        TrackerProtocol::KeyRequest.send(&mut stream).await?;
+
+        let TrackerProtocol::TrackerKey(tracker_key) =
+            TrackerProtocol::receive(&mut stream).await?
+        else {
+            bail!(
+                "Unexpected response from tracker {}:{}",
+                self.host,
+                self.port
+            );
+        };
+
+        Ok(TrackerWithKey {
+            host: self.host.clone(),
+            port: self.port,
+            key: tracker_key,
+        })
+    }
+
+    /// String representation of the tracker, useful for making connections or displaying
+    #[inline]
+    #[must_use]
+    pub fn as_string(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+}
+
+impl From<(String, u16)> for Tracker {
+    fn from((host, port): (String, u16)) -> Self {
+        Self { host, port }
+    }
+}
+
+impl From<(&str, u16)> for Tracker {
+    fn from((host, port): (&str, u16)) -> Self {
+        Self {
+            host: host.to_string(),
+            port,
+        }
+    }
+}
+
+impl From<(IpAddr, u16)> for Tracker {
+    fn from((ip, port): (IpAddr, u16)) -> Self {
+        Self {
+            host: ip.to_string(),
+            port,
+        }
+    }
+}
+
+/// Tracker listing entry
+#[derive(Clone, Deserialize, Serialize)]
+pub struct TrackerWithKey {
+    /// Tracker host (domain or IP)
+    pub host: String,
+
+    /// Port of the tracker
+    pub port: u16,
+
+    /// Tracker's public key
+    #[serde(
+        serialize_with = "crate::serde::serialize_mldsa_public_key",
+        deserialize_with = "crate::serde::deserialize_mldsa_public_key"
+    )]
+    pub key: mldsa87::PublicKey,
+}
+
+impl std::fmt::Debug for TrackerWithKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrackerWithKey")
+            .field("server", &self.host)
+            .field("port", &self.port)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Eq for TrackerWithKey {}
+
+impl PartialEq for TrackerWithKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.host == other.host && self.port == other.port
+    }
+}
+
+impl std::hash::Hash for TrackerWithKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.host.hash(state);
+        self.port.hash(state);
+    }
+}
 
 /// Tracker advertisement
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
