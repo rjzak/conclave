@@ -66,7 +66,7 @@ async fn integration() {
             .authenticate_user(("admin".into(), password.to_string()).into())
             .await
             .unwrap(),
-        0
+        (0, true)
     );
     server
         .create_user("user".into(), "user12345")

@@ -7,6 +7,9 @@
 #![deny(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
+/// Administrative data structures
+pub mod admin;
+
 /// Data structures for communicating with the tracker
 pub mod tracker;
 

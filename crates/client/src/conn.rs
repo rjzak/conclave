@@ -2,14 +2,16 @@
 
 use conclave_common::net::{DefaultEncryptedStream, EncryptedWrite};
 use conclave_common::server::{
-    ClientMessagesEncrypted, ConnectedUser, ServerInformation, ServerMessagesEncrypted,
+    AdminUser, ClientMessagesEncrypted, ConnectedUser, ServerInformation, ServerMessagesEncrypted,
 };
 use std::ops::Not;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, Local};
+use conclave_common::admin::server::{CreateUser, ServerAdminMessagesEncrypted, Tracker};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
@@ -36,6 +38,18 @@ pub struct ConclaveConnection {
     /// Display name shown for the user on this server
     pub(crate) display_name: Arc<RwLock<String>>,
 
+    /// Whether the authenticated user is an administrator (from `SessionInfo`).
+    pub(crate) is_admin: Arc<AtomicBool>,
+
+    /// Latest administrative user list (populated for admins on request).
+    pub(crate) admin_users: Arc<std::sync::RwLock<Vec<AdminUser>>>,
+
+    /// Latest administrative tracker list (populated for admins on request).
+    pub(crate) admin_trackers: Arc<std::sync::RwLock<Vec<(String, u16)>>>,
+
+    /// Most recent administrative action error, if any.
+    pub(crate) admin_error: Arc<std::sync::RwLock<Option<String>>>,
+
     /// Join handle for the task which listens for messages from the server
     pub(crate) listen_handle: Arc<JoinHandle<()>>,
 
@@ -55,6 +69,10 @@ impl ConclaveConnection {
             server_info: server_info.clone(),
             connected_users: connected_users.clone(),
             display_name: Arc::new(RwLock::new(display_name.to_string())),
+            is_admin: Arc::new(AtomicBool::new(false)),
+            admin_users: Arc::new(std::sync::RwLock::new(Vec::new())),
+            admin_trackers: Arc::new(std::sync::RwLock::new(Vec::new())),
+            admin_error: Arc::new(std::sync::RwLock::new(None)),
             listen_handle: Arc::new(tokio::spawn(tokio::time::sleep(
                 tokio::time::Duration::from_millis(1),
             ))),
@@ -103,6 +121,34 @@ impl ConclaveConnection {
                             .write()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .clone_from(&users);
+                    }
+                    ClientMessagesEncrypted::SessionInfo { admin, .. } => {
+                        conn_clone.is_admin.store(admin, Ordering::SeqCst);
+                    }
+                    ClientMessagesEncrypted::AdminUsersResponse(users) => {
+                        *conn_clone
+                            .admin_users
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = users;
+                    }
+                    ClientMessagesEncrypted::AdminTrackersResponse(trackers) => {
+                        *conn_clone
+                            .admin_trackers
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = trackers;
+                    }
+                    ClientMessagesEncrypted::AdminActionOk => {
+                        *conn_clone
+                            .admin_error
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                    }
+                    ClientMessagesEncrypted::Error(e) => {
+                        *conn_clone
+                            .admin_error
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(e.to_string());
                     }
                     x => tracing::warn!("Received unexpected encrypted message: {x:?}"),
                 }
@@ -161,6 +207,170 @@ impl ConclaveConnection {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Whether the authenticated user on this connection is an administrator.
+    #[must_use]
+    pub fn is_admin(&self) -> bool {
+        self.is_admin.load(Ordering::SeqCst)
+    }
+
+    /// The most recently received administrative user list.
+    #[must_use]
+    pub fn admin_users(&self) -> Vec<AdminUser> {
+        self.admin_users
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The most recently received administrative tracker list.
+    #[must_use]
+    pub fn admin_trackers(&self) -> Vec<(String, u16)> {
+        self.admin_trackers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The most recent administrative action error, if any.
+    #[must_use]
+    pub fn admin_error(&self) -> Option<String> {
+        self.admin_error
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// (Admin) Set the server's display name.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_set_server_name(&self, name: String) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::SetServerName(name),
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Set the server's description.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_set_server_description(&self, description: String) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::SetServerDescription(description),
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Request the list of user accounts; the reply arrives asynchronously
+    /// and is available from [`Self::admin_users`].
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_list_users(&self) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::ListUsers,
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Create a user account, optionally granting administrator rights.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_create_user(
+        &self,
+        username: String,
+        password: String,
+        groups: Vec<String>,
+    ) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::CreateUser(CreateUser {
+                    username,
+                    password,
+                    groups,
+                }),
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Delete a user account by login name.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_delete_user(&self, uid: u32) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::DeleteUser(uid),
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Request the configured trackers; the reply arrives asynchronously
+    /// and is available from [`Self::admin_trackers`].
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_list_trackers(&self) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::ListTrackers,
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Add a tracker by host and port.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_add_tracker(&self, host: String, port: u16) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::AddTracker(Tracker { host, port }),
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Remove a tracker by host and port.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_remove_tracker(&self, host: String, port: u16) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::RemoveTracker(Tracker { host, port }),
+            )
+            .to_vec(),
+        )
+        .await
     }
 
     /// Send a keep-alive message to the server

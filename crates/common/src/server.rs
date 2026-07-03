@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use chrono::{DateTime, Duration, Local};
+use crate::admin::server::ServerAdminMessagesEncrypted;
+
+use chrono::{DateTime, Duration, Local, Utc};
 pub use ed25519_dalek::VerifyingKey;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -178,6 +180,31 @@ pub struct ConnectedUser {
     pub timezone: Option<DateTime<Local>>,
 }
 
+/// A user account as seen by an administrator.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AdminUser {
+    /// Database id of the account
+    pub id: u32,
+
+    /// Login name
+    pub username: String,
+
+    /// Whether the account belongs to the administrators group
+    pub admin: bool,
+
+    /// Whether the account is enabled (a disabled account has no password set)
+    pub enabled: bool,
+
+    /// Whether the account is read-only (cannot make changes: upload, post, delete, etc. despite permissions)
+    pub readonly: bool,
+
+    /// Account creation date
+    pub created: DateTime<Utc>,
+
+    /// Groups for which the account has membership
+    pub groups: Vec<String>,
+}
+
 /// Client to Server messages for encrypted connections
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Deserialize, Serialize)]
@@ -199,6 +226,9 @@ pub enum ServerMessagesEncrypted {
 
     /// Drop the connection.
     Disconnect,
+
+    /// Container for administrative requests.
+    AdministrativeRequest(ServerAdminMessagesEncrypted),
 }
 
 impl ServerMessagesEncrypted {
@@ -244,6 +274,24 @@ pub enum ClientMessagesEncrypted {
 
     /// Drop the connection.
     Disconnect,
+
+    /// Sent right after a successful authentication so the client knows who it
+    /// is connected as and whether it holds administrator rights.
+    SessionInfo {
+        /// Authenticated user id, or `None` for an anonymous guest
+        user_id: Option<u32>,
+        /// Whether the authenticated user is an administrator
+        admin: bool,
+    },
+
+    /// (Admin) The list of user accounts.
+    AdminUsersResponse(Vec<AdminUser>),
+
+    /// (Admin) The configured trackers as `(host, port)` pairs.
+    AdminTrackersResponse(Vec<(String, u16)>),
+
+    /// (Admin) Acknowledges that an administrative action succeeded.
+    AdminActionOk,
 }
 
 impl ClientMessagesEncrypted {
@@ -279,6 +327,12 @@ pub enum ServerError {
 
     /// No authentication provided when this is required
     AuthenticationRequired,
+
+    /// The action requires administrator privileges
+    NotAuthorized,
+
+    /// An administrative action failed; the string carries a human-readable reason
+    ActionFailed(String),
 }
 
 impl std::fmt::Display for ServerError {
@@ -286,6 +340,8 @@ impl std::fmt::Display for ServerError {
         match self {
             ServerError::AuthenticationFailed => write!(f, "Authentication failed"),
             ServerError::AuthenticationRequired => write!(f, "Authentication required"),
+            ServerError::NotAuthorized => write!(f, "Administrator privileges required"),
+            ServerError::ActionFailed(reason) => write!(f, "{reason}"),
         }
     }
 }

@@ -236,6 +236,12 @@ pub struct ConclaveGUI {
 
     /// User-window close requests (server keys) emitted by viewport closures
     user_window_close_requests: Arc<RwLock<Vec<String>>>,
+
+    /// Server keys whose administration window is open (admin connections only)
+    open_admin_windows: Arc<RwLock<HashSet<String>>>,
+
+    /// Admin-window close requests (server keys) emitted by viewport closures
+    admin_window_close_requests: Arc<RwLock<Vec<String>>>,
 }
 
 impl ConclaveGUI {
@@ -268,6 +274,8 @@ impl ConclaveGUI {
             show_servers_window: false,
             servers_window_closed: Arc::new(AtomicBool::new(false)),
             open_user_windows: Arc::new(RwLock::new(HashSet::new())),
+            open_admin_windows: Arc::new(RwLock::new(HashSet::new())),
+            admin_window_close_requests: Arc::new(RwLock::new(Vec::new())),
             seen_servers: HashSet::new(),
             user_window_close_requests: Arc::new(RwLock::new(Vec::new())),
         }
@@ -311,6 +319,19 @@ impl eframe::App for ConclaveGUI {
             && let Ok(mut open) = self.open_user_windows.write()
         {
             for k in close_keys {
+                open.remove(&k);
+            }
+        }
+        // Drain close requests from per-server admin windows.
+        let admin_close_keys: Vec<String> = self
+            .admin_window_close_requests
+            .write()
+            .map(|mut r| r.drain(..).collect())
+            .unwrap_or_default();
+        if !admin_close_keys.is_empty()
+            && let Ok(mut open) = self.open_admin_windows.write()
+        {
+            for k in admin_close_keys {
                 open.remove(&k);
             }
         }
@@ -1056,6 +1077,9 @@ impl eframe::App for ConclaveGUI {
             if let Ok(mut open) = self.open_user_windows.write() {
                 open.retain(|k| live.contains(k));
             }
+            if let Ok(mut open) = self.open_admin_windows.write() {
+                open.retain(|k| live.contains(k));
+            }
         }
 
         // ── Connected Servers window ──────────────────────────────────────
@@ -1063,9 +1087,11 @@ impl eframe::App for ConclaveGUI {
             let closed_arc = self.servers_window_closed.clone();
             let active_conns = self.active_connections.clone();
             let open_windows = self.open_user_windows.clone();
-            let servers: Vec<(String, String, bool)> = conn_snapshots
+            let open_admin = self.open_admin_windows.clone();
+            // (key, name, active, is_admin)
+            let servers: Vec<(String, String, bool, bool)> = conn_snapshots
                 .iter()
-                .map(|(k, n, a, _)| (k.clone(), n.clone(), *a))
+                .map(|(k, n, a, c)| (k.clone(), n.clone(), *a, c.is_admin()))
                 .collect();
 
             ui.ctx().show_viewport_deferred(
@@ -1091,7 +1117,7 @@ impl eframe::App for ConclaveGUI {
                             ui.label(egui::RichText::new("Not connected to any server.").weak());
                         }
 
-                        for (key, name, active) in &servers {
+                        for (key, name, active, is_admin) in &servers {
                             ui.group(|ui| {
                                 let label = if *active {
                                     name.clone()
@@ -1111,6 +1137,22 @@ impl eframe::App for ConclaveGUI {
                                             }
                                         }
                                         repaint_root = true;
+                                    }
+                                    // The admin panel is offered only for connections
+                                    // whose authenticated user holds admin rights.
+                                    if *is_admin {
+                                        let mut admin_shown =
+                                            open_admin.read().is_ok_and(|o| o.contains(key));
+                                        if ui.checkbox(&mut admin_shown, "Admin").changed() {
+                                            if let Ok(mut o) = open_admin.write() {
+                                                if admin_shown {
+                                                    o.insert(key.clone());
+                                                } else {
+                                                    o.remove(key);
+                                                }
+                                            }
+                                            repaint_root = true;
+                                        }
                                     }
                                     if ui.small_button("Disconnect").clicked() {
                                         disconnect_key = Some(key.clone());
@@ -1211,6 +1253,266 @@ impl eframe::App for ConclaveGUI {
 
                     // The server pushes roster changes automatically; repaint
                     // periodically so those updates are picked up promptly.
+                    ctx.request_repaint_after(std::time::Duration::from_secs(2));
+                },
+            );
+        }
+
+        // ── Per-server admin windows (admin connections only) ─────────────
+        let admin_open_keys: HashSet<String> = self
+            .open_admin_windows
+            .read()
+            .map(|o| o.clone())
+            .unwrap_or_default();
+
+        for (key, name, _active, conn) in &conn_snapshots {
+            if !admin_open_keys.contains(key) || !conn.is_admin() {
+                continue;
+            }
+            let conn = conn.clone();
+            let key_owned = key.clone();
+            let title = format!("Admin — {name}");
+            let close_reqs = self.admin_window_close_requests.clone();
+
+            ui.ctx().show_viewport_deferred(
+                egui::ViewportId::from_hash_of(format!("server_admin:{key}")),
+                egui::ViewportBuilder::default()
+                    .with_title(title)
+                    .with_inner_size([540.0, 600.0])
+                    .with_resizable(true),
+                move |ctx, _class| {
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        if let Ok(mut r) = close_reqs.write() {
+                            r.push(key_owned.clone());
+                        }
+                        ctx.request_repaint_of(egui::ViewportId::ROOT);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+
+                    // Load the user/tracker lists once when the window first opens.
+                    let loaded_id = egui::Id::new(format!("admin_loaded:{key_owned}"));
+                    if !ctx.data(|d| d.get_temp::<bool>(loaded_id).unwrap_or(false)) {
+                        ctx.data_mut(|d| d.insert_temp(loaded_id, true));
+                        let c = conn.clone();
+                        tokio::spawn(async move {
+                            let _ = c.admin_list_users().await;
+                            let _ = c.admin_list_trackers().await;
+                        });
+                    }
+
+                    let info = conn.server_info();
+                    let users = conn.admin_users();
+                    let trackers = conn.admin_trackers();
+                    let admin_error = conn.admin_error();
+
+                    // Form fields persisted in egui temp data, keyed per server.
+                    let name_id = egui::Id::new(format!("admin_name:{key_owned}"));
+                    let desc_id = egui::Id::new(format!("admin_desc:{key_owned}"));
+                    let new_user_id = egui::Id::new(format!("admin_nu:{key_owned}"));
+                    let new_pass_id = egui::Id::new(format!("admin_np:{key_owned}"));
+                    let new_admin_id = egui::Id::new(format!("admin_na:{key_owned}"));
+                    let tracker_host_id = egui::Id::new(format!("admin_th:{key_owned}"));
+                    let tracker_port_id = egui::Id::new(format!("admin_tp:{key_owned}"));
+
+                    let mut server_name: String =
+                        ctx.data(|d| d.get_temp(name_id).unwrap_or_else(|| info.name.clone()));
+                    let mut server_desc: String = ctx.data(|d| {
+                        d.get_temp(desc_id)
+                            .unwrap_or_else(|| info.description.clone())
+                    });
+                    let mut new_user: String =
+                        ctx.data(|d| d.get_temp(new_user_id).unwrap_or_default());
+                    let mut new_pass: String =
+                        ctx.data(|d| d.get_temp(new_pass_id).unwrap_or_default());
+                    let mut new_admin: bool =
+                        ctx.data(|d| d.get_temp(new_admin_id).unwrap_or(false));
+                    let mut tracker_host: String =
+                        ctx.data(|d| d.get_temp(tracker_host_id).unwrap_or_default());
+                    let mut tracker_port: String = ctx.data(|d| {
+                        d.get_temp(tracker_port_id)
+                            .unwrap_or_else(|| "9100".to_string())
+                    });
+
+                    // Actions are flagged during rendering and performed afterwards.
+                    let mut save_server = false;
+                    let mut create_user = false;
+                    let mut delete_user: Option<u32> = None;
+                    let mut add_tracker = false;
+                    let mut remove_tracker: Option<(String, u16)> = None;
+                    let mut refresh = false;
+
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        ui.heading(format!("Administer {}", info.name));
+                        if let Some(err) = &admin_error {
+                            ui.colored_label(egui::Color32::RED, err);
+                        }
+                        ui.separator();
+
+                        egui::CollapsingHeader::new("Server")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                egui::Grid::new(format!("admin_server_grid:{key_owned}"))
+                                    .num_columns(2)
+                                    .spacing([8.0, 6.0])
+                                    .show(ui, |ui| {
+                                        ui.label("Name:");
+                                        ui.text_edit_singleline(&mut server_name);
+                                        ui.end_row();
+                                        ui.label("Description:");
+                                        ui.text_edit_singleline(&mut server_desc);
+                                        ui.end_row();
+                                    });
+                                if ui.button("Save").clicked() {
+                                    save_server = true;
+                                }
+                            });
+
+                        egui::CollapsingHeader::new("User accounts")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("New:");
+                                    ui.text_edit_singleline(&mut new_user);
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut new_pass)
+                                            .password(true)
+                                            .desired_width(120.0)
+                                            .hint_text("password"),
+                                    );
+                                    ui.checkbox(&mut new_admin, "admin");
+                                    let can = !new_user.is_empty() && !new_pass.is_empty();
+                                    if ui.add_enabled(can, egui::Button::new("Create")).clicked() {
+                                        create_user = true;
+                                    }
+                                });
+                                ui.separator();
+                                egui::Grid::new(format!("admin_users_grid:{key_owned}"))
+                                    .striped(true)
+                                    .num_columns(4)
+                                    .spacing([12.0, 4.0])
+                                    .show(ui, |ui| {
+                                        ui.label(egui::RichText::new("User").strong());
+                                        ui.label(egui::RichText::new("Admin").strong());
+                                        ui.label(egui::RichText::new("Enabled").strong());
+                                        ui.label("");
+                                        ui.end_row();
+                                        for u in &users {
+                                            ui.label(&u.username);
+                                            ui.label(if u.admin { "✓" } else { "" });
+                                            ui.label(if u.enabled { "✓" } else { "" });
+                                            if u.username == "admin" {
+                                                ui.label("");
+                                            } else if ui.small_button("Delete").clicked() {
+                                                delete_user = Some(u.id);
+                                            }
+                                            ui.end_row();
+                                        }
+                                    });
+                            });
+
+                        egui::CollapsingHeader::new("Trackers")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("Add:");
+                                    ui.text_edit_singleline(&mut tracker_host);
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut tracker_port)
+                                            .desired_width(60.0)
+                                            .hint_text("port"),
+                                    );
+                                    let can = !tracker_host.is_empty()
+                                        && tracker_port.parse::<u16>().is_ok();
+                                    if ui.add_enabled(can, egui::Button::new("Add")).clicked() {
+                                        add_tracker = true;
+                                    }
+                                });
+                                ui.separator();
+                                if trackers.is_empty() {
+                                    ui.label(egui::RichText::new("No trackers configured.").weak());
+                                }
+                                for (host, port) in &trackers {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!("{host}:{port}"))
+                                                .monospace(),
+                                        );
+                                        if ui.small_button("Remove").clicked() {
+                                            remove_tracker = Some((host.clone(), *port));
+                                        }
+                                    });
+                                }
+                            });
+
+                        ui.separator();
+                        if ui.button("Refresh").clicked() {
+                            refresh = true;
+                        }
+                    });
+
+                    // Perform queued actions; each re-requests the relevant list.
+                    if save_server {
+                        let c = conn.clone();
+                        let (n, d) = (server_name.clone(), server_desc.clone());
+                        tokio::spawn(async move {
+                            let _ = c.admin_set_server_name(n).await;
+                            let _ = c.admin_set_server_description(d).await;
+                        });
+                    }
+                    if create_user {
+                        let c = conn.clone();
+                        let (u, p, a) = (new_user.clone(), new_pass.clone(), new_admin);
+                        new_user.clear();
+                        new_pass.clear();
+                        tokio::spawn(async move {
+                            // TODO: User will select groups from a list for membership
+                            let groups = if a { vec!["admin".to_string()] } else { vec![] };
+                            let _ = c.admin_create_user(u, p, groups).await;
+                            let _ = c.admin_list_users().await;
+                        });
+                    }
+                    if let Some(username) = delete_user {
+                        let c = conn.clone();
+                        tokio::spawn(async move {
+                            let _ = c.admin_delete_user(username).await;
+                            let _ = c.admin_list_users().await;
+                        });
+                    }
+                    if add_tracker && let Ok(port) = tracker_port.parse::<u16>() {
+                        let c = conn.clone();
+                        let host = tracker_host.clone();
+                        tracker_host.clear();
+                        tokio::spawn(async move {
+                            let _ = c.admin_add_tracker(host, port).await;
+                            let _ = c.admin_list_trackers().await;
+                        });
+                    }
+                    if let Some((host, port)) = remove_tracker {
+                        let c = conn.clone();
+                        tokio::spawn(async move {
+                            let _ = c.admin_remove_tracker(host, port).await;
+                            let _ = c.admin_list_trackers().await;
+                        });
+                    }
+                    if refresh {
+                        let c = conn.clone();
+                        tokio::spawn(async move {
+                            let _ = c.admin_list_users().await;
+                            let _ = c.admin_list_trackers().await;
+                        });
+                    }
+
+                    // Persist the form fields for the next frame.
+                    ctx.data_mut(|d| {
+                        d.insert_temp(name_id, server_name);
+                        d.insert_temp(desc_id, server_desc);
+                        d.insert_temp(new_user_id, new_user);
+                        d.insert_temp(new_pass_id, new_pass);
+                        d.insert_temp(new_admin_id, new_admin);
+                        d.insert_temp(tracker_host_id, tracker_host);
+                        d.insert_temp(tracker_port_id, tracker_port);
+                    });
+
                     ctx.request_repaint_after(std::time::Duration::from_secs(2));
                 },
             );
