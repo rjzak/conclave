@@ -188,34 +188,16 @@ impl ConclaveConnection {
             .map_err(|_| anyhow!("Timed out sending request to server"))?
     }
 
-    /// Update server information
-    ///
-    /// # Errors
-    ///
-    /// Network errors are possible
-    pub async fn update_server_info(&self) -> Result<()> {
-        let request = ServerMessagesEncrypted::ServerInformationRequest.to_vec();
-        self.send_request(&request).await
-    }
-
     /// Get a copy of the server information. Synchronous: callable directly from
-    /// the GUI render thread without blocking on the async runtime.
+    /// the GUI render thread without blocking on the async runtime. Kept current
+    /// by the server pushing [`ClientMessagesEncrypted::ServerInformationResponse`]
+    /// whenever it changes.
     #[must_use]
     pub fn server_info(&self) -> ServerInformation {
         self.server_info
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
-    }
-
-    /// Get users connected to the server
-    ///
-    /// # Errors
-    ///
-    /// Network errors are possible
-    pub async fn update_connected_users(&self) -> Result<()> {
-        let request = ServerMessagesEncrypted::ListConnectedUsersRequest.to_vec();
-        self.send_request(&request).await
     }
 
     /// Get a copy of the connected users. Synchronous: callable directly from the

@@ -79,9 +79,10 @@ fn parse_server_url(url: &str) -> Option<(String, u16)> {
 }
 
 /// Connect to a server in the background. On success the connection is registered
-/// in `active_connections` and a poll loop is started to refresh its user list.
-/// When `clear_on_success` is provided, that pending-server slot is cleared once
-/// the connection succeeds (used to dismiss the login window).
+/// in `active_connections`; roster and server-info updates then arrive as pushes
+/// from the server rather than by polling. When `clear_on_success` is provided,
+/// that pending-server slot is cleared once the connection succeeds (used to
+/// dismiss the login window).
 #[allow(clippy::too_many_arguments)]
 fn spawn_connect(
     client: Arc<Client>,
@@ -107,18 +108,9 @@ fn spawn_connect(
             .await
         {
             Ok(conn) => {
-                // Periodically refresh the connected-users list in the background.
-                let conn_bg = conn.clone();
-                tokio::spawn(async move {
-                    loop {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-                        if conn_bg.connected_since().is_none() {
-                            break;
-                        }
-                        let _ = conn_bg.update_connected_users().await;
-                    }
-                });
-
+                // The server pushes roster and server-info updates as they happen
+                // (on connect/disconnect and on admin edits), so the client does
+                // not poll for them.
                 if let Ok(mut conns) = active_connections.write() {
                     conns.push(conn);
                 }
@@ -1236,13 +1228,16 @@ impl eframe::App for ConclaveGUI {
                                     .spacing([12.0, 4.0])
                                     .show(ui, |ui| {
                                         ui.label(egui::RichText::new("Name").strong());
-                                        ui.label(egui::RichText::new("Admin").strong());
                                         ui.label(egui::RichText::new("Connected").strong());
                                         ui.end_row();
 
                                         for user in &users {
-                                            ui.label(&user.display_name);
-                                            ui.label(if user.admin { "✓" } else { "" });
+                                            // Administrators are shown with a red name.
+                                            let mut name = egui::RichText::new(&user.display_name);
+                                            if user.admin {
+                                                name = name.color(egui::Color32::RED);
+                                            }
+                                            ui.label(name);
                                             ui.label(format_uptime(user.connected_since));
                                             ui.end_row();
                                         }

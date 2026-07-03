@@ -85,9 +85,9 @@ async fn integration() {
             .is_err()
     );
     server.disable_user("user".into()).await.unwrap();
-    assert!(server.anonymous_clients_allowed().await.unwrap());
+    assert!(server.anonymous_clients_allowed());
     server.anonymous_clients_enabled(false).await.unwrap();
-    assert!(!server.anonymous_clients_allowed().await.unwrap());
+    assert!(!server.anonymous_clients_allowed());
 
     let tracker_info = (LOCALHOST, TRACKER_PORT).into();
     client.add_tracker(&tracker_info).await.unwrap();

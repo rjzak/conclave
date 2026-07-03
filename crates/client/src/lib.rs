@@ -360,8 +360,8 @@ impl Client {
         let mut stream = TcpStream::connect(format!("{server}:{port}")).await?;
 
         info!(
-            "Connecting to the server on port {port} with key {:?}",
-            key.as_bytes()
+            "Connecting to the server on port {port} with key {}",
+            hex::encode(key.as_bytes())
         );
         unencrypted::ClientToServer::GoCrypto
             .send(&mut stream)

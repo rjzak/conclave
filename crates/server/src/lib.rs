@@ -125,6 +125,9 @@ pub struct State {
     /// Total visitors
     total_visits: Arc<AtomicU32>,
 
+    /// Whether anonymous connections are allowed
+    allow_anonymous: Arc<AtomicBool>,
+
     /// Whether the server is currently serving requests
     serving: Arc<AtomicBool>,
 
@@ -257,6 +260,7 @@ impl State {
                 tracker_advertise: Arc::new(AtomicBool::new(false)),
                 connections: Arc::new(RwLock::new(Vec::new())),
                 total_visits: Arc::new(AtomicU32::new(0)),
+                allow_anonymous: Arc::new(AtomicBool::new(true)), // Database default
                 serving: Arc::new(AtomicBool::new(false)),
                 mdns: mdns.then(|| ServiceDaemon::new().expect("Failed to start Multicast DNS")),
                 #[cfg(feature = "gui")]
@@ -279,6 +283,7 @@ impl State {
     /// # Panics
     ///
     /// Panics if Multicast DNS is requested and fails to start
+    #[allow(clippy::too_many_lines)]
     pub fn load<P: AsRef<Path>>(ip: IpAddr, port: u16, mdns: bool, sqlite_path: P) -> Result<Self> {
         ensure!(
             sqlite_path.as_ref().exists(),
@@ -289,27 +294,36 @@ impl State {
             "Database path is not a file"
         );
 
-        let (name, description, private_key, public_key, url, trackers) = {
+        let (name, description, private_key, public_key, url, trackers, allow_anonymous) = {
             let conn = Connection::open(&sqlite_path)?;
             let mut stmt = conn
-                .prepare("SELECT name, description, key, version, advertised_domain, trackers FROM SERVER_CONFIG")?;
-            let (name, description, keypair, version, advertised_domain, trackers_string) = stmt
-                .query_row([], |row| {
-                    let name: String = row.get(0)?;
-                    let description: String = row.get(1)?;
-                    let key_string: String = row.get(2)?;
-                    let version: String = row.get(3)?;
-                    let advertised_domain: Option<String> = row.get(4)?;
-                    let trackers: Option<String> = row.get(5)?;
-                    Ok((
-                        name,
-                        description,
-                        key_string,
-                        version,
-                        advertised_domain,
-                        trackers.unwrap_or_default(),
-                    ))
-                })?;
+                .prepare("SELECT name, description, key, version, advertised_domain, trackers, allow_anonymous_clients FROM SERVER_CONFIG")?;
+            let (
+                name,
+                description,
+                keypair,
+                version,
+                advertised_domain,
+                trackers_string,
+                allow_anonymous,
+            ) = stmt.query_row([], |row| {
+                let name: String = row.get(0)?;
+                let description: String = row.get(1)?;
+                let key_string: String = row.get(2)?;
+                let version: String = row.get(3)?;
+                let advertised_domain: Option<String> = row.get(4)?;
+                let trackers: Option<String> = row.get(5)?;
+                let allow_anonymous: bool = row.get(6)?;
+                Ok((
+                    name,
+                    description,
+                    key_string,
+                    version,
+                    advertised_domain,
+                    trackers.unwrap_or_default(),
+                    allow_anonymous,
+                ))
+            })?;
 
             let keypair = hex::decode(keypair)?;
             let keypair: [u8; 64] = keypair
@@ -356,7 +370,15 @@ impl State {
                 format!("{URL_PROTOCOL}{ip}:{port}")
             };
 
-            (name, description, private_key, public_key, url, trackers)
+            (
+                name,
+                description,
+                private_key,
+                public_key,
+                url,
+                trackers,
+                allow_anonymous,
+            )
         };
 
         let sqlite = ClientBuilder::new()
@@ -378,6 +400,7 @@ impl State {
             tracker_advertise: Arc::new(AtomicBool::new(false)),
             connections: Arc::new(RwLock::new(Vec::new())),
             total_visits: Arc::new(AtomicU32::new(0)),
+            allow_anonymous: Arc::new(AtomicBool::new(allow_anonymous)),
             serving: Arc::new(AtomicBool::new(false)),
             mdns: mdns.then(|| ServiceDaemon::new().expect("Failed to start Multicast DNS")),
             #[cfg(feature = "gui")]
@@ -426,21 +449,10 @@ impl State {
     /// # Errors
     ///
     /// Database errors can occur if the query fails.
-    pub async fn anonymous_clients_allowed(&self) -> Result<bool> {
-        let anonymous = self
-            .sqlite
-            .conn(move |conn| {
-                conn.query_one(
-                    "SELECT allow_anonymous_clients FROM SERVER_CONFIG;",
-                    [],
-                    |row| {
-                        let anonymous: bool = row.get(0)?;
-                        Ok(anonymous)
-                    },
-                )
-            })
-            .await?;
-        Ok(anonymous)
+    #[inline]
+    #[must_use]
+    pub fn anonymous_clients_allowed(&self) -> bool {
+        self.allow_anonymous.load(Ordering::Relaxed)
     }
 
     /// Enable or disable anonymous client connections
@@ -457,6 +469,7 @@ impl State {
                 )
             })
             .await?;
+        self.allow_anonymous.store(anon, Ordering::Relaxed);
         Ok(())
     }
 
@@ -527,6 +540,7 @@ impl State {
         self.sqlite
             .conn(move |conn| conn.execute("UPDATE SERVER_CONFIG SET name = ?1", [name]))
             .await?;
+        self.broadcast_server_info().await;
         Ok(())
     }
 
@@ -547,6 +561,7 @@ impl State {
                 conn.execute("UPDATE SERVER_CONFIG SET description = ?1", [description])
             })
             .await?;
+        self.broadcast_server_info().await;
         Ok(())
     }
 
@@ -565,10 +580,8 @@ impl State {
             .sqlite
             .conn(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT u.id, u.username, (u.password IS NOT NULL) AS enabled, u.readonly, u.created, \
-                     EXISTS(SELECT 1 FROM USERGROUP ug JOIN GRP g ON ug.gid = g.id \
-                            WHERE ug.uid = u.id AND g.name = 'admin') AS admin \
-                     FROM USER u ORDER BY u.id;",
+                    "SELECT id, username, (password IS NOT NULL) AS enabled, readonly, created \
+                    FROM USER ORDER BY id;",
                 )?;
                 let rows = stmt
                     .query_map([], |row| {
@@ -578,7 +591,6 @@ impl State {
                             row.get::<_, bool>(2)?,
                             row.get::<_, bool>(3)?,
                             row.get::<_, DateTime<Utc>>(4)?,
-                            row.get::<_, bool>(5)?,
                         ))
                     })?
                     .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()?;
@@ -595,8 +607,9 @@ impl State {
 
         Ok(rows
             .into_iter()
-            .map(|(id, username, enabled, readonly, created, admin)| {
+            .map(|(id, username, enabled, readonly, created)| {
                 let groups = groups_map.get(&id).unwrap().to_owned();
+                let admin = groups.contains(&"admin".to_string());
                 AdminUser {
                     id,
                     username,
@@ -683,8 +696,7 @@ impl State {
         self.sqlite
             .conn(move |conn| {
                 conn.execute(
-                    "INSERT OR IGNORE INTO USERGROUP(uid, gid) \
-                     SELECT ?1, id FROM GRP WHERE id = ?2;",
+                    "INSERT OR IGNORE INTO USERGROUP(uid, gid) VALUES(?1, ?2);",
                     params![uid, gid],
                 )
             })
@@ -721,7 +733,7 @@ impl State {
         self.sqlite
             .conn(move |conn| {
                 let mut statement = conn
-                    .prepare("SELECT name FROM GRP JOIN USERGROUP USING (gid) WHERE uid = ?1;")?;
+                    .prepare("SELECT g.name FROM GRP g JOIN USERGROUP ug ON (ug.gid = g.id) WHERE ug.uid = ?1;")?;
                 statement
                     .query_map([uid], |row| row.get::<_, String>(0))?
                     .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()
@@ -912,10 +924,7 @@ impl State {
                     name: self_clone.server_name(),
                     description: self_clone.server_description(),
                     version: VERSION.clone(),
-                    anonymous: self_clone
-                        .anonymous_clients_allowed()
-                        .await
-                        .unwrap_or_default(),
+                    anonymous: self_clone.allow_anonymous.load(Ordering::Relaxed),
                     users_connected: u32::try_from(self_clone.connected_users().await.len())
                         .unwrap_or_default(),
                     uptime: self_clone.since(),
@@ -1036,9 +1045,8 @@ impl State {
                                                     continue;
                                                 }
                                             } else if self_clone
-                                                .anonymous_clients_allowed()
-                                                .await
-                                                .unwrap_or(false)
+                                                .allow_anonymous
+                                                .load(Ordering::Relaxed)
                                             {
                                                 (None, false)
                                             } else {
@@ -1080,23 +1088,7 @@ impl State {
                                             // drop the just-registered connection.
                                             let server_bytes =
                                                 ClientMessagesEncrypted::ServerInformationResponse(
-                                                    ServerInformation {
-                                                        name: self_clone.server_name(),
-                                                        description: self_clone
-                                                            .server_description(),
-                                                        url: self_clone.url.clone(),
-                                                        key: self_clone.public_key,
-                                                        version: VERSION.clone(),
-                                                        anonymous: false,
-                                                        users_connected: u32::try_from(
-                                                            self_clone
-                                                                .connections
-                                                                .read()
-                                                                .await
-                                                                .len(),
-                                                        )
-                                                        .unwrap_or_default(),
-                                                    },
+                                                    self_clone.server_information().await,
                                                 )
                                                 .to_vec();
                                             let session_bytes =
@@ -1203,18 +1195,10 @@ impl State {
                 }
 
                 Ok(ServerMessagesEncrypted::ServerInformationRequest) => {
-                    let info =
-                        ClientMessagesEncrypted::ServerInformationResponse(ServerInformation {
-                            name: self.server_name(),
-                            description: self.server_description(),
-                            url: self.url.clone(),
-                            key: self.public_key,
-                            version: VERSION.clone(),
-                            anonymous: false,
-                            users_connected: u32::try_from(self.connections.read().await.len())
-                                .unwrap_or_default(),
-                        })
-                        .to_vec();
+                    let info = ClientMessagesEncrypted::ServerInformationResponse(
+                        self.server_information().await,
+                    )
+                    .to_vec();
                     if let Err(e) = write.write().await.send(&info).await {
                         error!("Failed to send server info to {addr:?}: {e}");
                     }
@@ -1326,12 +1310,23 @@ impl State {
         reply(write, addr, &response).await;
     }
 
-    /// Send the current connected-users list to every connected client so their
-    /// rosters update automatically when someone joins or leaves.
-    async fn broadcast_user_list(&self) {
-        let response =
-            ClientMessagesEncrypted::ListConnectedUsersResponse(self.connected_users().await)
-                .to_vec();
+    /// Snapshot of the server's public information for clients.
+    #[inline]
+    async fn server_information(&self) -> ServerInformation {
+        ServerInformation {
+            name: self.server_name(),
+            description: self.server_description(),
+            url: self.url.clone(),
+            key: self.public_key,
+            version: VERSION.clone(),
+            anonymous: self.allow_anonymous.load(Ordering::Relaxed),
+            users_connected: u32::try_from(self.connections.read().await.len()).unwrap_or_default(),
+        }
+    }
+
+    /// Send a message to every connected client.
+    async fn broadcast(&self, message: &ClientMessagesEncrypted) {
+        let bytes = message.to_vec();
 
         // Clone the write-half handles out from under the read lock, then send
         // without holding the connections lock.
@@ -1344,10 +1339,28 @@ impl State {
             .collect();
 
         for writer in writers {
-            if let Err(e) = writer.write().await.send(&response).await {
-                error!("Failed to broadcast user list: {e}");
+            if let Err(e) = writer.write().await.send(&bytes).await {
+                error!("Failed to broadcast message: {e}");
             }
         }
+    }
+
+    /// Send the current connected-users list to every connected client so their
+    /// rosters update automatically when someone joins or leaves.
+    async fn broadcast_user_list(&self) {
+        self.broadcast(&ClientMessagesEncrypted::ListConnectedUsersResponse(
+            self.connected_users().await,
+        ))
+        .await;
+    }
+
+    /// Push the current server information to every connected client so their
+    /// view updates when an admin changes the name or description.
+    async fn broadcast_server_info(&self) {
+        self.broadcast(&ClientMessagesEncrypted::ServerInformationResponse(
+            self.server_information().await,
+        ))
+        .await;
     }
 
     /// Get a list of connected users
