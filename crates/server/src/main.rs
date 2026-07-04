@@ -122,7 +122,6 @@ async fn main() -> Result<std::process::ExitCode> {
     Ok(std::process::ExitCode::SUCCESS)
 }
 
-#[allow(unused_variables)]
 #[cfg(feature = "gui")]
 fn main() -> eframe::Result {
     conclave_server::init_gui_tracing();
@@ -143,9 +142,11 @@ fn main() -> eframe::Result {
         }
     });
 
-    let wgpu = wgpu::Instance::enabled_backend_features();
     #[cfg(debug_assertions)]
-    eprintln!("WGPU Features: {wgpu:?}");
+    {
+        let wgpu = wgpu::Instance::enabled_backend_features();
+        eprintln!("WGPU Features: {wgpu:?}");
+    }
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

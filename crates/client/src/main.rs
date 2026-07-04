@@ -35,6 +35,12 @@ async fn main() -> eframe::Result {
     let args = Args::parse();
     let client = Client::new(args.config).unwrap();
 
+    #[cfg(debug_assertions)]
+    {
+        let wgpu = wgpu::Instance::enabled_backend_features();
+        eprintln!("WGPU Features: {wgpu:?}");
+    }
+
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([400.0, 300.0])

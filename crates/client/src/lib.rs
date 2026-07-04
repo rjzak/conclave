@@ -530,6 +530,9 @@ pub struct DiscoveredServer {
 
     /// Server's Conclave version
     pub version: Version,
+
+    /// Whether anonymous connections are allowed
+    pub anonymous_allowed: bool,
 }
 
 /// Discover local Conclave servers using Multicast DNS
@@ -603,6 +606,13 @@ pub fn discover_servers() -> Result<Vec<DiscoveredServer>> {
                 continue;
             };
 
+            let anonymous_allowed =
+                if let Some(anon) = resolved.txt_properties.get(conclave_common::MDNS_ANONYMOUS) {
+                    anon.val_str().eq("true")
+                } else {
+                    true
+                };
+
             let server = DiscoveredServer {
                 host,
                 key,
@@ -610,6 +620,7 @@ pub fn discover_servers() -> Result<Vec<DiscoveredServer>> {
                 description,
                 port: resolved.port,
                 name: resolved.fullname.replace(conclave_common::MDNS_NAME, ""),
+                anonymous_allowed,
             };
 
             servers.insert(server);

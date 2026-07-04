@@ -138,6 +138,7 @@ struct PendingServer {
     /// Known key from discovery/tracker; `None` means the client will fetch it during connect.
     key: Option<VerifyingKey>,
     name: String,
+    anonymous_allowed: bool,
 }
 
 /// GUI client state
@@ -447,6 +448,8 @@ impl eframe::App for ConclaveGUI {
                                                                 port: server.port,
                                                                 key: Some(server.key),
                                                                 name: server.name.clone(),
+                                                                anonymous_allowed: server
+                                                                    .anonymous_allowed,
                                                             });
                                                         }
                                                         if let Ok(mut e) = connect_error_arc.write()
@@ -822,6 +825,7 @@ impl eframe::App for ConclaveGUI {
                                                             port,
                                                             key: Some(server.key),
                                                             name: server.name.clone(),
+                                                            anonymous_allowed: server.anonymous,
                                                         });
                                                     }
                                                     if let Ok(mut e) =
@@ -914,6 +918,20 @@ impl eframe::App for ConclaveGUI {
                             ui.separator();
                         }
 
+                        // Servers that don't allow guests require credentials.
+                        let credentials_required = !server.anonymous_allowed;
+                        if credentials_required {
+                            ui.label(
+                                egui::RichText::new(
+                                    "This server does not allow anonymous users — a username and \
+                                     password are required.",
+                                )
+                                .small()
+                                .color(egui::Color32::from_rgb(0xff, 0xa5, 0x00)),
+                            );
+                            ui.add_space(4.0);
+                        }
+
                         egui::Grid::new("login_form_grid")
                             .num_columns(2)
                             .spacing([8.0, 6.0])
@@ -937,7 +955,11 @@ impl eframe::App for ConclaveGUI {
 
                         ui.add_space(8.0);
 
-                        let can_connect = !display_name.is_empty();
+                        // A display name is always needed; guests-disallowed
+                        // servers additionally require a username and password.
+                        let has_credentials = !username.is_empty() && !password.is_empty();
+                        let can_connect =
+                            !display_name.is_empty() && (!credentials_required || has_credentials);
 
                         ui.horizontal(|ui| {
                             if ui
@@ -1651,6 +1673,7 @@ impl eframe::App for ConclaveGUI {
                                     port,
                                     key: None,
                                     name: format!("{host}:{port}"),
+                                    anonymous_allowed: true,
                                 });
                             }
                             if let Ok(mut e) = self.connect_error.write() {

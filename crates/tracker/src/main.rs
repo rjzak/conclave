@@ -73,9 +73,11 @@ fn main() -> eframe::Result {
         }
     });
 
-    let wgpu = wgpu::Instance::enabled_backend_features();
     #[cfg(debug_assertions)]
-    eprintln!("WGPU Features: {wgpu:?}");
+    {
+        let wgpu = wgpu::Instance::enabled_backend_features();
+        eprintln!("WGPU Features: {wgpu:?}");
+    }
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

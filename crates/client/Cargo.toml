@@ -21,11 +21,9 @@ clap = { workspace = true, features = ["color", "derive", "help", "std", "sugges
 chrono = { workspace = true, features = ["clock", "serde", "std"] }
 dashmap = { workspace = true, features = ["inline"] }
 eframe = { workspace = true, features = ["accesskit", "default_fonts", "serde", "wayland", "wgpu", "x11"] }
-futures = { workspace = true, features = ["executor"] }
 hex = { workspace = true, features = ["alloc"] }
 home = { workspace = true }
 mdns-sd = { workspace = true }
-pqcrypto-mldsa = { workspace = true }
 pqcrypto-traits = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true, features = ["alloc", "derive", "std"] }
@@ -34,11 +32,14 @@ sha2 = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 toml = { workspace = true, features = ["default", "parse"] }
 tracing = { workspace = true, features = ["attributes", "max_level_info", "std"] }
-wgpu = { workspace = true, features = ["std", "vulkan"] }
+wgpu = { workspace = true, features = ["std"] }
 zeroize = { workspace = true, features = ["aarch64", "derive", "serde"] }
 
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+wgpu = { workspace = true, features = ["vulkan"], optional = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
-wgpu = { workspace = true, features = ["metal", "vulkan-portability"] }
+wgpu = { workspace = true, features = ["metal"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wgpu = { workspace = true, features = ["dx12"] }

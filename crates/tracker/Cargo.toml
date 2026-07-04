@@ -30,10 +30,13 @@ serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync"] }
 toml = { workspace = true, features = ["display", "parse", "serde"] }
 tracing = { workspace = true, features = ["attributes", "std"] }
-wgpu = { workspace = true, features = ["std", "vulkan"], optional = true }
+wgpu = { workspace = true, features = ["std"], optional = true }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+wgpu = { workspace = true, features = ["vulkan"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-wgpu = { workspace = true, features = ["metal", "vulkan-portability"], optional = true }
+wgpu = { workspace = true, features = ["metal"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wgpu = { workspace = true, features = ["dx12"], optional = true }

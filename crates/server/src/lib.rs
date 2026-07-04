@@ -1160,6 +1160,17 @@ impl State {
                                                 user: user.clone(),
                                                 addr: addr.clone(),
                                             };
+                                            if let Some(uid) = user_id {
+                                                info!(
+                                                    "{} (uid: {uid}) connected from {addr}",
+                                                    user.display_name
+                                                );
+                                            } else {
+                                                info!(
+                                                    "{} connected from {addr}",
+                                                    user.display_name
+                                                );
+                                            }
                                             self_clone.connections.write().await.push(connection);
                                             self_clone.total_visits.fetch_add(1, Ordering::Relaxed);
 
@@ -1467,6 +1478,10 @@ impl State {
             (conclave_common::MDNS_VERSION, VERSION.to_string()),
             (conclave_common::MDNS_DESCRIPTION, self.server_description()),
             (conclave_common::MDNS_KEY, key_encoded),
+            (
+                conclave_common::MDNS_ANONYMOUS,
+                self.anonymous_clients_allowed().to_string(),
+            ),
         ];
 
         let mut service = ServiceInfo::new(
@@ -1632,6 +1647,7 @@ impl eframe::App for State {
 }
 
 /// Send a single encrypted message to a client over its write half.
+#[inline]
 async fn reply(
     write: &Arc<RwLock<EncryptedWrite<DEFAULT_REKEY_INTERVAL>>>,
     addr: &SocketAddr,

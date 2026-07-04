@@ -36,11 +36,14 @@ tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "syn
 tracing = { workspace = true, features = ["attributes", "max_level_info", "std"] }
 tracing-subscriber = { workspace = true, features = ["fmt", "registry", "std"], optional = true }
 uuid = { workspace = true, features = ["v4"] }
-wgpu = { workspace = true, features = ["std", "vulkan"], optional = true }
+wgpu = { workspace = true, features = ["std"], optional = true }
 zeroize = { workspace = true, features = ["aarch64", "alloc", "std"] }
 
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+wgpu = { workspace = true, features = ["vulkan"], optional = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
-wgpu = { workspace = true, features = ["metal", "vulkan-portability"], optional = true }
+wgpu = { workspace = true, features = ["metal"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wgpu = { workspace = true, features = ["dx12"], optional = true }

@@ -33,6 +33,9 @@ pub const URL_PROTOCOL: &str = "conclave://";
 /// Endpoint name for use with Multicast DNS
 pub const MDNS_NAME: &str = "_conclave._tcp.local.";
 
+/// Multicast DNS property indicating whether anonymous connections are allowed
+pub const MDNS_ANONYMOUS: &str = "anonymous";
+
 /// Multicast DNS property for the server's description
 pub const MDNS_DESCRIPTION: &str = "description";
 
