@@ -15,7 +15,7 @@ use conclave_common::admin::server::{
     AdminUser, ClientAdminMessagesEncrypted, CreateUser, Group, GroupMembership,
     ServerAdminMessagesEncrypted,
 };
-use conclave_common::tracker::Tracker;
+use conclave_common::tracker::{Tracker, TrackerWithKey};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
@@ -52,7 +52,7 @@ pub struct ConclaveConnection {
     pub(crate) admin_groups: Arc<std::sync::RwLock<Vec<Group>>>,
 
     /// Latest administrative tracker list (populated for admins on request).
-    pub(crate) admin_trackers: Arc<std::sync::RwLock<Vec<Tracker>>>,
+    pub(crate) admin_trackers: Arc<std::sync::RwLock<Vec<TrackerWithKey>>>,
 
     /// Most recent administrative action error, if any.
     pub(crate) admin_error: Arc<std::sync::RwLock<Option<String>>>,
@@ -236,7 +236,7 @@ impl ConclaveConnection {
 
     /// The most recently received administrative tracker list.
     #[must_use]
-    pub fn admin_trackers(&self) -> Vec<Tracker> {
+    pub fn admin_trackers(&self) -> Vec<TrackerWithKey> {
         self.admin_trackers
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

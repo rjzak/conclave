@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::tracker::Tracker;
+use crate::tracker::{Tracker, TrackerWithKey};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -58,7 +58,7 @@ pub enum ClientAdminMessagesEncrypted {
     GroupsResponse(Vec<Group>),
 
     /// The configured trackers as `(host, port)` pairs.
-    TrackersResponse(Vec<Tracker>),
+    TrackersResponse(Vec<TrackerWithKey>),
 
     /// Acknowledges that an administrative action succeeded.
     ActionOk,

@@ -8,8 +8,15 @@ CREATE TABLE SERVER_CONFIG (
     key text NOT NULL, -- hex: secret and public keys
     version text NOT NULL,
     advertised_domain text,
-    allow_anonymous_clients boolean DEFAULT TRUE NOT NULL,
-    trackers text
+    allow_anonymous_clients boolean DEFAULT TRUE NOT NULL
+);
+
+CREATE TABLE TRACKER (
+    host text NOT NULL,
+    port integer NOT NULL,
+    key text NOT NULL,
+    enabled boolean DEFAULT TRUE NOT NULL,
+    PRIMARY KEY (host, port)
 );
 
 -- Only one record for the server configuration is permitted.

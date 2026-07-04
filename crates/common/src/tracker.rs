@@ -4,10 +4,11 @@ use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 
 use anyhow::{anyhow, bail};
+use base64::Engine;
 use chrono::Duration;
 use ed25519_dalek::VerifyingKey;
 use pqcrypto_mldsa::mldsa87;
-use pqcrypto_traits::sign::SignedMessage;
+use pqcrypto_traits::sign::{PublicKey, SignedMessage};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -103,12 +104,58 @@ pub struct TrackerWithKey {
     pub key: mldsa87::PublicKey,
 }
 
+impl TrackerWithKey {
+    /// Returns the public key as a base64 string
+    #[inline]
+    #[must_use]
+    pub fn key_as_str(&self) -> String {
+        base64::engine::general_purpose::STANDARD.encode(self.key.as_bytes())
+    }
+
+    /// String representation of the tracker's address, useful for making
+    /// connections or displaying.
+    #[inline]
+    #[must_use]
+    pub fn as_string(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+}
+
 impl std::fmt::Debug for TrackerWithKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TrackerWithKey")
             .field("server", &self.host)
             .field("port", &self.port)
             .finish_non_exhaustive()
+    }
+}
+
+impl From<(String, u16, String)> for TrackerWithKey {
+    /// # Panics
+    ///
+    /// This will panic if the key isn't proper base64 of if the decoded bytes aren't a valid public key.
+    fn from((host, port, key): (String, u16, String)) -> Self {
+        let key = match base64::engine::general_purpose::STANDARD.decode(key) {
+            Ok(key) => key,
+            Err(e) => panic!("Failed to decode base64 key for tracker {host}:{port}: {e}"),
+        };
+        let key = match mldsa87::PublicKey::from_bytes(&key) {
+            Ok(key) => key,
+            Err(e) => panic!("Failed to public key bytes for tracker {host}:{port}: {e}"),
+        };
+        Self { host, port, key }
+    }
+}
+
+impl PartialEq<Tracker> for TrackerWithKey {
+    fn eq(&self, other: &Tracker) -> bool {
+        self.host == other.host && self.port == other.port
+    }
+}
+
+impl PartialEq<TrackerWithKey> for Tracker {
+    fn eq(&self, other: &TrackerWithKey) -> bool {
+        self.host == other.host && self.port == other.port
     }
 }
 

@@ -19,7 +19,7 @@ use conclave_common::server::{
     ServerMessagesEncrypted, UserAuthentication, unencrypted,
 };
 use conclave_common::tracker::TrackerProtocol::AdvertiseServer;
-use conclave_common::tracker::{Advertise, Tracker};
+use conclave_common::tracker::{Advertise, Tracker, TrackerWithKey};
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -113,12 +113,12 @@ pub struct State {
     /// SQL Lite client
     sqlite: Client,
 
-    /// Trackers, expected to be IP:PORT
-    trackers: Arc<RwLock<Vec<Tracker>>>,
+    /// Trackers
+    trackers: Arc<RwLock<Vec<TrackerWithKey>>>,
 
     /// Trackers we currently hold a persistent advertising connection to, so we
     /// don't start a second task for the same tracker.
-    advertising: Arc<RwLock<std::collections::HashSet<Tracker>>>,
+    advertising: Arc<RwLock<std::collections::HashSet<TrackerWithKey>>>,
 
     /// Bumped whenever advertised information changes (name, description, guest
     /// policy, connected-user count) so the advertising tasks re-send at once.
@@ -303,33 +303,24 @@ impl State {
         let (name, description, private_key, public_key, url, trackers, allow_anonymous) = {
             let conn = Connection::open(&sqlite_path)?;
             let mut stmt = conn
-                .prepare("SELECT name, description, key, version, advertised_domain, trackers, allow_anonymous_clients FROM SERVER_CONFIG")?;
-            let (
-                name,
-                description,
-                keypair,
-                version,
-                advertised_domain,
-                trackers_string,
-                allow_anonymous,
-            ) = stmt.query_row([], |row| {
-                let name: String = row.get(0)?;
-                let description: String = row.get(1)?;
-                let key_string: String = row.get(2)?;
-                let version: String = row.get(3)?;
-                let advertised_domain: Option<String> = row.get(4)?;
-                let trackers: Option<String> = row.get(5)?;
-                let allow_anonymous: bool = row.get(6)?;
-                Ok((
-                    name,
-                    description,
-                    key_string,
-                    version,
-                    advertised_domain,
-                    trackers.unwrap_or_default(),
-                    allow_anonymous,
-                ))
-            })?;
+                .prepare("SELECT name, description, key, version, advertised_domain, allow_anonymous_clients FROM SERVER_CONFIG")?;
+            let (name, description, keypair, version, advertised_domain, allow_anonymous) = stmt
+                .query_row([], |row| {
+                    let name: String = row.get(0)?;
+                    let description: String = row.get(1)?;
+                    let key_string: String = row.get(2)?;
+                    let version: String = row.get(3)?;
+                    let advertised_domain: Option<String> = row.get(4)?;
+                    let allow_anonymous: bool = row.get(5)?;
+                    Ok((
+                        name,
+                        description,
+                        key_string,
+                        version,
+                        advertised_domain,
+                        allow_anonymous,
+                    ))
+                })?;
 
             let keypair = hex::decode(keypair)?;
             let keypair: [u8; 64] = keypair
@@ -339,6 +330,23 @@ impl State {
             let private_key = SigningKey::from_keypair_bytes(&keypair)
                 .map_err(|_| anyhow!("Invalid private key"))?;
             let public_key = private_key.verifying_key();
+
+            let trackers = {
+                let mut stmt =
+                    conn.prepare("SELECT host, port, key FROM TRACKER WHERE enabled = true;")?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, u16>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })?
+                    .collect::<async_sqlite::rusqlite::Result<Vec<(String, u16, String)>>>()?;
+                rows.into_iter()
+                    .map(TrackerWithKey::from)
+                    .collect::<Vec<TrackerWithKey>>()
+            };
 
             let database_version = Version::parse(&version)?;
             let binary_version = Version::parse(env!("CARGO_PKG_VERSION"))?;
@@ -352,22 +360,6 @@ impl State {
                 warn!(
                     "Database version {database_version} is newer than binary version {binary_version}"
                 );
-            }
-
-            let mut trackers = Vec::new();
-
-            if !trackers_string.is_empty() {
-                for tracker in trackers_string.split('|') {
-                    let mut tracker_parts = tracker.split(':');
-                    let ip = tracker_parts
-                        .next()
-                        .ok_or_else(|| anyhow!("Invalid tracker IP"))?;
-                    let port: u16 = tracker_parts
-                        .next()
-                        .ok_or_else(|| anyhow!("Invalid tracker port"))?
-                        .parse()?;
-                    trackers.push((ip, port).into());
-                }
             }
 
             let url = if let Some(advertised_domain) = advertised_domain {
@@ -770,7 +762,7 @@ impl State {
     }
 
     /// (Admin) The configured trackers as `(host, port)` pairs.
-    pub async fn list_trackers(&self) -> Vec<Tracker> {
+    pub async fn list_trackers(&self) -> Vec<TrackerWithKey> {
         self.trackers.read().await.clone()
     }
 
@@ -781,13 +773,12 @@ impl State {
     /// Returns an error on a database failure.
     pub async fn add_tracker_host(&self, host: String, port: u16) -> Result<()> {
         let tracker: Tracker = (host, port).into();
-        {
-            let mut trackers = self.trackers.write().await;
-            if trackers.iter().any(|t| t == &tracker) {
-                return self.persist_trackers().await;
-            }
-            trackers.push(tracker.clone());
+        if self.trackers.read().await.iter().any(|t| t == &tracker) {
+            return Ok(());
         }
+        // Fetch the tracker's key without holding the trackers lock.
+        let tracker = tracker.as_with_key().await?;
+        self.trackers.write().await.push(tracker.clone());
         // Start advertising to the new tracker right away if we're running.
         if self.serving.load(Ordering::Relaxed) {
             self.spawn_advertiser(tracker);
@@ -802,26 +793,39 @@ impl State {
     /// Returns an error on a database failure.
     pub async fn remove_tracker_host(&self, host: &str, port: u16) -> Result<()> {
         {
-            let tracker = (host, port).into();
+            let tracker: Tracker = (host, port).into();
             let mut trackers = self.trackers.write().await;
             trackers.retain(|t| t != &tracker);
         }
         self.persist_trackers().await
     }
 
-    /// Persist the current in-memory tracker list to the database.
+    /// Persist the current in-memory tracker list to the database, replacing any
+    /// previously stored trackers so removals are reflected.
     async fn persist_trackers(&self) -> Result<()> {
-        let joined = self
+        // Snapshot the trackers first: the `conn` closure is synchronous and
+        // can't await the `RwLock`.
+        let rows: Vec<(String, u16, String)> = self
             .trackers
             .read()
             .await
             .iter()
-            .map(Tracker::as_string)
-            .collect::<Vec<_>>()
-            .join("|");
+            .map(|tracker| (tracker.host.clone(), tracker.port, tracker.key_as_str()))
+            .collect();
+
         self.sqlite
-            .conn(move |conn| conn.execute("UPDATE SERVER_CONFIG SET trackers = ?1", [joined]))
+            .conn(move |conn| {
+                conn.execute("DELETE FROM TRACKER", [])?;
+                for (host, port, key) in &rows {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO TRACKER (host, port, key) VALUES (?1, ?2, ?3)",
+                        params![host, port, key],
+                    )?;
+                }
+                Ok(())
+            })
             .await?;
+
         Ok(())
     }
 
@@ -894,35 +898,14 @@ impl State {
         Ok(())
     }
 
-    /// Add a tracker to the server configuration
+    /// Add a tracker to the server configuration, fetching its key.
     ///
     /// # Errors
     ///
-    /// An error might occur if there's a database update problem.
+    /// An error might occur if the tracker is unreachable or on a database
+    /// update problem.
     pub async fn add_tracker(&self, ip: IpAddr, port: u16) -> Result<()> {
-        let tracker: Tracker = (ip, port).into();
-        let joined = {
-            let mut trackers = self.trackers.write().await;
-            trackers.push(tracker.clone());
-            trackers
-                .iter()
-                .map(Tracker::as_string)
-                .collect::<Vec<_>>()
-                .join("|")
-        };
-        // If already serving, start advertising to the new tracker immediately;
-        // otherwise `serve` will start it for every configured tracker.
-        if self.serving.load(Ordering::Relaxed) {
-            self.spawn_advertiser(tracker);
-        }
-        self.sqlite
-            .conn(move |conn| {
-                let mut stmt = conn.prepare("UPDATE SERVER_CONFIG SET trackers = ?1")?;
-                stmt.execute([&joined])
-            })
-            .await?;
-
-        Ok(())
+        self.add_tracker_host(ip.to_string(), port).await
     }
 
     /// The server's current advertisement for trackers.
@@ -940,7 +923,7 @@ impl State {
     }
 
     /// Whether a tracker is currently configured.
-    async fn has_tracker(&self, tracker: &Tracker) -> bool {
+    async fn has_tracker(&self, tracker: &TrackerWithKey) -> bool {
         self.trackers.read().await.iter().any(|t| t == tracker)
     }
 
@@ -962,7 +945,7 @@ impl State {
 
     /// Spawn a persistent advertising task for a tracker, unless one is already
     /// running for it.
-    fn spawn_advertiser(&self, tracker: Tracker) {
+    fn spawn_advertiser(&self, tracker: TrackerWithKey) {
         let self_clone = self.clone();
         tokio::spawn(async move {
             // Claim the tracker so a concurrent add can't start a second task.
@@ -978,7 +961,7 @@ impl State {
     /// send the advertisement, and re-send it whenever our information changes.
     /// Dropping the connection (on shutdown or when the tracker is removed) tells
     /// the tracker we are gone. Reconnects with a short delay after any failure.
-    async fn advertise_to_tracker(&self, tracker: &Tracker) {
+    async fn advertise_to_tracker(&self, tracker: &TrackerWithKey) {
         /// Delay before reconnecting after a connection failure.
         const RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
         /// How often to re-check that this tracker is still configured.
