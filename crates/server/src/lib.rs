@@ -1088,9 +1088,11 @@ impl State {
                                             )),
                                         ) => {
                                             let (user_id, admin) = if let Some(inner_auth) = auth {
+                                                let uname = inner_auth.username.clone();
                                                 if let Ok((user_id, admin)) =
                                                     self_clone.authenticate_user(inner_auth).await
                                                 {
+                                                    info!("User {display_name} authenticated: uname: {uname}, uid: {user_id}");
                                                     (Some(user_id), admin)
                                                 } else {
                                                     let error_message =
@@ -1098,6 +1100,7 @@ impl State {
                                                             ServerError::AuthenticationFailed,
                                                         )
                                                         .to_vec();
+                                                    warn!("Authentication failed for: username {uname} from {client}");
                                                     if let Err(e) =
                                                         stream.send(&error_message).await
                                                     {
@@ -1113,6 +1116,7 @@ impl State {
                                             {
                                                 (None, false)
                                             } else {
+                                                warn!("Attempted anonymous connection from {client} for display name {display_name}");
                                                 let error_message = ClientMessagesEncrypted::Error(
                                                     ServerError::AuthenticationRequired,
                                                 )
@@ -1209,18 +1213,19 @@ impl State {
                                             self_clone.notify_trackers();
                                         }
                                         Ok(_) => {
+                                            warn!("Unexpected protocol message received when expecting to switch to encrypted communications from {client}");
                                             if let Err(e) = stream.send(&disconnect_bytes).await {
                                                 error!(
-                                                    "Failed to send keep alive to {client}: {e}"
+                                                    "Failed to disconnect message to {client}: {e}"
                                                 );
                                             }
                                         }
                                         Err(e) => {
-                                            error!("Error decoding message from {client}: {e}");
+                                            error!("Error decoding encrypted message from {client}: {e}");
                                         }
                                     },
                                     Err(e) => {
-                                        error!("Error decoding message from {client}: {e}");
+                                        error!("Error decoding unencrypted message from {client}: {e}");
                                     }
                                 }
                             }
