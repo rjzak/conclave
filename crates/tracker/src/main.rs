@@ -73,12 +73,6 @@ fn main() -> eframe::Result {
         }
     });
 
-    #[cfg(debug_assertions)]
-    {
-        let wgpu = wgpu::Instance::enabled_backend_features();
-        eprintln!("WGPU Features: {wgpu:?}");
-    }
-
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([240.0, 85.0])

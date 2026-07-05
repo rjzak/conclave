@@ -12,7 +12,7 @@ version.workspace = true
 
 [features]
 default = []
-gui = ["dep:eframe", "dep:wgpu"]
+gui = ["dep:eframe"]
 
 [dependencies]
 # Internal
@@ -22,7 +22,7 @@ conclave-common = { workspace = true }
 anyhow = { workspace = true, features = ["std"] }
 clap = { workspace = true, features = ["color", "derive", "help", "std", "suggestions"] }
 dashmap = { workspace = true, features = ["inline"] }
-eframe = { workspace = true, features = ["accesskit", "default_fonts", "wayland", "wgpu", "x11"], optional = true }
+eframe = { workspace = true, features = ["accesskit", "default_fonts", "glow"], optional = true }
 pqcrypto-mldsa = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive", "std"] }
@@ -30,16 +30,6 @@ serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync"] }
 toml = { workspace = true, features = ["display", "parse", "serde"] }
 tracing = { workspace = true, features = ["attributes", "std"] }
-wgpu = { workspace = true, features = ["std"], optional = true }
-
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-wgpu = { workspace = true, features = ["vulkan"], optional = true }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-wgpu = { workspace = true, features = ["metal"], optional = true }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-wgpu = { workspace = true, features = ["dx12"], optional = true }
 
 [build-dependencies]
 chrono = { workspace = true, features = ["now"] }
