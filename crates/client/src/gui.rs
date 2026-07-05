@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use conclave_client::conn::ConclaveConnection;
+use conclave_client::config::{BookmarkEntry, KnownHost, UserAuth};
 use conclave_client::{Client, DiscoveredServer, discover_servers};
 use conclave_common::server::{UserAuthentication, VerifyingKey};
 use conclave_common::tracker::{Advertise, Tracker, TrackerWithKey};
@@ -232,6 +233,18 @@ pub struct ConclaveGUI {
 
     /// Admin-window close requests (server keys) emitted by viewport closures
     admin_window_close_requests: Arc<RwLock<Vec<String>>>,
+
+    /// Show the bookmarks management window
+    show_bookmarks_window: bool,
+
+    /// Bookmarks window close flag
+    bookmarks_viewport_closed: Arc<AtomicBool>,
+
+    /// Any error from a bookmark add/edit operation
+    bookmarks_error: Arc<RwLock<Option<String>>>,
+
+    /// A bookmark add/edit is in progress (fetching the server key)
+    bookmarks_op_pending: Arc<AtomicBool>,
 }
 
 impl ConclaveGUI {
@@ -267,6 +280,10 @@ impl ConclaveGUI {
             admin_window_close_requests: Arc::new(RwLock::new(Vec::new())),
             seen_servers: HashSet::new(),
             user_window_close_requests: Arc::new(RwLock::new(Vec::new())),
+            show_bookmarks_window: false,
+            bookmarks_viewport_closed: Arc::new(AtomicBool::new(false)),
+            bookmarks_error: Arc::new(RwLock::new(None)),
+            bookmarks_op_pending: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -286,6 +303,9 @@ impl eframe::App for ConclaveGUI {
             .swap(false, Ordering::SeqCst)
         {
             self.show_tracker_servers = false;
+        }
+        if self.bookmarks_viewport_closed.swap(false, Ordering::SeqCst) {
+            self.show_bookmarks_window = false;
         }
 
         // Keep the live tracker-server subscription running exactly while the
@@ -347,6 +367,7 @@ impl eframe::App for ConclaveGUI {
         if self.discovery_running.load(Ordering::SeqCst)
             || self.connect_pending.load(Ordering::SeqCst)
             || self.tracker_op_pending.load(Ordering::SeqCst)
+            || self.bookmarks_op_pending.load(Ordering::SeqCst)
         {
             ui.ctx().request_repaint();
         }
@@ -367,6 +388,7 @@ impl eframe::App for ConclaveGUI {
                     ui.checkbox(&mut self.show_tracker_list, "Trackers");
                     ui.checkbox(&mut self.show_tracker_servers, "Servers Listing");
                     ui.checkbox(&mut self.show_servers_window, "Connected Servers");
+                    ui.checkbox(&mut self.show_bookmarks_window, "Bookmarks");
                 });
                 ui.add_space(16.0);
                 egui::widgets::global_theme_preference_buttons(ui);
@@ -727,6 +749,425 @@ impl eframe::App for ConclaveGUI {
                     ctx.data_mut(|d| {
                         d.insert_temp(form_host_id, form_host);
                         d.insert_temp(form_port_id, form_port);
+                    });
+                },
+            );
+        }
+
+        // ── Bookmarks viewport ────────────────────────────────────────────
+        if self.show_bookmarks_window {
+            let closed_arc = self.bookmarks_viewport_closed.clone();
+            let error_arc = self.bookmarks_error.clone();
+            let op_pending_arc = self.bookmarks_op_pending.clone();
+            let client_arc = self.client.clone();
+
+            ui.ctx().show_viewport_deferred(
+                egui::ViewportId::from_hash_of("bookmarks"),
+                egui::ViewportBuilder::default()
+                    .with_title("Bookmarks")
+                    .with_inner_size([460.0, 520.0])
+                    .with_resizable(true),
+                move |ctx, _class| {
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        closed_arc.store(true, Ordering::SeqCst);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    if op_pending_arc.load(Ordering::SeqCst) {
+                        ctx.request_repaint();
+                    }
+
+                    let is_pending = op_pending_arc.load(Ordering::SeqCst);
+                    let bookmarks = client_arc.bookmarks();
+
+                    // Form fields live in egui temp data, keyed once here.
+                    let name_id = egui::Id::new("bm_form_name");
+                    let host_id = egui::Id::new("bm_form_host");
+                    let port_id = egui::Id::new("bm_form_port");
+                    let display_id = egui::Id::new("bm_form_display");
+                    let user_id = egui::Id::new("bm_form_user");
+                    let pass_id = egui::Id::new("bm_form_pass");
+                    let share_id = egui::Id::new("bm_form_share");
+                    let edit_id = egui::Id::new("bm_form_edit_index");
+
+                    let mut f_name =
+                        ctx.data(|d| d.get_temp::<String>(name_id).unwrap_or_default());
+                    let mut f_host =
+                        ctx.data(|d| d.get_temp::<String>(host_id).unwrap_or_default());
+                    let mut f_port =
+                        ctx.data(|d| d.get_temp::<String>(port_id).unwrap_or_default());
+                    let mut f_display =
+                        ctx.data(|d| d.get_temp::<String>(display_id).unwrap_or_default());
+                    let mut f_user =
+                        ctx.data(|d| d.get_temp::<String>(user_id).unwrap_or_default());
+                    let mut f_pass =
+                        ctx.data(|d| d.get_temp::<String>(pass_id).unwrap_or_default());
+                    let mut f_share = ctx.data(|d| d.get_temp::<bool>(share_id).unwrap_or(false));
+                    let mut edit_index =
+                        ctx.data(|d| d.get_temp::<Option<usize>>(edit_id)).flatten();
+
+                    let mut delete_request: Option<usize> = None;
+                    let mut edit_request: Option<usize> = None;
+                    let mut save_request = false;
+                    let mut cancel_request = false;
+
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        if is_pending {
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Spinner::new());
+                                ui.label("Working...");
+                            });
+                        } else {
+                            let Ok(error_msg) = error_arc.read() else {
+                                error!("Failed to read bookmarks error state");
+                                return;
+                            };
+                            if let Some(err) = error_msg.clone() {
+                                ui.colored_label(egui::Color32::RED, err);
+                            }
+                        }
+
+                        ui.separator();
+
+                        egui::ScrollArea::vertical()
+                            .max_height(240.0)
+                            .show(ui, |ui| {
+                                if bookmarks.is_empty() {
+                                    ui.label(egui::RichText::new("No bookmarks yet.").weak());
+                                }
+                                for (i, bookmark) in bookmarks.iter().enumerate() {
+                                    ui.group(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                egui::RichText::new(&bookmark.name).strong(),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "{}:{}",
+                                                    bookmark.server.host, bookmark.server.port
+                                                ))
+                                                .monospace()
+                                                .weak(),
+                                            );
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    if !is_pending
+                                                        && ui.button("Delete").clicked()
+                                                    {
+                                                        delete_request = Some(i);
+                                                    }
+                                                    if !is_pending && ui.button("Edit").clicked()
+                                                    {
+                                                        edit_request = Some(i);
+                                                    }
+                                                },
+                                            );
+                                        });
+                                        if !bookmark.display_name.is_empty() {
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "as {}",
+                                                    bookmark.display_name
+                                                ))
+                                                .weak(),
+                                            );
+                                        }
+                                        if let Some(auth) = &bookmark.auth {
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "Username: {}",
+                                                    auth.username
+                                                ))
+                                                .weak(),
+                                            );
+                                        }
+
+                                        // The server key is hidden until asked for.
+                                        let show_key_id = egui::Id::new(("bm_show_key", i));
+                                        let mut show_key = ui
+                                            .data(|d| d.get_temp::<bool>(show_key_id))
+                                            .unwrap_or(false);
+                                        if ui
+                                            .button(if show_key {
+                                                "Hide key"
+                                            } else {
+                                                "Show key"
+                                            })
+                                            .clicked()
+                                        {
+                                            show_key = !show_key;
+                                            ui.data_mut(|d| {
+                                                d.insert_temp(show_key_id, show_key);
+                                            });
+                                        }
+                                        if show_key {
+                                            let key_hex =
+                                                hex::encode(bookmark.server.key.as_bytes());
+                                            let key_sha256 = hex::encode(Sha256::digest(
+                                                bookmark.server.key.as_bytes(),
+                                            ));
+                                            ui.label(
+                                                egui::RichText::new("Key (hex):").strong(),
+                                            );
+                                            egui::ScrollArea::vertical()
+                                                .id_salt(("bm_key_hex", i))
+                                                .max_height(48.0)
+                                                .show(ui, |ui| {
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new(&key_hex)
+                                                                .monospace()
+                                                                .size(10.0),
+                                                        )
+                                                        .wrap(),
+                                                    );
+                                                });
+                                            ui.label(
+                                                egui::RichText::new("Key (SHA-256):").strong(),
+                                            );
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(&key_sha256)
+                                                        .monospace()
+                                                        .size(10.0),
+                                                )
+                                                .wrap(),
+                                            );
+                                        }
+                                    });
+                                }
+                            });
+
+                        ui.separator();
+                        ui.label(
+                            egui::RichText::new(if edit_index.is_some() {
+                                "Edit Bookmark"
+                            } else {
+                                "Add Bookmark"
+                            })
+                            .strong(),
+                        );
+                        egui::Grid::new("bookmark_form_grid")
+                            .num_columns(2)
+                            .spacing([8.0, 6.0])
+                            .show(ui, |ui| {
+                                ui.label("Server name:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut f_name)
+                                        .hint_text("fetched from server if blank"),
+                                );
+                                ui.end_row();
+                                ui.label("Host:");
+                                ui.text_edit_singleline(&mut f_host);
+                                ui.end_row();
+                                ui.label("Port:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut f_port).desired_width(60.0),
+                                );
+                                ui.end_row();
+                                ui.label("Display name:");
+                                ui.text_edit_singleline(&mut f_display);
+                                ui.end_row();
+                                ui.label("Username:");
+                                ui.text_edit_singleline(&mut f_user);
+                                ui.end_row();
+                                ui.label("Password:");
+                                ui.add(egui::TextEdit::singleline(&mut f_pass).password(true));
+                                ui.end_row();
+                                ui.label("Share local time:");
+                                ui.checkbox(&mut f_share, "");
+                                ui.end_row();
+                            });
+
+                        ui.add_space(4.0);
+                        // The server name may be left blank; it is fetched from
+                        // the server when the bookmark is saved.
+                        let can_save = !is_pending
+                            && !f_host.is_empty()
+                            && f_port.parse::<u16>().is_ok();
+                        ui.horizontal(|ui| {
+                            let save_label = if edit_index.is_some() { "Save" } else { "Add" };
+                            if ui
+                                .add_enabled(can_save, egui::Button::new(save_label))
+                                .clicked()
+                            {
+                                save_request = true;
+                            }
+                            if edit_index.is_some() && ui.button("Cancel").clicked() {
+                                cancel_request = true;
+                            }
+                        });
+                    });
+
+                    // Load a bookmark into the form for editing.
+                    if let Some(i) = edit_request
+                        && let Some(bookmark) = bookmarks.get(i)
+                    {
+                        f_name.clone_from(&bookmark.name);
+                        f_host.clone_from(&bookmark.server.host);
+                        f_port = bookmark.server.port.to_string();
+                        f_display.clone_from(&bookmark.display_name);
+                        f_user = bookmark
+                            .auth
+                            .as_ref()
+                            .map(|a| a.username.clone())
+                            .unwrap_or_default();
+                        f_pass = bookmark
+                            .auth
+                            .as_ref()
+                            .map(|a| a.password.clone())
+                            .unwrap_or_default();
+                        f_share = bookmark.share_time;
+                        edit_index = Some(i);
+                    }
+
+                    if cancel_request {
+                        f_name.clear();
+                        f_host.clear();
+                        f_port.clear();
+                        f_display.clear();
+                        f_user.clear();
+                        f_pass.clear();
+                        f_share = false;
+                        edit_index = None;
+                    }
+
+                    if let Some(i) = delete_request {
+                        // If the deleted entry was being edited, leave edit mode.
+                        if edit_index == Some(i) {
+                            f_name.clear();
+                            f_host.clear();
+                            f_port.clear();
+                            f_display.clear();
+                            f_user.clear();
+                            f_pass.clear();
+                            f_share = false;
+                            edit_index = None;
+                        }
+                        let client = client_arc.clone();
+                        let err_arc = error_arc.clone();
+                        let pending = op_pending_arc.clone();
+                        pending.store(true, Ordering::SeqCst);
+                        tokio::spawn(async move {
+                            if let Err(e) = client.remove_bookmark_by_index(i).await
+                                && let Ok(mut err) = err_arc.write()
+                            {
+                                *err = Some(e.to_string());
+                            }
+                            pending.store(false, Ordering::SeqCst);
+                        });
+                    }
+
+                    if save_request && let Ok(port) = f_port.parse::<u16>() {
+                        // Reuse the stored key when the address is unchanged;
+                        // otherwise fetch the server's key.
+                        let key_reuse = edit_index
+                            .and_then(|i| bookmarks.get(i))
+                            .filter(|b| b.server.host == f_host && b.server.port == port)
+                            .map(|b| b.server.key);
+
+                        let name = std::mem::take(&mut f_name);
+                        let host = std::mem::take(&mut f_host);
+                        let display = std::mem::take(&mut f_display);
+                        let user = std::mem::take(&mut f_user);
+                        let pass = std::mem::take(&mut f_pass);
+                        let share = f_share;
+                        let index = edit_index;
+
+                        // Reset the form back to add mode.
+                        f_port.clear();
+                        f_share = false;
+                        edit_index = None;
+
+                        let client = client_arc.clone();
+                        let err_arc = error_arc.clone();
+                        let pending = op_pending_arc.clone();
+                        pending.store(true, Ordering::SeqCst);
+                        if let Ok(mut err) = err_arc.write() {
+                            *err = None;
+                        }
+
+                        tokio::spawn(async move {
+                            let key = match key_reuse {
+                                Some(key) => Ok(key),
+                                None => Client::fetch_server_key(&host, port).await,
+                            };
+                            let key = match key {
+                                Ok(key) => key,
+                                Err(e) => {
+                                    if let Ok(mut err) = err_arc.write() {
+                                        *err = Some(format!("Failed to get server key: {e}"));
+                                    }
+                                    pending.store(false, Ordering::SeqCst);
+                                    return;
+                                }
+                            };
+
+                            // Fetch the server's name when the user left it blank.
+                            let name = if name.is_empty() {
+                                let handshake_auth = (!user.is_empty() || !pass.is_empty()).then(
+                                    || UserAuthentication {
+                                        username: user.clone(),
+                                        password: pass.clone(),
+                                    },
+                                );
+                                match Client::fetch_server_info(
+                                    &host,
+                                    port,
+                                    key,
+                                    &display,
+                                    handshake_auth,
+                                )
+                                .await
+                                {
+                                    Ok(info) => info.name,
+                                    Err(e) => {
+                                        if let Ok(mut err) = err_arc.write() {
+                                            *err =
+                                                Some(format!("Failed to fetch server name: {e}"));
+                                        }
+                                        pending.store(false, Ordering::SeqCst);
+                                        return;
+                                    }
+                                }
+                            } else {
+                                name
+                            };
+
+                            let auth = (!user.is_empty() || !pass.is_empty()).then(|| UserAuth {
+                                username: user,
+                                password: pass,
+                            });
+                            let entry = BookmarkEntry {
+                                server: KnownHost { host, port, key },
+                                name,
+                                display_name: display,
+                                auth,
+                                share_time: share,
+                            };
+                            let result = if let Some(i) = index {
+                                client.update_bookmark(i, &entry).await
+                            } else {
+                                client.add_bookmark(&entry).await
+                            };
+                            if let Err(e) = result
+                                && let Ok(mut err) = err_arc.write()
+                            {
+                                *err = Some(e.to_string());
+                            }
+                            pending.store(false, Ordering::SeqCst);
+                        });
+                    }
+
+                    ctx.data_mut(|d| {
+                        d.insert_temp(name_id, f_name);
+                        d.insert_temp(host_id, f_host);
+                        d.insert_temp(port_id, f_port);
+                        d.insert_temp(display_id, f_display);
+                        d.insert_temp(user_id, f_user);
+                        d.insert_temp(pass_id, f_pass);
+                        d.insert_temp(share_id, f_share);
+                        d.insert_temp(edit_id, edit_index);
                     });
                 },
             );

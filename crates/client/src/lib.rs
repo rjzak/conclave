@@ -15,9 +15,10 @@ pub mod conn;
 
 use crate::config::{BookmarkEntry, ClientConfig};
 use crate::conn::ConclaveConnection;
-use conclave_common::net::EncryptedStream;
+use conclave_common::net::{DefaultEncryptedStream, EncryptedStream};
 use conclave_common::server::{
-    ClientMessagesEncrypted, ServerMessagesEncrypted, UserAuthentication, VerifyingKey, unencrypted,
+    ClientMessagesEncrypted, ServerInformation, ServerMessagesEncrypted, UserAuthentication,
+    VerifyingKey, unencrypted,
 };
 use conclave_common::tracker::{Advertise, Tracker, TrackerProtocol, TrackerWithKey};
 
@@ -336,6 +337,68 @@ impl Client {
         }
     }
 
+    /// Fetch a server's public key over the unencrypted channel, without
+    /// otherwise connecting. Used when bookmarking a server so the key can be
+    /// pinned and displayed.
+    ///
+    /// # Errors
+    ///
+    /// Networking errors may result, or the server may not return a key.
+    pub async fn fetch_server_key(host: &str, port: u16) -> Result<VerifyingKey> {
+        let mut stream = TcpStream::connect(format!("{host}:{port}")).await?;
+
+        info!("Requesting key from server");
+        unencrypted::ClientToServer::KeyRequest
+            .send(&mut stream)
+            .await?;
+
+        let key_response = unencrypted::ServerToClient::receive(&mut stream).await?;
+        let unencrypted::ServerToClient::PublicKey(key) = key_response else {
+            bail!("Server did not provide a public key")
+        };
+
+        info!("Received key from server");
+        Ok(key)
+    }
+
+    /// Fetch a server's information (name, description, etc.) by performing the
+    /// encrypted handshake, without keeping the connection. Requires the
+    /// server's key; supply credentials if the server does not allow guests.
+    ///
+    /// # Errors
+    ///
+    /// Networking or authentication errors may result.
+    pub async fn fetch_server_info(
+        host: &str,
+        port: u16,
+        key: VerifyingKey,
+        display_name: &str,
+        auth: Option<UserAuthentication>,
+    ) -> Result<ServerInformation> {
+        let mut stream = TcpStream::connect(format!("{host}:{port}")).await?;
+        unencrypted::ClientToServer::GoCrypto
+            .send(&mut stream)
+            .await?;
+
+        let mut encrypted_stream: DefaultEncryptedStream =
+            EncryptedStream::connect(stream, &key, None).await?;
+
+        let login = ServerMessagesEncrypted::ServerAuthenticationRequest((
+            display_name.to_string(),
+            None,
+            auth,
+        ))
+        .to_vec();
+        encrypted_stream.send(&login).await?;
+
+        let response = encrypted_stream.recv().await?;
+        match ClientMessagesEncrypted::from_bytes(&response)? {
+            ClientMessagesEncrypted::ServerInformationResponse(info) => Ok(info),
+            ClientMessagesEncrypted::Error(error) => Err(error.into()),
+            x => Err(anyhow!("Unexpected message from server: {x:?}")),
+        }
+    }
+
     /// Add a server bookmark to the config file
     ///
     /// # Errors
@@ -343,6 +406,22 @@ impl Client {
     /// I/O errors may occur when writing to the config file.
     pub async fn add_bookmark(&self, bookmark: &BookmarkEntry) -> Result<()> {
         self.config.write().await.bookmarks.push(bookmark.clone());
+        self.config.read().await.save(&self.config_file)
+    }
+
+    /// Replace the bookmark at `index` and save the config file. Does nothing if
+    /// the index is out of range.
+    ///
+    /// # Errors
+    ///
+    /// I/O errors may occur when writing to the config file.
+    pub async fn update_bookmark(&self, index: usize, bookmark: &BookmarkEntry) -> Result<()> {
+        {
+            let mut config = self.config.write().await;
+            if let Some(existing) = config.bookmarks.get_mut(index) {
+                *existing = bookmark.clone();
+            }
+        }
         self.config.read().await.save(&self.config_file)
     }
 
@@ -433,20 +512,7 @@ impl Client {
         let key = if let Some(key) = key {
             key
         } else {
-            let mut stream = TcpStream::connect(format!("{server}:{port}")).await?;
-
-            info!("Requesting key from server");
-            unencrypted::ClientToServer::KeyRequest
-                .send(&mut stream)
-                .await?;
-
-            let key_response = unencrypted::ServerToClient::receive(&mut stream).await?;
-            let unencrypted::ServerToClient::PublicKey(key) = key_response else {
-                bail!("Server did not provide a public key")
-            };
-
-            info!("Received key from server");
-            key
+            Self::fetch_server_key(server, port).await?
         };
 
         let mut stream = TcpStream::connect(format!("{server}:{port}")).await?;
