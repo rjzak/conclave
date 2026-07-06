@@ -164,6 +164,10 @@ impl From<(&str, &str)> for UserAuthentication {
 /// Information about a connected user
 #[derive(Clone, Debug, Hash, Deserialize, Serialize)]
 pub struct ConnectedUser {
+    /// Opaque handle for this connection, used to request more details about the
+    /// user or (for administrators) to kick them.
+    pub id: u32,
+
     /// Display name of the user which might be different from their username
     pub display_name: String,
 
@@ -178,6 +182,25 @@ pub struct ConnectedUser {
 
     /// User-provided local time, used to display timezone offsets.
     pub timezone: Option<DateTime<Local>>,
+}
+
+/// Extra, on-demand information about a connected user. The base fields (display
+/// name, connection duration, timezone) are already carried by [`ConnectedUser`];
+/// this holds what requires a lookup or elevated privileges.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct UserDetails {
+    /// Connection handle this refers to (matches [`ConnectedUser::connection_id`]).
+    pub connection_id: u32,
+
+    /// Groups the user belongs to (empty for unauthenticated guests).
+    pub groups: Vec<String>,
+
+    /// The user's login name. Only populated for administrators viewing an
+    /// authenticated user.
+    pub username: Option<String>,
+
+    /// The user's IP address. Only populated for administrators.
+    pub ip: Option<String>,
 }
 
 /// Client to Server messages for encrypted connections
@@ -195,6 +218,9 @@ pub enum ServerMessagesEncrypted {
 
     /// Ask the server for a list of connected users
     ListConnectedUsersRequest,
+
+    /// Ask the server for extra details about a connected user, by connection id.
+    UserDetailsRequest(u32),
 
     /// Do nothing message to keep the connection alive.
     KeepAlive,
@@ -240,6 +266,10 @@ pub enum ClientMessagesEncrypted {
 
     /// Receive a list of connected users
     ListConnectedUsersResponse(Vec<ConnectedUser>),
+
+    /// Extra details about a connected user, or `None` if that user is no longer
+    /// connected.
+    UserDetailsResponse(Option<UserDetails>),
 
     /// Server error response
     Error(ServerError),

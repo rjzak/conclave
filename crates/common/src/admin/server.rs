@@ -44,6 +44,9 @@ pub enum ServerAdminMessagesEncrypted {
 
     /// Remove a tracker by host and port.
     RemoveTracker(Tracker),
+
+    /// Kick a connected user by connection id.
+    KickUser(u32),
 }
 
 /// Server to Client administrative messages

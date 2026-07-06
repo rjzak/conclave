@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use conclave_client::conn::ConclaveConnection;
 use conclave_client::config::{BookmarkEntry, KnownHost, UserAuth};
+use conclave_client::conn::ConclaveConnection;
 use conclave_client::{Client, DiscoveredServer, discover_servers};
 use conclave_common::server::{UserAuthentication, VerifyingKey};
 use conclave_common::tracker::{Advertise, Tracker, TrackerWithKey};
@@ -67,6 +67,29 @@ fn format_uptime(d: chrono::Duration) -> String {
         format!("{mins}m {secs}s")
     } else {
         format!("{secs}s")
+    }
+}
+
+/// Describe a user's timezone relative to ours, rounded to whole hours. `None`
+/// means the user did not share their local time.
+fn timezone_offset_text(tz: Option<chrono::DateTime<chrono::Local>>) -> String {
+    use chrono::Offset;
+
+    let Some(tz) = tz else {
+        return "Timezone: not shared".to_string();
+    };
+
+    let theirs = tz.offset().fix().local_minus_utc();
+    let ours = chrono::Local::now().offset().fix().local_minus_utc();
+    // Difference in seconds, rounded to the nearest whole hour (halves away
+    // from zero) without floating point.
+    let diff_secs = i64::from(theirs - ours);
+    let hours = (diff_secs + if diff_secs >= 0 { 1800 } else { -1800 }) / 3600;
+
+    match hours.cmp(&0) {
+        std::cmp::Ordering::Greater => format!("Timezone: {hours}h ahead of you"),
+        std::cmp::Ordering::Less => format!("Timezone: {}h behind you", hours.abs()),
+        std::cmp::Ordering::Equal => "Timezone: same as yours".to_string(),
     }
 }
 
@@ -837,9 +860,7 @@ impl eframe::App for ConclaveGUI {
                                 for (i, bookmark) in bookmarks.iter().enumerate() {
                                     ui.group(|ui| {
                                         ui.horizontal(|ui| {
-                                            ui.label(
-                                                egui::RichText::new(&bookmark.name).strong(),
-                                            );
+                                            ui.label(egui::RichText::new(&bookmark.name).strong());
                                             ui.label(
                                                 egui::RichText::new(format!(
                                                     "{}:{}",
@@ -851,13 +872,11 @@ impl eframe::App for ConclaveGUI {
                                             ui.with_layout(
                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
-                                                    if !is_pending
-                                                        && ui.button("Delete").clicked()
+                                                    if !is_pending && ui.button("Delete").clicked()
                                                     {
                                                         delete_request = Some(i);
                                                     }
-                                                    if !is_pending && ui.button("Edit").clicked()
-                                                    {
+                                                    if !is_pending && ui.button("Edit").clicked() {
                                                         edit_request = Some(i);
                                                     }
                                                 },
@@ -888,11 +907,7 @@ impl eframe::App for ConclaveGUI {
                                             .data(|d| d.get_temp::<bool>(show_key_id))
                                             .unwrap_or(false);
                                         if ui
-                                            .button(if show_key {
-                                                "Hide key"
-                                            } else {
-                                                "Show key"
-                                            })
+                                            .button(if show_key { "Hide key" } else { "Show key" })
                                             .clicked()
                                         {
                                             show_key = !show_key;
@@ -906,9 +921,7 @@ impl eframe::App for ConclaveGUI {
                                             let key_sha256 = hex::encode(Sha256::digest(
                                                 bookmark.server.key.as_bytes(),
                                             ));
-                                            ui.label(
-                                                egui::RichText::new("Key (hex):").strong(),
-                                            );
+                                            ui.label(egui::RichText::new("Key (hex):").strong());
                                             egui::ScrollArea::vertical()
                                                 .id_salt(("bm_key_hex", i))
                                                 .max_height(48.0)
@@ -961,9 +974,7 @@ impl eframe::App for ConclaveGUI {
                                 ui.text_edit_singleline(&mut f_host);
                                 ui.end_row();
                                 ui.label("Port:");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut f_port).desired_width(60.0),
-                                );
+                                ui.add(egui::TextEdit::singleline(&mut f_port).desired_width(60.0));
                                 ui.end_row();
                                 ui.label("Display name:");
                                 ui.text_edit_singleline(&mut f_display);
@@ -982,9 +993,8 @@ impl eframe::App for ConclaveGUI {
                         ui.add_space(4.0);
                         // The server name may be left blank; it is fetched from
                         // the server when the bookmark is saved.
-                        let can_save = !is_pending
-                            && !f_host.is_empty()
-                            && f_port.parse::<u16>().is_ok();
+                        let can_save =
+                            !is_pending && !f_host.is_empty() && f_port.parse::<u16>().is_ok();
                         ui.horizontal(|ui| {
                             let save_label = if edit_index.is_some() { "Save" } else { "Add" };
                             if ui
@@ -1105,12 +1115,13 @@ impl eframe::App for ConclaveGUI {
 
                             // Fetch the server's name when the user left it blank.
                             let name = if name.is_empty() {
-                                let handshake_auth = (!user.is_empty() || !pass.is_empty()).then(
-                                    || UserAuthentication {
-                                        username: user.clone(),
-                                        password: pass.clone(),
-                                    },
-                                );
+                                let handshake_auth =
+                                    (!user.is_empty() || !pass.is_empty()).then(|| {
+                                        UserAuthentication {
+                                            username: user.clone(),
+                                            password: pass.clone(),
+                                        }
+                                    });
                                 match Client::fetch_server_info(
                                     &host,
                                     port,
@@ -1455,6 +1466,26 @@ impl eframe::App for ConclaveGUI {
             );
         }
 
+        // ── Prune dead connections ────────────────────────────────────────
+        // A connection whose listener has ended (the server closed it or kicked
+        // us) is removed so it no longer appears in the servers list, as if we
+        // had never connected. Its socket is released here and, asynchronously,
+        // from the client's own connection list.
+        {
+            let mut removed_any = false;
+            if let Ok(mut conns) = self.active_connections.write() {
+                let before = conns.len();
+                conns.retain(|conn| conn.connected_since().is_some());
+                removed_any = conns.len() != before;
+            }
+            if removed_any {
+                let client = self.client.clone();
+                tokio::spawn(async move {
+                    client.prune_disconnected().await;
+                });
+            }
+        }
+
         // ── Snapshot active connections ───────────────────────────────────
         // (stable key = hash of the server's public key, display name,
         //  still-connected flag, and a clone of the connection).
@@ -1642,6 +1673,18 @@ impl eframe::App for ConclaveGUI {
 
                     let server_info = conn.server_info();
                     let users = conn.get_connected_users();
+                    let is_admin = conn.is_admin();
+                    let details = conn.user_details();
+
+                    // Which user's detail panel is expanded (by connection id).
+                    let selected_id = egui::Id::new(format!("user_details_sel:{key_owned}"));
+                    let selected: Option<u32> = ctx
+                        .data(|d| d.get_temp::<Option<u32>>(selected_id))
+                        .flatten();
+
+                    let mut details_request: Option<u32> = None;
+                    let mut kick_request: Option<u32> = None;
+                    let mut clear_selection = false;
 
                     egui::CentralPanel::default().show(ctx, |ui| {
                         ui.heading(format!("Users on {}", server_info.name));
@@ -1657,6 +1700,7 @@ impl eframe::App for ConclaveGUI {
                                     .show(ui, |ui| {
                                         ui.label(egui::RichText::new("Name").strong());
                                         ui.label(egui::RichText::new("Connected").strong());
+                                        ui.label("");
                                         ui.end_row();
 
                                         for user in &users {
@@ -1667,16 +1711,88 @@ impl eframe::App for ConclaveGUI {
                                             }
                                             ui.label(name);
                                             ui.label(format_uptime(user.connected_since));
+                                            if ui.small_button("Details").clicked() {
+                                                details_request = Some(user.id);
+                                            }
                                             ui.end_row();
                                         }
                                     });
                             });
                         }
+
+                        // ── Selected user's detail panel ──────────────────────
+                        if let Some(sel) = selected {
+                            if let Some(user) = users.iter().find(|u| u.id == sel) {
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    ui.heading(&user.display_name);
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui.small_button("Close").clicked() {
+                                                clear_selection = true;
+                                            }
+                                        },
+                                    );
+                                });
+                                ui.label(format!(
+                                    "Connected: {}",
+                                    format_uptime(user.connected_since)
+                                ));
+                                ui.label(timezone_offset_text(user.timezone));
+
+                                match details.as_ref().filter(|d| d.connection_id == sel) {
+                                    Some(d) => {
+                                        if d.groups.is_empty() {
+                                            ui.label("Groups: none");
+                                        } else {
+                                            ui.label(format!("Groups: {}", d.groups.join(", ")));
+                                        }
+                                        // Administrator-only fields.
+                                        if let Some(username) = &d.username {
+                                            ui.label(format!("Username: {username}"));
+                                        }
+                                        if let Some(ip) = &d.ip {
+                                            ui.label(format!("IP: {ip}"));
+                                        }
+                                        if is_admin && ui.button("Kick").clicked() {
+                                            kick_request = Some(sel);
+                                        }
+                                    }
+                                    None => {
+                                        ui.label(egui::RichText::new("Loading details…").weak());
+                                    }
+                                }
+                            } else {
+                                // The selected user is no longer connected.
+                                clear_selection = true;
+                            }
+                        }
                     });
 
-                    // The server pushes roster changes automatically; repaint
-                    // periodically so those updates are picked up promptly.
-                    ctx.request_repaint_after(std::time::Duration::from_secs(2));
+                    // Perform queued actions outside the panel closure.
+                    if let Some(id) = details_request {
+                        ctx.data_mut(|d| d.insert_temp(selected_id, Some(id)));
+                        let conn = conn.clone();
+                        tokio::spawn(async move {
+                            let _ = conn.request_user_details(id).await;
+                        });
+                    }
+                    if let Some(id) = kick_request {
+                        let conn = conn.clone();
+                        tokio::spawn(async move {
+                            let _ = conn.admin_kick_user(id).await;
+                        });
+                        ctx.data_mut(|d| d.insert_temp(selected_id, Option::<u32>::None));
+                    }
+                    if clear_selection {
+                        ctx.data_mut(|d| d.insert_temp(selected_id, Option::<u32>::None));
+                    }
+
+                    // The server pushes roster changes automatically, and detail
+                    // replies arrive asynchronously; repaint periodically so both
+                    // are picked up promptly.
+                    ctx.request_repaint_after(std::time::Duration::from_millis(500));
                 },
             );
         }

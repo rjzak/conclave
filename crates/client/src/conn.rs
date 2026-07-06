@@ -2,7 +2,7 @@
 
 use conclave_common::net::{DefaultEncryptedStream, EncryptedWrite};
 use conclave_common::server::{
-    ClientMessagesEncrypted, ConnectedUser, ServerInformation, ServerMessagesEncrypted,
+    ClientMessagesEncrypted, ConnectedUser, ServerInformation, ServerMessagesEncrypted, UserDetails,
 };
 use std::ops::Not;
 
@@ -39,6 +39,9 @@ pub struct ConclaveConnection {
     /// the GUI can read it synchronously without `block_on` on the render thread.
     pub(crate) connected_users: Arc<std::sync::RwLock<Vec<ConnectedUser>>>,
 
+    /// Most recently received per-user details (from a [`Self::request_user_details`]).
+    pub(crate) user_details: Arc<std::sync::RwLock<Option<UserDetails>>>,
+
     /// Display name shown for the user on this server
     pub(crate) display_name: Arc<RwLock<String>>,
 
@@ -66,6 +69,7 @@ pub struct ConclaveConnection {
 
 impl ConclaveConnection {
     /// Create a connection object
+    #[allow(clippy::too_many_lines)]
     pub fn new(conn: DefaultEncryptedStream, info: ServerInformation, display_name: &str) -> Self {
         let (mut read, write) = conn.into_split();
         let server_info = Arc::new(std::sync::RwLock::new(info));
@@ -75,6 +79,7 @@ impl ConclaveConnection {
             connection: Arc::new(RwLock::new(write)),
             server_info: server_info.clone(),
             connected_users: connected_users.clone(),
+            user_details: Arc::new(std::sync::RwLock::new(None)),
             display_name: Arc::new(RwLock::new(display_name.to_string())),
             is_admin: Arc::new(AtomicBool::new(false)),
             admin_users: Arc::new(std::sync::RwLock::new(Vec::new())),
@@ -129,6 +134,12 @@ impl ConclaveConnection {
                             .write()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .clone_from(&users);
+                    }
+                    ClientMessagesEncrypted::UserDetailsResponse(details) => {
+                        *conn_clone
+                            .user_details
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = details;
                     }
                     ClientMessagesEncrypted::SessionInfo { admin, .. } => {
                         conn_clone.is_admin.store(admin, Ordering::SeqCst);
@@ -208,6 +219,27 @@ impl ConclaveConnection {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// The most recently received per-user details, if any. Populated in response
+    /// to [`Self::request_user_details`].
+    #[must_use]
+    pub fn user_details(&self) -> Option<UserDetails> {
+        self.user_details
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Request extra details about a connected user by connection id. The reply
+    /// arrives asynchronously and is available from [`Self::user_details`].
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn request_user_details(&self, connection_id: u32) -> Result<()> {
+        self.send_request(&ServerMessagesEncrypted::UserDetailsRequest(connection_id).to_vec())
+            .await
     }
 
     /// Whether the authenticated user on this connection is an administrator.
@@ -423,6 +455,21 @@ impl ConclaveConnection {
         self.send_request(
             &ServerMessagesEncrypted::AdministrativeRequest(
                 ServerAdminMessagesEncrypted::RemoveTracker(Tracker { host, port }),
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Kick a connected user by connection id.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_kick_user(&self, connection_id: u32) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::KickUser(connection_id),
             )
             .to_vec(),
         )

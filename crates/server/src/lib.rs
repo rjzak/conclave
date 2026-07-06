@@ -16,7 +16,7 @@ use conclave_common::net::{
 };
 use conclave_common::server::{
     ClientMessagesEncrypted, ConnectedUser, ServerError, ServerInformation,
-    ServerMessagesEncrypted, UserAuthentication, unencrypted,
+    ServerMessagesEncrypted, UserAuthentication, UserDetails, unencrypted,
 };
 use conclave_common::tracker::TrackerProtocol::AdvertiseServer;
 use conclave_common::tracker::{Advertise, Tracker, TrackerWithKey};
@@ -38,7 +38,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use semver::Version;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tracing::{error, info, trace, warn};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -54,6 +54,9 @@ pub static VERSION: LazyLock<Version> =
 
 /// Client connection
 struct ClientConnection {
+    /// Opaque, server-assigned handle for this connection.
+    connection_id: u32,
+
     /// Write half of the encrypted connection to the client. The read half is
     /// owned by the per-client task spawned in [`State::serve`].
     conn: Arc<RwLock<EncryptedWrite<DEFAULT_REKEY_INTERVAL>>>,
@@ -63,14 +66,24 @@ struct ClientConnection {
 
     /// Client's address
     addr: Arc<SocketAddr>,
+
+    /// When the connection was established, for computing its duration.
+    connected_at: DateTime<Utc>,
+
+    /// Fired to kick this connection: the per-client task stops reading and the
+    /// connection is torn down.
+    cancel: Arc<Notify>,
 }
 
 impl Clone for ClientConnection {
     fn clone(&self) -> Self {
         Self {
+            connection_id: self.connection_id,
             conn: self.conn.clone(),
             user: self.user.clone(),
             addr: self.addr.clone(),
+            connected_at: self.connected_at,
+            cancel: self.cancel.clone(),
         }
     }
 }
@@ -129,6 +142,9 @@ pub struct State {
 
     /// Total visitors
     total_visits: Arc<AtomicU32>,
+
+    /// Source of unique per-connection ids.
+    next_connection_id: Arc<AtomicU32>,
 
     /// Whether anonymous connections are allowed
     allow_anonymous: Arc<AtomicBool>,
@@ -266,6 +282,7 @@ impl State {
                 tracker_update: Arc::new(tokio::sync::watch::channel(0u64).0),
                 connections: Arc::new(RwLock::new(Vec::new())),
                 total_visits: Arc::new(AtomicU32::new(0)),
+                next_connection_id: Arc::new(AtomicU32::new(0)),
                 allow_anonymous: Arc::new(AtomicBool::new(true)), // Database default
                 serving: Arc::new(AtomicBool::new(false)),
                 mdns: mdns.then(|| ServiceDaemon::new().expect("Failed to start Multicast DNS")),
@@ -399,6 +416,7 @@ impl State {
             tracker_update: Arc::new(tokio::sync::watch::channel(0u64).0),
             connections: Arc::new(RwLock::new(Vec::new())),
             total_visits: Arc::new(AtomicU32::new(0)),
+            next_connection_id: Arc::new(AtomicU32::new(0)),
             allow_anonymous: Arc::new(AtomicBool::new(allow_anonymous)),
             serving: Arc::new(AtomicBool::new(false)),
             mdns: mdns.then(|| ServiceDaemon::new().expect("Failed to start Multicast DNS")),
@@ -1092,7 +1110,9 @@ impl State {
                                                 if let Ok((user_id, admin)) =
                                                     self_clone.authenticate_user(inner_auth).await
                                                 {
-                                                    info!("User {display_name} authenticated: uname: {uname}, uid: {user_id}");
+                                                    info!(
+                                                        "User {display_name} authenticated: uname: {uname}, uid: {user_id}"
+                                                    );
                                                     (Some(user_id), admin)
                                                 } else {
                                                     let error_message =
@@ -1100,7 +1120,9 @@ impl State {
                                                             ServerError::AuthenticationFailed,
                                                         )
                                                         .to_vec();
-                                                    warn!("Authentication failed for: username {uname} from {client}");
+                                                    warn!(
+                                                        "Authentication failed for: username {uname} from {client}"
+                                                    );
                                                     if let Err(e) =
                                                         stream.send(&error_message).await
                                                     {
@@ -1116,7 +1138,9 @@ impl State {
                                             {
                                                 (None, false)
                                             } else {
-                                                warn!("Attempted anonymous connection from {client} for display name {display_name}");
+                                                warn!(
+                                                    "Attempted anonymous connection from {client} for display name {display_name}"
+                                                );
                                                 let error_message = ClientMessagesEncrypted::Error(
                                                     ServerError::AuthenticationRequired,
                                                 )
@@ -1135,7 +1159,12 @@ impl State {
                                             let (read_half, write_half) = stream.into_split();
                                             let write = Arc::new(RwLock::new(write_half));
                                             let addr = Arc::new(client);
+                                            let id = self_clone
+                                                .next_connection_id
+                                                .fetch_add(1, Ordering::Relaxed);
+                                            let cancel = Arc::new(Notify::new());
                                             let user = Arc::new(ConnectedUser {
+                                                id,
                                                 display_name,
                                                 admin,
                                                 connected_since: Duration::default(),
@@ -1143,9 +1172,12 @@ impl State {
                                                 timezone: user_local_time,
                                             });
                                             let connection = ClientConnection {
+                                                connection_id: id,
                                                 conn: write.clone(),
                                                 user: user.clone(),
                                                 addr: addr.clone(),
+                                                connected_at: Local::now().to_utc(),
+                                                cancel: cancel.clone(),
                                             };
                                             if let Some(uid) = user_id {
                                                 info!(
@@ -1198,7 +1230,9 @@ impl State {
                                             let client_state = self_clone.clone();
                                             tokio::spawn(async move {
                                                 client_state
-                                                    .handle_client(read_half, write, addr, user)
+                                                    .handle_client(
+                                                        read_half, write, addr, user, cancel,
+                                                    )
                                                     .await;
                                             });
 
@@ -1213,7 +1247,9 @@ impl State {
                                             self_clone.notify_trackers();
                                         }
                                         Ok(_) => {
-                                            warn!("Unexpected protocol message received when expecting to switch to encrypted communications from {client}");
+                                            warn!(
+                                                "Unexpected protocol message received when expecting to switch to encrypted communications from {client}"
+                                            );
                                             if let Err(e) = stream.send(&disconnect_bytes).await {
                                                 error!(
                                                     "Failed to disconnect message to {client}: {e}"
@@ -1221,11 +1257,15 @@ impl State {
                                             }
                                         }
                                         Err(e) => {
-                                            error!("Error decoding encrypted message from {client}: {e}");
+                                            error!(
+                                                "Error decoding encrypted message from {client}: {e}"
+                                            );
                                         }
                                     },
                                     Err(e) => {
-                                        error!("Error decoding unencrypted message from {client}: {e}");
+                                        error!(
+                                            "Error decoding unencrypted message from {client}: {e}"
+                                        );
                                     }
                                 }
                             }
@@ -1254,16 +1294,24 @@ impl State {
         write: Arc<RwLock<EncryptedWrite<DEFAULT_REKEY_INTERVAL>>>,
         addr: Arc<SocketAddr>,
         user: Arc<ConnectedUser>,
+        cancel: Arc<Notify>,
     ) {
         let keep_alive_bytes = ServerMessagesEncrypted::KeepAlive.to_vec();
 
         loop {
-            let message = match read.recv().await {
-                Ok(message) => message,
-                // EOF here is the normal path for a client that drops without
-                // sending `Disconnect`; treat it as an ordinary disconnect.
-                Err(e) => {
-                    info!("Connection {addr:?} closed: {e}");
+            let message = tokio::select! {
+                result = read.recv() => match result {
+                    Ok(message) => message,
+                    // EOF here is the normal path for a client that drops without
+                    // sending `Disconnect`; treat it as an ordinary disconnect.
+                    Err(e) => {
+                        info!("Connection {addr:?} closed: {e}");
+                        break;
+                    }
+                },
+                // An administrator kicked this connection.
+                () = cancel.notified() => {
+                    info!("Connection {addr:?} kicked");
                     break;
                 }
             };
@@ -1292,6 +1340,16 @@ impl State {
                     .to_vec();
                     if let Err(e) = write.write().await.send(&response).await {
                         error!("Failed to send connected users to {addr:?}: {e}");
+                    }
+                }
+
+                Ok(ServerMessagesEncrypted::UserDetailsRequest(id)) => {
+                    // Privileged fields (username, IP) are only filled in for an
+                    // administrator connection.
+                    let details = self.user_details(id, user.admin).await;
+                    let response = ClientMessagesEncrypted::UserDetailsResponse(details).to_vec();
+                    if let Err(e) = write.write().await.send(&response).await {
+                        error!("Failed to send user details to {addr:?}: {e}");
                     }
                 }
 
@@ -1333,6 +1391,7 @@ impl State {
 
     /// Perform an administrative request and reply to the requester. The caller
     /// (`handle_client`) has already confirmed the connection is an admin.
+    #[inline]
     async fn handle_admin(
         &self,
         msg: ServerAdminMessagesEncrypted,
@@ -1379,6 +1438,7 @@ impl State {
                 .remove_tracker_host(&tracker.host, tracker.port)
                 .await
                 .map(|()| ok),
+            ServerAdminMessagesEncrypted::KickUser(id) => self.kick_user(id).await.map(|()| ok),
             // Unreachable: the caller only dispatches admin variants here.
             _ => return,
         };
@@ -1448,12 +1508,103 @@ impl State {
 
     /// Get a list of connected users
     pub async fn connected_users(&self) -> Vec<ConnectedUser> {
-        let connections = self.connections.read().await;
-        info!("Server: got read lock on connections");
-        connections
+        let now = Local::now().to_utc();
+        self.connections
+            .read()
+            .await
             .iter()
-            .map(|conn| (*conn.user).clone())
+            .map(|conn| {
+                let mut user = (*conn.user).clone();
+                user.connected_since = now - conn.connected_at;
+                user
+            })
             .collect()
+    }
+
+    /// Extra, on-demand details about a connected user by connection id. The
+    /// `requester_admin` flag decides whether the privileged fields (login name
+    /// and IP address) are included.
+    async fn user_details(&self, connection_id: u32, requester_admin: bool) -> Option<UserDetails> {
+        let (user_id, ip) = {
+            let connections = self.connections.read().await;
+            let conn = connections
+                .iter()
+                .find(|c| c.connection_id == connection_id)?;
+            (conn.user.user_id, conn.addr.ip())
+        };
+
+        // Group membership is visible to any connected user.
+        let groups = match user_id {
+            Some(uid) => self.user_groups(uid).await.unwrap_or_default(),
+            None => Vec::new(),
+        };
+
+        let (username, ip) = if requester_admin {
+            let username = match user_id {
+                Some(uid) => self.username_by_id(uid).await.unwrap_or_default(),
+                None => None,
+            };
+            (username, Some(ip.to_string()))
+        } else {
+            (None, None)
+        };
+
+        Some(UserDetails {
+            connection_id,
+            groups,
+            username,
+            ip,
+        })
+    }
+
+    /// The login name for a user id, if it exists.
+    async fn username_by_id(&self, uid: u32) -> Result<Option<String>> {
+        let uid = i64::from(uid);
+        let username = self
+            .sqlite
+            .conn(move |conn| {
+                conn.query_row("SELECT username FROM USER WHERE id = ?1;", [uid], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+            })
+            .await?;
+        Ok(username)
+    }
+
+    /// (Admin) Kick a connected user by connection id. The connection is dropped
+    /// from the roster immediately (as if the user had never connected), the
+    /// client is told the connection is closing, and its read loop is cancelled
+    /// so the socket is torn down.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no connected user has that id.
+    async fn kick_user(&self, connection_id: u32) -> Result<()> {
+        // Remove from the roster up front so the kick takes effect immediately,
+        // regardless of when the client's read loop notices.
+        let target = {
+            let mut connections = self.connections.write().await;
+            let Some(pos) = connections
+                .iter()
+                .position(|c| c.connection_id == connection_id)
+            else {
+                return Err(anyhow!("No connected user with id {connection_id}"));
+            };
+            connections.remove(pos)
+        };
+
+        // Tell the client the connection is closing and stop its read loop; the
+        // per-client task then drops the read half and the write half is dropped
+        // once `target` and that task both release it, closing the socket.
+        let disconnect = ClientMessagesEncrypted::Disconnect.to_vec();
+        let _ = target.conn.write().await.send(&disconnect).await;
+        target.cancel.notify_one();
+
+        // Update everyone else and the trackers now that they're gone.
+        self.broadcast_user_list().await;
+        self.notify_trackers();
+        Ok(())
     }
 
     fn mdns_service_info(&self) -> mdns_sd::Result<ServiceInfo> {

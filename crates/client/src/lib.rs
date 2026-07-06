@@ -574,6 +574,15 @@ impl Client {
             }
         }
     }
+
+    /// Drop any connections whose listener has ended (the server closed the
+    /// connection or kicked us), releasing their sockets.
+    pub async fn prune_disconnected(&self) {
+        self.connection
+            .write()
+            .await
+            .retain(|conn| conn.connected_since().is_some());
+    }
 }
 
 /// Local Conclave servers discovered by Multicast DNS
