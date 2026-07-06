@@ -2,7 +2,7 @@
 
 use crate::admin::server::{ClientAdminMessagesEncrypted, ServerAdminMessagesEncrypted};
 
-use chrono::{DateTime, Duration, Local};
+use chrono::{DateTime, Duration, Local, Utc};
 pub use ed25519_dalek::VerifyingKey;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -128,6 +128,52 @@ pub struct ServerInformation {
 
     /// Public key
     pub key: VerifyingKey,
+
+    /// Whether chat is enabled on the server
+    pub chat_enabled: bool,
+}
+
+/// A chatroom the user is allowed to see and join.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ChatroomInfo {
+    /// Database id of the chatroom
+    pub id: u32,
+
+    /// Chatroom name
+    pub name: String,
+}
+
+/// Activity within a chatroom, pushed to its members. History is not preserved,
+/// so these are only delivered live to members present at the time.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum ChatEvent {
+    /// A user joined the room.
+    Joined {
+        /// Chatroom id
+        room: u32,
+        /// Joining user's display name
+        display_name: String,
+    },
+
+    /// A user left the room.
+    Left {
+        /// Chatroom id
+        room: u32,
+        /// Leaving user's display name
+        display_name: String,
+    },
+
+    /// A user posted a message.
+    Message {
+        /// Chatroom id
+        room: u32,
+        /// Author's display name
+        display_name: String,
+        /// Message text
+        message: String,
+        /// When the server received the message (UTC)
+        at: DateTime<Utc>,
+    },
 }
 
 /// User authentication
@@ -222,6 +268,23 @@ pub enum ServerMessagesEncrypted {
     /// Ask the server for extra details about a connected user, by connection id.
     UserDetailsRequest(u32),
 
+    /// Ask the server for the chatrooms this user may access.
+    ChatRoomsRequest,
+
+    /// Join a chatroom by id (the server replies with the current member list).
+    ChatJoin(u32),
+
+    /// Leave a chatroom by id.
+    ChatLeave(u32),
+
+    /// Post a message to a chatroom.
+    ChatSend {
+        /// Chatroom id
+        room: u32,
+        /// Message text
+        message: String,
+    },
+
     /// Do nothing message to keep the connection alive.
     KeepAlive,
 
@@ -288,6 +351,21 @@ pub enum ClientMessagesEncrypted {
         /// Whether the authenticated user is an administrator
         admin: bool,
     },
+
+    /// The chatrooms this user may access (or empty if chat is disabled).
+    ChatRoomsResponse(Vec<ChatroomInfo>),
+
+    /// Sent to a user who joined a chatroom: the room id and the display names of
+    /// the members currently present.
+    ChatJoined {
+        /// Chatroom id
+        room: u32,
+        /// Display names of the members currently in the room
+        users: Vec<String>,
+    },
+
+    /// Live activity within a chatroom the user is a member of.
+    ChatActivity(ChatEvent),
 
     /// Container for administrative responses.
     AdministrativeResponse(ClientAdminMessagesEncrypted),

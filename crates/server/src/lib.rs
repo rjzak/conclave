@@ -9,19 +9,19 @@
 
 use conclave_common::URL_PROTOCOL;
 use conclave_common::admin::server::{
-    AdminUser, ClientAdminMessagesEncrypted, Group, ServerAdminMessagesEncrypted,
+    AdminUser, Chatroom, ClientAdminMessagesEncrypted, Group, ServerAdminMessagesEncrypted,
 };
 use conclave_common::net::{
     DEFAULT_REKEY_INTERVAL, DefaultEncryptedStream, EncryptedRead, EncryptedWrite, random_keypair,
 };
 use conclave_common::server::{
-    ClientMessagesEncrypted, ConnectedUser, ServerError, ServerInformation,
-    ServerMessagesEncrypted, UserAuthentication, UserDetails, unencrypted,
+    ChatEvent, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser, ServerError,
+    ServerInformation, ServerMessagesEncrypted, UserAuthentication, UserDetails, unencrypted,
 };
 use conclave_common::tracker::TrackerProtocol::AdvertiseServer;
 use conclave_common::tracker::{Advertise, Tracker, TrackerWithKey};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -148,6 +148,12 @@ pub struct State {
 
     /// Whether anonymous connections are allowed
     allow_anonymous: Arc<AtomicBool>,
+
+    /// Whether chat is enabled on the server
+    chat_enabled: Arc<AtomicBool>,
+
+    /// Chatroom membership: room id -> the connection ids currently present.
+    chat_members: Arc<RwLock<HashMap<u32, HashSet<u32>>>>,
 
     /// Whether the server is currently serving requests
     serving: Arc<AtomicBool>,
@@ -284,6 +290,8 @@ impl State {
                 total_visits: Arc::new(AtomicU32::new(0)),
                 next_connection_id: Arc::new(AtomicU32::new(0)),
                 allow_anonymous: Arc::new(AtomicBool::new(true)), // Database default
+                chat_enabled: Arc::new(AtomicBool::new(false)),   // Database default
+                chat_members: Arc::new(RwLock::new(HashMap::new())),
                 serving: Arc::new(AtomicBool::new(false)),
                 mdns: mdns.then(|| ServiceDaemon::new().expect("Failed to start Multicast DNS")),
                 #[cfg(feature = "gui")]
@@ -317,27 +325,45 @@ impl State {
             "Database path is not a file"
         );
 
-        let (name, description, private_key, public_key, url, trackers, allow_anonymous) = {
+        let (
+            name,
+            description,
+            private_key,
+            public_key,
+            url,
+            trackers,
+            allow_anonymous,
+            chat_enabled,
+        ) = {
             let conn = Connection::open(&sqlite_path)?;
             let mut stmt = conn
-                .prepare("SELECT name, description, key, version, advertised_domain, allow_anonymous_clients FROM SERVER_CONFIG")?;
-            let (name, description, keypair, version, advertised_domain, allow_anonymous) = stmt
-                .query_row([], |row| {
-                    let name: String = row.get(0)?;
-                    let description: String = row.get(1)?;
-                    let key_string: String = row.get(2)?;
-                    let version: String = row.get(3)?;
-                    let advertised_domain: Option<String> = row.get(4)?;
-                    let allow_anonymous: bool = row.get(5)?;
-                    Ok((
-                        name,
-                        description,
-                        key_string,
-                        version,
-                        advertised_domain,
-                        allow_anonymous,
-                    ))
-                })?;
+                .prepare("SELECT name, description, key, version, advertised_domain, allow_anonymous_clients, chat_enabled FROM SERVER_CONFIG")?;
+            let (
+                name,
+                description,
+                keypair,
+                version,
+                advertised_domain,
+                allow_anonymous,
+                chat_enabled,
+            ) = stmt.query_row([], |row| {
+                let name: String = row.get(0)?;
+                let description: String = row.get(1)?;
+                let key_string: String = row.get(2)?;
+                let version: String = row.get(3)?;
+                let advertised_domain: Option<String> = row.get(4)?;
+                let allow_anonymous: bool = row.get(5)?;
+                let chat_enabled: bool = row.get(6)?;
+                Ok((
+                    name,
+                    description,
+                    key_string,
+                    version,
+                    advertised_domain,
+                    allow_anonymous,
+                    chat_enabled,
+                ))
+            })?;
 
             let keypair = hex::decode(keypair)?;
             let keypair: [u8; 64] = keypair
@@ -393,6 +419,7 @@ impl State {
                 url,
                 trackers,
                 allow_anonymous,
+                chat_enabled,
             )
         };
 
@@ -418,6 +445,8 @@ impl State {
             total_visits: Arc::new(AtomicU32::new(0)),
             next_connection_id: Arc::new(AtomicU32::new(0)),
             allow_anonymous: Arc::new(AtomicBool::new(allow_anonymous)),
+            chat_enabled: Arc::new(AtomicBool::new(chat_enabled)),
+            chat_members: Arc::new(RwLock::new(HashMap::new())),
             serving: Arc::new(AtomicBool::new(false)),
             mdns: mdns.then(|| ServiceDaemon::new().expect("Failed to start Multicast DNS")),
             #[cfg(feature = "gui")]
@@ -1353,6 +1382,26 @@ impl State {
                     }
                 }
 
+                Ok(ServerMessagesEncrypted::ChatRoomsRequest) => {
+                    let rooms = self.chatrooms_for_user(user.user_id, user.admin).await;
+                    let response = ClientMessagesEncrypted::ChatRoomsResponse(rooms).to_vec();
+                    if let Err(e) = write.write().await.send(&response).await {
+                        error!("Failed to send chatroom list to {addr:?}: {e}");
+                    }
+                }
+
+                Ok(ServerMessagesEncrypted::ChatJoin(room)) => {
+                    self.chat_join(user.id, room, &user).await;
+                }
+
+                Ok(ServerMessagesEncrypted::ChatLeave(room)) => {
+                    self.chat_leave(user.id, room, &user.display_name).await;
+                }
+
+                Ok(ServerMessagesEncrypted::ChatSend { room, message }) => {
+                    self.chat_send(user.id, room, message, &user).await;
+                }
+
                 Ok(ServerMessagesEncrypted::Disconnect) => break,
 
                 // Administrative requests: allowed only on an authenticated admin
@@ -1382,8 +1431,9 @@ impl State {
             }
         }
 
-        // The client is gone: drop it from the roster, tell everyone else, and
-        // refresh the user count advertised to trackers.
+        // The client is gone: drop it from any chatrooms and the roster, tell
+        // everyone else, and refresh the user count advertised to trackers.
+        self.chat_leave_all(user.id, &user.display_name).await;
         self.connections.write().await.retain(|c| c.addr != addr);
         self.broadcast_user_list().await;
         self.notify_trackers();
@@ -1439,6 +1489,22 @@ impl State {
                 .await
                 .map(|()| ok),
             ServerAdminMessagesEncrypted::KickUser(id) => self.kick_user(id).await.map(|()| ok),
+            ServerAdminMessagesEncrypted::SetChatEnabled(enabled) => {
+                self.set_chat_enabled(enabled).await.map(|()| ok)
+            }
+            ServerAdminMessagesEncrypted::ListChatrooms => self
+                .admin_list_chatrooms()
+                .await
+                .map(ClientAdminMessagesEncrypted::ChatroomsResponse),
+            ServerAdminMessagesEncrypted::CreateChatroom { name, groups } => {
+                self.create_chatroom(name, groups).await.map(|()| ok)
+            }
+            ServerAdminMessagesEncrypted::EditChatroom { id, name, groups } => {
+                self.edit_chatroom(id, name, groups).await.map(|()| ok)
+            }
+            ServerAdminMessagesEncrypted::DeleteChatroom(id) => {
+                self.delete_chatroom(id).await.map(|()| ok)
+            }
             // Unreachable: the caller only dispatches admin variants here.
             _ => return,
         };
@@ -1464,6 +1530,7 @@ impl State {
             version: VERSION.clone(),
             anonymous: self.allow_anonymous.load(Ordering::Relaxed),
             users_connected: u32::try_from(self.connections.read().await.len()).unwrap_or_default(),
+            chat_enabled: self.chat_enabled.load(Ordering::Relaxed),
         }
     }
 
@@ -1503,6 +1570,393 @@ impl State {
         self.broadcast(&ClientMessagesEncrypted::ServerInformationResponse(
             self.server_information().await,
         ))
+        .await;
+    }
+
+    // ── Chat ──────────────────────────────────────────────────────────────
+
+    /// Whether chat is enabled on the server.
+    #[inline]
+    #[must_use]
+    pub fn chat_enabled(&self) -> bool {
+        self.chat_enabled.load(Ordering::Relaxed)
+    }
+
+    /// (Admin) Enable or disable chat. Disabling clears all room membership.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on a database failure.
+    pub async fn set_chat_enabled(&self, enabled: bool) -> Result<()> {
+        self.sqlite
+            .conn(move |conn| {
+                conn.execute("UPDATE SERVER_CONFIG SET chat_enabled = ?1;", [enabled])
+            })
+            .await?;
+        self.chat_enabled.store(enabled, Ordering::Relaxed);
+        if !enabled {
+            self.chat_members.write().await.clear();
+        }
+        // Tell clients chat is on/off and refresh their accessible-room lists.
+        self.broadcast_server_info().await;
+        self.broadcast_chatrooms().await;
+        Ok(())
+    }
+
+    /// (Admin) All chatrooms with their group restrictions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on a database failure.
+    pub async fn admin_list_chatrooms(&self) -> Result<Vec<Chatroom>> {
+        let rooms = self
+            .sqlite
+            .conn(move |conn| {
+                let mut stmt = conn.prepare("SELECT id, name FROM CHATROOM ORDER BY id;")?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<async_sqlite::rusqlite::Result<Vec<(u32, String)>>>()?;
+
+                let mut chatrooms = Vec::with_capacity(rows.len());
+                for (id, name) in rows {
+                    let mut gstmt = conn
+                        .prepare("SELECT gid FROM CHATROOM_GROUP WHERE room = ?1 ORDER BY gid;")?;
+                    let groups = gstmt
+                        .query_map([id], |row| row.get::<_, u32>(0))?
+                        .collect::<async_sqlite::rusqlite::Result<Vec<u32>>>()?;
+                    chatrooms.push(Chatroom { id, name, groups });
+                }
+                Ok(chatrooms)
+            })
+            .await?;
+        Ok(rooms)
+    }
+
+    /// (Admin) Create a chatroom, restricted to the given group ids (empty means
+    /// open to everyone).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the name is empty or already taken, or on a database
+    /// failure.
+    pub async fn create_chatroom(&self, name: String, groups: Vec<u32>) -> Result<()> {
+        ensure!(!name.trim().is_empty(), "Chatroom name cannot be empty");
+        self.sqlite
+            .conn(move |conn| {
+                conn.execute("INSERT INTO CHATROOM(name) VALUES(?1);", [&name])?;
+                let id = conn.last_insert_rowid();
+                for gid in &groups {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO CHATROOM_GROUP(room, gid) VALUES(?1, ?2);",
+                        params![id, gid],
+                    )?;
+                }
+                Ok(())
+            })
+            .await?;
+        self.broadcast_chatrooms().await;
+        Ok(())
+    }
+
+    /// (Admin) Rename a chatroom and replace its group restrictions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the name is empty, or on a database failure.
+    pub async fn edit_chatroom(&self, id: u32, name: String, groups: Vec<u32>) -> Result<()> {
+        ensure!(!name.trim().is_empty(), "Chatroom name cannot be empty");
+        self.sqlite
+            .conn(move |conn| {
+                conn.execute(
+                    "UPDATE CHATROOM SET name = ?1 WHERE id = ?2;",
+                    params![name, id],
+                )?;
+                conn.execute("DELETE FROM CHATROOM_GROUP WHERE room = ?1;", [id])?;
+                for gid in &groups {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO CHATROOM_GROUP(room, gid) VALUES(?1, ?2);",
+                        params![id, gid],
+                    )?;
+                }
+                Ok(())
+            })
+            .await?;
+        self.broadcast_chatrooms().await;
+        Ok(())
+    }
+
+    /// (Admin) Delete a chatroom by id. The default `Public` room (id 0) cannot
+    /// be deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when deleting the Public room or on a database failure.
+    pub async fn delete_chatroom(&self, id: u32) -> Result<()> {
+        ensure!(id != 0, "The Public chatroom cannot be deleted");
+        self.sqlite
+            .conn(move |conn| {
+                conn.execute("DELETE FROM CHATROOM_GROUP WHERE room = ?1;", [id])?;
+                conn.execute("DELETE FROM CHATROOM WHERE id = ?1;", [id])
+            })
+            .await?;
+        self.chat_members.write().await.remove(&id);
+        self.broadcast_chatrooms().await;
+        Ok(())
+    }
+
+    /// The chatrooms a user may access. Empty when chat is disabled. A room with
+    /// no group restriction is open to everyone; otherwise the user must be an
+    /// admin or a member of one of the room's groups.
+    async fn chatrooms_for_user(&self, user_id: Option<u32>, admin: bool) -> Vec<ChatroomInfo> {
+        if !self.chat_enabled.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+        let uid = user_id.map_or(-1_i64, i64::from);
+        self.sqlite
+            .conn(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT c.id, c.name FROM CHATROOM c \
+                     WHERE NOT EXISTS(SELECT 1 FROM CHATROOM_GROUP cg WHERE cg.room = c.id) \
+                        OR ?1 \
+                        OR EXISTS(SELECT 1 FROM CHATROOM_GROUP cg \
+                                  JOIN USERGROUP ug ON ug.gid = cg.gid \
+                                  WHERE cg.room = c.id AND ug.uid = ?2) \
+                     ORDER BY c.id;",
+                )?;
+                stmt.query_map(params![admin, uid], |row| {
+                    Ok(ChatroomInfo {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                    })
+                })?
+                .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()
+            })
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Whether a user may access a specific chatroom.
+    async fn can_access_room(&self, room: u32, user_id: Option<u32>, admin: bool) -> bool {
+        if !self.chat_enabled.load(Ordering::Relaxed) {
+            return false;
+        }
+        let uid = user_id.map_or(-1_i64, i64::from);
+        let allowed = self
+            .sqlite
+            .conn(move |conn| {
+                conn.query_row(
+                    "SELECT (NOT EXISTS(SELECT 1 FROM CHATROOM_GROUP WHERE room = ?1)) \
+                     OR ?2 \
+                     OR EXISTS(SELECT 1 FROM CHATROOM_GROUP cg \
+                               JOIN USERGROUP ug ON ug.gid = cg.gid \
+                               WHERE cg.room = ?1 AND ug.uid = ?3) \
+                     FROM CHATROOM WHERE id = ?1;",
+                    params![room, admin, uid],
+                    |row| row.get::<_, bool>(0),
+                )
+                .optional()
+            })
+            .await;
+        matches!(allowed, Ok(Some(true)))
+    }
+
+    /// Send each connected client its own list of accessible chatrooms.
+    async fn broadcast_chatrooms(&self) {
+        let targets: Vec<_> = self
+            .connections
+            .read()
+            .await
+            .iter()
+            .map(|c| (c.conn.clone(), c.user.user_id, c.user.admin))
+            .collect();
+        for (writer, user_id, admin) in targets {
+            let rooms = self.chatrooms_for_user(user_id, admin).await;
+            let bytes = ClientMessagesEncrypted::ChatRoomsResponse(rooms).to_vec();
+            if let Err(e) = writer.write().await.send(&bytes).await {
+                error!("Failed to send chatroom list: {e}");
+            }
+        }
+    }
+
+    /// Display names of the members currently in a room.
+    async fn room_member_names(&self, room: u32) -> Vec<String> {
+        let ids = self
+            .chat_members
+            .read()
+            .await
+            .get(&room)
+            .cloned()
+            .unwrap_or_default();
+        self.connections
+            .read()
+            .await
+            .iter()
+            .filter(|c| ids.contains(&c.connection_id))
+            .map(|c| c.user.display_name.clone())
+            .collect()
+    }
+
+    /// Send a message to every member of a room, optionally excluding one
+    /// connection (e.g. the sender of a join notice).
+    async fn broadcast_to_room(
+        &self,
+        room: u32,
+        message: &ClientMessagesEncrypted,
+        exclude: Option<u32>,
+    ) {
+        let ids = self
+            .chat_members
+            .read()
+            .await
+            .get(&room)
+            .cloned()
+            .unwrap_or_default();
+        let bytes = message.to_vec();
+        let writers: Vec<_> = self
+            .connections
+            .read()
+            .await
+            .iter()
+            .filter(|c| ids.contains(&c.connection_id) && Some(c.connection_id) != exclude)
+            .map(|c| c.conn.clone())
+            .collect();
+        for writer in writers {
+            if let Err(e) = writer.write().await.send(&bytes).await {
+                error!("Failed to send chat message: {e}");
+            }
+        }
+    }
+
+    /// Send a single message to a specific connection by id.
+    async fn send_to_connection(&self, connection_id: u32, message: &ClientMessagesEncrypted) {
+        let writer = self
+            .connections
+            .read()
+            .await
+            .iter()
+            .find(|c| c.connection_id == connection_id)
+            .map(|c| c.conn.clone());
+        if let Some(writer) = writer
+            && let Err(e) = writer.write().await.send(&message.to_vec()).await
+        {
+            error!("Failed to send chat message: {e}");
+        }
+    }
+
+    /// Handle a user joining a chatroom: register membership, send them the
+    /// current member list, and tell the others someone arrived.
+    async fn chat_join(&self, connection_id: u32, room: u32, user: &ConnectedUser) {
+        if !self.can_access_room(room, user.user_id, user.admin).await {
+            return;
+        }
+        self.chat_members
+            .write()
+            .await
+            .entry(room)
+            .or_default()
+            .insert(connection_id);
+
+        let users = self.room_member_names(room).await;
+        self.send_to_connection(
+            connection_id,
+            &ClientMessagesEncrypted::ChatJoined { room, users },
+        )
+        .await;
+        self.broadcast_to_room(
+            room,
+            &ClientMessagesEncrypted::ChatActivity(ChatEvent::Joined {
+                room,
+                display_name: user.display_name.clone(),
+            }),
+            Some(connection_id),
+        )
+        .await;
+    }
+
+    /// Handle a user leaving a chatroom, telling the remaining members.
+    async fn chat_leave(&self, connection_id: u32, room: u32, display_name: &str) {
+        let was_member = {
+            let mut members = self.chat_members.write().await;
+            if let Some(set) = members.get_mut(&room) {
+                let removed = set.remove(&connection_id);
+                if set.is_empty() {
+                    members.remove(&room);
+                }
+                removed
+            } else {
+                false
+            }
+        };
+        if was_member {
+            self.broadcast_to_room(
+                room,
+                &ClientMessagesEncrypted::ChatActivity(ChatEvent::Left {
+                    room,
+                    display_name: display_name.to_string(),
+                }),
+                None,
+            )
+            .await;
+        }
+    }
+
+    /// Remove a connection from every chatroom, telling each room's remaining
+    /// members. Used when a connection drops.
+    async fn chat_leave_all(&self, connection_id: u32, display_name: &str) {
+        let left_rooms: Vec<u32> = {
+            let mut members = self.chat_members.write().await;
+            let mut left = Vec::new();
+            members.retain(|room, set| {
+                if set.remove(&connection_id) {
+                    left.push(*room);
+                }
+                !set.is_empty()
+            });
+            left
+        };
+        for room in left_rooms {
+            self.broadcast_to_room(
+                room,
+                &ClientMessagesEncrypted::ChatActivity(ChatEvent::Left {
+                    room,
+                    display_name: display_name.to_string(),
+                }),
+                None,
+            )
+            .await;
+        }
+    }
+
+    /// Broadcast a chat message from a member to the whole room. Ignored if the
+    /// sender isn't a member of the room or the message is blank.
+    async fn chat_send(
+        &self,
+        connection_id: u32,
+        room: u32,
+        message: String,
+        user: &ConnectedUser,
+    ) {
+        let is_member = self
+            .chat_members
+            .read()
+            .await
+            .get(&room)
+            .is_some_and(|set| set.contains(&connection_id));
+        if !is_member || message.trim().is_empty() {
+            return;
+        }
+        self.broadcast_to_room(
+            room,
+            &ClientMessagesEncrypted::ChatActivity(ChatEvent::Message {
+                room,
+                display_name: user.display_name.clone(),
+                message,
+                at: Utc::now(),
+            }),
+            None,
+        )
         .await;
     }
 

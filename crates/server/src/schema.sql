@@ -8,7 +8,8 @@ CREATE TABLE SERVER_CONFIG (
     key text NOT NULL, -- hex: secret and public keys
     version text NOT NULL,
     advertised_domain text,
-    allow_anonymous_clients boolean DEFAULT TRUE NOT NULL
+    allow_anonymous_clients boolean DEFAULT TRUE NOT NULL,
+    chat_enabled boolean DEFAULT TRUE NOT NULL
 );
 
 CREATE TABLE TRACKER (
@@ -47,6 +48,21 @@ CREATE TABLE USERGROUP (
     FOREIGN KEY (gid) REFERENCES GRP(id)
 );
 
+CREATE TABLE CHATROOM (
+    id INTEGER PRIMARY KEY,
+    name text NOT NULL UNIQUE
+);
+
+-- Restricts a chatroom to members of a group. No entries = public. Multiple rows = any of the groups.
+CREATE TABLE CHATROOM_GROUP (
+    room integer NOT NULL,
+    gid integer NOT NULL,
+    PRIMARY KEY (room, gid),
+    FOREIGN KEY (room) REFERENCES CHATROOM(id),
+    FOREIGN KEY (gid) REFERENCES GRP(id)
+);
+
 INSERT INTO USER VALUES(0, 'admin', NULL, CURRENT_TIMESTAMP, false);
 INSERT INTO GRP VALUES(0, 'admin', 'Administrative users', NULL);
 INSERT INTO USERGROUP VALUES(0, 0, CURRENT_TIMESTAMP);
+INSERT INTO CHATROOM VALUES(0, 'Public');

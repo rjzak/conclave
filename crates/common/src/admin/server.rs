@@ -47,6 +47,33 @@ pub enum ServerAdminMessagesEncrypted {
 
     /// Kick a connected user by connection id.
     KickUser(u32),
+
+    /// Enable or disable chat on the server.
+    SetChatEnabled(bool),
+
+    /// Request the list of chatrooms and their group restrictions.
+    ListChatrooms,
+
+    /// Create a chatroom, optionally restricted to the given group ids.
+    CreateChatroom {
+        /// Chatroom name (must be unique)
+        name: String,
+        /// Group ids the room is restricted to; empty means open to everyone.
+        groups: Vec<u32>,
+    },
+
+    /// Rename a chatroom and replace its group restrictions.
+    EditChatroom {
+        /// Chatroom id
+        id: u32,
+        /// New chatroom name
+        name: String,
+        /// Group ids the room is restricted to; empty means open to everyone.
+        groups: Vec<u32>,
+    },
+
+    /// Delete a chatroom by id.
+    DeleteChatroom(u32),
 }
 
 /// Server to Client administrative messages
@@ -63,8 +90,24 @@ pub enum ClientAdminMessagesEncrypted {
     /// The configured trackers as `(host, port)` pairs.
     TrackersResponse(Vec<TrackerWithKey>),
 
+    /// The chatrooms and their group restrictions.
+    ChatroomsResponse(Vec<Chatroom>),
+
     /// Acknowledges that an administrative action succeeded.
     ActionOk,
+}
+
+/// A chatroom as seen by an administrator, including its group restrictions.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Chatroom {
+    /// Database id of the chatroom
+    pub id: u32,
+
+    /// Chatroom name
+    pub name: String,
+
+    /// Group ids the room is restricted to; empty means open to everyone.
+    pub groups: Vec<u32>,
 }
 
 /// A user account as seen by an administrator.

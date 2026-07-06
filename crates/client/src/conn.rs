@@ -2,8 +2,10 @@
 
 use conclave_common::net::{DefaultEncryptedStream, EncryptedWrite};
 use conclave_common::server::{
-    ClientMessagesEncrypted, ConnectedUser, ServerInformation, ServerMessagesEncrypted, UserDetails,
+    ChatEvent, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser, ServerInformation,
+    ServerMessagesEncrypted, UserDetails,
 };
+use std::collections::HashMap;
 use std::ops::Not;
 
 use std::sync::Arc;
@@ -12,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, Local};
 use conclave_common::admin::server::{
-    AdminUser, ClientAdminMessagesEncrypted, CreateUser, Group, GroupMembership,
+    AdminUser, Chatroom, ClientAdminMessagesEncrypted, CreateUser, Group, GroupMembership,
     ServerAdminMessagesEncrypted,
 };
 use conclave_common::tracker::{Tracker, TrackerWithKey};
@@ -22,6 +24,34 @@ use tokio::task::JoinHandle;
 /// Maximum time to wait for a request to be written to the server. A stalled or
 /// half-open socket would otherwise hold the connection's write lock forever.
 const SEND_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10);
+
+/// A single rendered line in a chatroom conversation.
+#[derive(Clone, Debug)]
+pub enum ChatLine {
+    /// A system notice, e.g. a user coming or going.
+    System(String),
+
+    /// A message posted by a user.
+    Message {
+        /// Local time the message was received.
+        time: DateTime<Local>,
+        /// Author's display name.
+        display_name: String,
+        /// Message text.
+        message: String,
+    },
+}
+
+/// Local view of a chatroom the user has joined. History is not preserved, so
+/// this only accumulates while the room is open.
+#[derive(Clone, Debug, Default)]
+pub struct ChatRoom {
+    /// Display names of the members currently present.
+    pub users: Vec<String>,
+
+    /// The conversation so far this session.
+    pub lines: Vec<ChatLine>,
+}
 
 /// Connection information
 #[allow(dead_code)]
@@ -60,6 +90,15 @@ pub struct ConclaveConnection {
     /// Most recent administrative action error, if any.
     pub(crate) admin_error: Arc<std::sync::RwLock<Option<String>>>,
 
+    /// Chatrooms this user may access (from the server).
+    pub(crate) chatrooms_available: Arc<std::sync::RwLock<Vec<ChatroomInfo>>>,
+
+    /// Latest administrative chatroom list (populated for admins on request).
+    pub(crate) admin_chatrooms: Arc<std::sync::RwLock<Vec<Chatroom>>>,
+
+    /// Local state of each joined chatroom, keyed by room id.
+    pub(crate) chat_rooms: Arc<std::sync::RwLock<HashMap<u32, ChatRoom>>>,
+
     /// Join handle for the task which listens for messages from the server
     pub(crate) listen_handle: Arc<JoinHandle<()>>,
 
@@ -86,6 +125,9 @@ impl ConclaveConnection {
             admin_groups: Arc::new(std::sync::RwLock::new(Vec::new())),
             admin_trackers: Arc::new(std::sync::RwLock::new(Vec::new())),
             admin_error: Arc::new(std::sync::RwLock::new(None)),
+            chatrooms_available: Arc::new(std::sync::RwLock::new(Vec::new())),
+            admin_chatrooms: Arc::new(std::sync::RwLock::new(Vec::new())),
+            chat_rooms: Arc::new(std::sync::RwLock::new(HashMap::new())),
             listen_handle: Arc::new(tokio::spawn(tokio::time::sleep(
                 tokio::time::Duration::from_millis(1),
             ))),
@@ -141,6 +183,22 @@ impl ConclaveConnection {
                             .write()
                             .unwrap_or_else(std::sync::PoisonError::into_inner) = details;
                     }
+                    ClientMessagesEncrypted::ChatRoomsResponse(rooms) => {
+                        *conn_clone
+                            .chatrooms_available
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = rooms;
+                    }
+                    ClientMessagesEncrypted::ChatJoined { room, users } => {
+                        let mut rooms = conn_clone
+                            .chat_rooms
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        rooms.entry(room).or_default().users = users;
+                    }
+                    ClientMessagesEncrypted::ChatActivity(event) => {
+                        conn_clone.apply_chat_event(event);
+                    }
                     ClientMessagesEncrypted::SessionInfo { admin, .. } => {
                         conn_clone.is_admin.store(admin, Ordering::SeqCst);
                     }
@@ -162,6 +220,12 @@ impl ConclaveConnection {
                                 .admin_trackers
                                 .write()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner) = trackers;
+                        }
+                        ClientAdminMessagesEncrypted::ChatroomsResponse(chatrooms) => {
+                            *conn_clone
+                                .admin_chatrooms
+                                .write()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = chatrooms;
                         }
                         ClientAdminMessagesEncrypted::ActionOk => {
                             *conn_clone
@@ -239,6 +303,123 @@ impl ConclaveConnection {
     /// Network errors are possible.
     pub async fn request_user_details(&self, connection_id: u32) -> Result<()> {
         self.send_request(&ServerMessagesEncrypted::UserDetailsRequest(connection_id).to_vec())
+            .await
+    }
+
+    // ── Chat ──────────────────────────────────────────────────────────────
+
+    /// Apply a chat activity event to the local room state.
+    fn apply_chat_event(&self, event: ChatEvent) {
+        let mut rooms = self
+            .chat_rooms
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match event {
+            ChatEvent::Joined { room, display_name } => {
+                let entry = rooms.entry(room).or_default();
+                if !entry.users.contains(&display_name) {
+                    entry.users.push(display_name.clone());
+                }
+                entry
+                    .lines
+                    .push(ChatLine::System(format!("{display_name} has joined")));
+            }
+            ChatEvent::Left { room, display_name } => {
+                let entry = rooms.entry(room).or_default();
+                entry.users.retain(|u| u != &display_name);
+                entry
+                    .lines
+                    .push(ChatLine::System(format!("{display_name} has left")));
+            }
+            ChatEvent::Message {
+                room,
+                display_name,
+                message,
+                at,
+            } => {
+                rooms
+                    .entry(room)
+                    .or_default()
+                    .lines
+                    .push(ChatLine::Message {
+                        time: at.with_timezone(&Local),
+                        display_name,
+                        message,
+                    });
+            }
+        }
+    }
+
+    /// The chatrooms this user may access, as last reported by the server.
+    #[must_use]
+    pub fn chatrooms_available(&self) -> Vec<ChatroomInfo> {
+        self.chatrooms_available
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// A snapshot of a joined chatroom's local state, if present.
+    #[must_use]
+    pub fn chat_room(&self, room: u32) -> Option<ChatRoom> {
+        self.chat_rooms
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&room)
+            .cloned()
+    }
+
+    /// The most recently received administrative chatroom list.
+    #[must_use]
+    pub fn admin_chatrooms(&self) -> Vec<Chatroom> {
+        self.admin_chatrooms
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Request the list of chatrooms this user may access; the reply is available
+    /// from [`Self::chatrooms_available`].
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn request_chatrooms(&self) -> Result<()> {
+        self.send_request(&ServerMessagesEncrypted::ChatRoomsRequest.to_vec())
+            .await
+    }
+
+    /// Join a chatroom by id.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn chat_join(&self, room: u32) -> Result<()> {
+        self.send_request(&ServerMessagesEncrypted::ChatJoin(room).to_vec())
+            .await
+    }
+
+    /// Leave a chatroom by id and clear its local (unsaved) state.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn chat_leave(&self, room: u32) -> Result<()> {
+        self.chat_rooms
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&room);
+        self.send_request(&ServerMessagesEncrypted::ChatLeave(room).to_vec())
+            .await
+    }
+
+    /// Post a message to a chatroom.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn chat_send(&self, room: u32, message: String) -> Result<()> {
+        self.send_request(&ServerMessagesEncrypted::ChatSend { room, message }.to_vec())
             .await
     }
 
@@ -470,6 +651,82 @@ impl ConclaveConnection {
         self.send_request(
             &ServerMessagesEncrypted::AdministrativeRequest(
                 ServerAdminMessagesEncrypted::KickUser(connection_id),
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Enable or disable chat on the server.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_set_chat_enabled(&self, enabled: bool) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::SetChatEnabled(enabled),
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Request the chatroom list; the reply is available from
+    /// [`Self::admin_chatrooms`].
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_list_chatrooms(&self) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::ListChatrooms,
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Create a chatroom, restricted to the given group ids.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_create_chatroom(&self, name: String, groups: Vec<u32>) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::CreateChatroom { name, groups },
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Rename a chatroom and replace its group restrictions.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_edit_chatroom(&self, id: u32, name: String, groups: Vec<u32>) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::EditChatroom { id, name, groups },
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Delete a chatroom by id.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_delete_chatroom(&self, id: u32) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::DeleteChatroom(id),
             )
             .to_vec(),
         )

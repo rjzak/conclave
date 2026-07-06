@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use conclave_client::config::{BookmarkEntry, KnownHost, UserAuth};
-use conclave_client::conn::ConclaveConnection;
+use conclave_client::conn::{ChatLine, ConclaveConnection};
 use conclave_client::{Client, DiscoveredServer, discover_servers};
 use conclave_common::server::{UserAuthentication, VerifyingKey};
 use conclave_common::tracker::{Advertise, Tracker, TrackerWithKey};
@@ -257,6 +257,12 @@ pub struct ConclaveGUI {
     /// Admin-window close requests (server keys) emitted by viewport closures
     admin_window_close_requests: Arc<RwLock<Vec<String>>>,
 
+    /// Open chatroom windows, keyed by (server key, room id)
+    open_chats: Arc<RwLock<HashSet<(String, u32)>>>,
+
+    /// Chat-window close requests emitted by viewport closures
+    chat_window_close_requests: Arc<RwLock<Vec<(String, u32)>>>,
+
     /// Show the bookmarks management window
     show_bookmarks_window: bool,
 
@@ -301,6 +307,8 @@ impl ConclaveGUI {
             open_user_windows: Arc::new(RwLock::new(HashSet::new())),
             open_admin_windows: Arc::new(RwLock::new(HashSet::new())),
             admin_window_close_requests: Arc::new(RwLock::new(Vec::new())),
+            open_chats: Arc::new(RwLock::new(HashSet::new())),
+            chat_window_close_requests: Arc::new(RwLock::new(Vec::new())),
             seen_servers: HashSet::new(),
             user_window_close_requests: Arc::new(RwLock::new(Vec::new())),
             show_bookmarks_window: false,
@@ -1655,6 +1663,7 @@ impl eframe::App for ConclaveGUI {
             let key_owned = key.clone();
             let title = format!("Users — {name}");
             let close_reqs = self.user_window_close_requests.clone();
+            let open_chats = self.open_chats.clone();
 
             ui.ctx().show_viewport_deferred(
                 egui::ViewportId::from_hash_of(format!("server_users:{key}")),
@@ -1676,6 +1685,17 @@ impl eframe::App for ConclaveGUI {
                     let is_admin = conn.is_admin();
                     let details = conn.user_details();
 
+                    // Fetch the available chatrooms once when the window opens.
+                    let chat_loaded_id = egui::Id::new(format!("chat_loaded:{key_owned}"));
+                    if !ctx.data(|d| d.get_temp::<bool>(chat_loaded_id).unwrap_or(false)) {
+                        ctx.data_mut(|d| d.insert_temp(chat_loaded_id, true));
+                        let c = conn.clone();
+                        tokio::spawn(async move {
+                            let _ = c.request_chatrooms().await;
+                        });
+                    }
+                    let chatrooms = conn.chatrooms_available();
+
                     // Which user's detail panel is expanded (by connection id).
                     let selected_id = egui::Id::new(format!("user_details_sel:{key_owned}"));
                     let selected: Option<u32> = ctx
@@ -1685,6 +1705,7 @@ impl eframe::App for ConclaveGUI {
                     let mut details_request: Option<u32> = None;
                     let mut kick_request: Option<u32> = None;
                     let mut clear_selection = false;
+                    let mut open_chat_request: Option<u32> = None;
 
                     egui::CentralPanel::default().show(ctx, |ui| {
                         ui.heading(format!("Users on {}", server_info.name));
@@ -1693,31 +1714,35 @@ impl eframe::App for ConclaveGUI {
                         if users.is_empty() {
                             ui.label(egui::RichText::new("No users connected yet.").weak());
                         } else {
-                            egui::ScrollArea::vertical().show(ui, |ui| {
-                                egui::Grid::new(format!("users_grid:{key_owned}"))
-                                    .striped(true)
-                                    .spacing([12.0, 4.0])
-                                    .show(ui, |ui| {
-                                        ui.label(egui::RichText::new("Name").strong());
-                                        ui.label(egui::RichText::new("Connected").strong());
-                                        ui.label("");
-                                        ui.end_row();
-
-                                        for user in &users {
-                                            // Administrators are shown with a red name.
-                                            let mut name = egui::RichText::new(&user.display_name);
-                                            if user.admin {
-                                                name = name.color(egui::Color32::RED);
-                                            }
-                                            ui.label(name);
-                                            ui.label(format_uptime(user.connected_since));
-                                            if ui.small_button("Details").clicked() {
-                                                details_request = Some(user.id);
-                                            }
+                            egui::ScrollArea::vertical()
+                                .id_salt(format!("users_scroll:{key_owned}"))
+                                .max_height(160.0)
+                                .show(ui, |ui| {
+                                    egui::Grid::new(format!("users_grid:{key_owned}"))
+                                        .striped(true)
+                                        .spacing([12.0, 4.0])
+                                        .show(ui, |ui| {
+                                            ui.label(egui::RichText::new("Name").strong());
+                                            ui.label(egui::RichText::new("Connected").strong());
+                                            ui.label("");
                                             ui.end_row();
-                                        }
-                                    });
-                            });
+
+                                            for user in &users {
+                                                // Administrators are shown with a red name.
+                                                let mut name =
+                                                    egui::RichText::new(&user.display_name);
+                                                if user.admin {
+                                                    name = name.color(egui::Color32::RED);
+                                                }
+                                                ui.label(name);
+                                                ui.label(format_uptime(user.connected_since));
+                                                if ui.small_button("Details").clicked() {
+                                                    details_request = Some(user.id);
+                                                }
+                                                ui.end_row();
+                                            }
+                                        });
+                                });
                         }
 
                         // ── Selected user's detail panel ──────────────────────
@@ -1768,9 +1793,55 @@ impl eframe::App for ConclaveGUI {
                                 clear_selection = true;
                             }
                         }
+
+                        // ── Chatrooms ─────────────────────────────────────
+                        ui.separator();
+                        ui.heading("Chatrooms");
+                        if !server_info.chat_enabled {
+                            ui.label(
+                                egui::RichText::new("Chat is disabled on this server.").weak(),
+                            );
+                            if is_admin {
+                                ui.label(
+                                    egui::RichText::new("Enable it in the server's Admin window.")
+                                        .weak()
+                                        .small(),
+                                );
+                            }
+                        } else if chatrooms.is_empty() {
+                            ui.label(egui::RichText::new("No chatrooms available.").weak());
+                        } else {
+                            for room in &chatrooms {
+                                ui.horizontal(|ui| {
+                                    ui.label(&room.name);
+                                    let is_open = open_chats
+                                        .read()
+                                        .is_ok_and(|o| o.contains(&(key_owned.clone(), room.id)));
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if is_open {
+                                                ui.label(egui::RichText::new("open").weak());
+                                            } else if ui.small_button("Open").clicked() {
+                                                open_chat_request = Some(room.id);
+                                            }
+                                        },
+                                    );
+                                });
+                            }
+                        }
                     });
 
                     // Perform queued actions outside the panel closure.
+                    if let Some(room) = open_chat_request {
+                        if let Ok(mut open) = open_chats.write() {
+                            open.insert((key_owned.clone(), room));
+                        }
+                        let conn = conn.clone();
+                        tokio::spawn(async move {
+                            let _ = conn.chat_join(room).await;
+                        });
+                    }
                     if let Some(id) = details_request {
                         ctx.data_mut(|d| d.insert_temp(selected_id, Some(id)));
                         let conn = conn.clone();
@@ -1793,6 +1864,161 @@ impl eframe::App for ConclaveGUI {
                     // replies arrive asynchronously; repaint periodically so both
                     // are picked up promptly.
                     ctx.request_repaint_after(std::time::Duration::from_millis(500));
+                },
+            );
+        }
+
+        // ── Chatroom windows ──────────────────────────────────────────────
+        // Drain close requests (leaving the room) and drop chats whose server
+        // has disconnected.
+        {
+            let live: HashSet<String> = conn_snapshots.iter().map(|(k, ..)| k.clone()).collect();
+            let closed: Vec<(String, u32)> = self
+                .chat_window_close_requests
+                .write()
+                .map(|mut r| r.drain(..).collect())
+                .unwrap_or_default();
+            if let Ok(mut open) = self.open_chats.write() {
+                for entry in &closed {
+                    open.remove(entry);
+                }
+                open.retain(|(k, _)| live.contains(k));
+            }
+            for (k, room) in closed {
+                if let Some((.., conn)) = conn_snapshots.iter().find(|(key, ..)| *key == k) {
+                    let conn = conn.clone();
+                    tokio::spawn(async move {
+                        let _ = conn.chat_leave(room).await;
+                    });
+                }
+            }
+        }
+
+        let open_chats: Vec<(String, u32)> = self
+            .open_chats
+            .read()
+            .map(|o| o.iter().cloned().collect())
+            .unwrap_or_default();
+
+        for (key, room) in open_chats {
+            let Some((_, server_name, _, conn)) = conn_snapshots.iter().find(|(k, ..)| *k == key)
+            else {
+                continue;
+            };
+            let conn = conn.clone();
+            let key_owned = key.clone();
+            let room_name = conn
+                .chatrooms_available()
+                .into_iter()
+                .find(|r| r.id == room)
+                .map_or_else(|| format!("Room {room}"), |r| r.name);
+            let title = format!("{room_name} — {server_name}");
+            let close_reqs = self.chat_window_close_requests.clone();
+
+            ui.ctx().show_viewport_deferred(
+                egui::ViewportId::from_hash_of(format!("chat:{key}:{room}")),
+                egui::ViewportBuilder::default()
+                    .with_title(title)
+                    .with_inner_size([640.0, 460.0])
+                    .with_resizable(true),
+                move |ctx, _class| {
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        if let Ok(mut r) = close_reqs.write() {
+                            r.push((key_owned.clone(), room));
+                        }
+                        ctx.request_repaint_of(egui::ViewportId::ROOT);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+
+                    let state = conn.chat_room(room).unwrap_or_default();
+
+                    let input_id = egui::Id::new(format!("chat_input:{key_owned}:{room}"));
+                    let mut input: String = ctx.data(|d| d.get_temp(input_id).unwrap_or_default());
+                    let mut send = false;
+
+                    // Bottom: message composer.
+                    egui::Panel::bottom(format!("chat_compose:{key_owned}:{room}")).show(
+                        ctx,
+                        |ui| {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                let response = ui.add(
+                                    egui::TextEdit::singleline(&mut input)
+                                        .desired_width(ui.available_width() - 60.0)
+                                        .hint_text("Message"),
+                                );
+                                let entered = response.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                if (ui.button("Send").clicked() || entered)
+                                    && !input.trim().is_empty()
+                                {
+                                    send = true;
+                                }
+                            });
+                            ui.add_space(4.0);
+                        },
+                    );
+
+                    // Right: the room's user list.
+                    egui::Panel::right(format!("chat_users:{key_owned}:{room}"))
+                        .resizable(true)
+                        .default_size(140.0)
+                        .show(ctx, |ui| {
+                            ui.heading("Users");
+                            ui.separator();
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                for user in &state.users {
+                                    ui.label(user);
+                                }
+                            });
+                        });
+
+                    // Center: the conversation.
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                for line in &state.lines {
+                                    match line {
+                                        ChatLine::System(text) => {
+                                            ui.label(egui::RichText::new(text).weak().italics());
+                                        }
+                                        ChatLine::Message {
+                                            time,
+                                            display_name,
+                                            message,
+                                        } => {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new(
+                                                        time.format("%H:%M:%S").to_string(),
+                                                    )
+                                                    .weak()
+                                                    .monospace(),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new(format!("{display_name}:"))
+                                                        .strong(),
+                                                );
+                                                ui.label(message);
+                                            });
+                                        }
+                                    }
+                                }
+                            });
+                    });
+
+                    if send {
+                        let message = std::mem::take(&mut input);
+                        let conn = conn.clone();
+                        tokio::spawn(async move {
+                            let _ = conn.chat_send(room, message).await;
+                        });
+                    }
+                    ctx.data_mut(|d| d.insert_temp(input_id, input));
+                    // Messages arrive asynchronously; repaint so they show promptly.
+                    ctx.request_repaint_after(std::time::Duration::from_millis(300));
                 },
             );
         }
@@ -1837,6 +2063,7 @@ impl eframe::App for ConclaveGUI {
                             let _ = c.admin_list_users().await;
                             let _ = c.admin_list_groups().await;
                             let _ = c.admin_list_trackers().await;
+                            let _ = c.admin_list_chatrooms().await;
                         });
                     }
 
@@ -1844,6 +2071,7 @@ impl eframe::App for ConclaveGUI {
                     let users = conn.admin_users();
                     let groups = conn.admin_groups();
                     let trackers = conn.admin_trackers();
+                    let chatrooms = conn.admin_chatrooms();
                     let admin_error = conn.admin_error();
 
                     // Form fields persisted in egui temp data, keyed per server.
@@ -1854,6 +2082,9 @@ impl eframe::App for ConclaveGUI {
                     let new_groups_id = egui::Id::new(format!("admin_ng:{key_owned}"));
                     let tracker_host_id = egui::Id::new(format!("admin_th:{key_owned}"));
                     let tracker_port_id = egui::Id::new(format!("admin_tp:{key_owned}"));
+                    let chat_name_id = egui::Id::new(format!("admin_cn:{key_owned}"));
+                    let chat_groups_id = egui::Id::new(format!("admin_cg:{key_owned}"));
+                    let chat_edit_id = egui::Id::new(format!("admin_ce:{key_owned}"));
 
                     let mut server_name: String =
                         ctx.data(|d| d.get_temp(name_id).unwrap_or_else(|| info.name.clone()));
@@ -1873,6 +2104,13 @@ impl eframe::App for ConclaveGUI {
                         d.get_temp(tracker_port_id)
                             .unwrap_or_else(|| "9100".to_string())
                     });
+                    let mut chat_name: String =
+                        ctx.data(|d| d.get_temp(chat_name_id).unwrap_or_default());
+                    let mut chat_groups: HashSet<u32> =
+                        ctx.data(|d| d.get_temp(chat_groups_id).unwrap_or_default());
+                    let mut chat_edit: Option<u32> = ctx
+                        .data(|d| d.get_temp::<Option<u32>>(chat_edit_id))
+                        .flatten();
 
                     // Actions are flagged during rendering and performed afterwards.
                     let mut save_server = false;
@@ -1882,6 +2120,11 @@ impl eframe::App for ConclaveGUI {
                     let mut group_changes: Vec<(u32, u32, bool)> = Vec::new();
                     let mut add_tracker = false;
                     let mut remove_tracker: Option<(String, u16)> = None;
+                    let mut chat_toggle: Option<bool> = None;
+                    let mut chat_save = false;
+                    let mut chat_delete: Option<u32> = None;
+                    let mut chat_edit_load: Option<u32> = None;
+                    let mut chat_cancel = false;
                     let mut refresh = false;
 
                     egui::CentralPanel::default().show(ctx, |ui| {
@@ -2049,6 +2292,113 @@ impl eframe::App for ConclaveGUI {
                                 }
                             });
 
+                        egui::CollapsingHeader::new("Chat")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                let mut enabled = info.chat_enabled;
+                                if ui.checkbox(&mut enabled, "Enable chat").changed() {
+                                    chat_toggle = Some(enabled);
+                                }
+                                ui.separator();
+
+                                // Existing chatrooms.
+                                for room in &chatrooms {
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(&room.name).strong());
+                                        // Show which groups it is restricted to.
+                                        let restriction = if room.groups.is_empty() {
+                                            "everyone".to_string()
+                                        } else {
+                                            room.groups
+                                                .iter()
+                                                .map(|gid| {
+                                                    groups
+                                                        .iter()
+                                                        .find(|g| g.id == *gid)
+                                                        .map_or_else(
+                                                            || format!("#{gid}"),
+                                                            |g| g.name.clone(),
+                                                        )
+                                                })
+                                                .collect::<Vec<_>>()
+                                                .join(", ")
+                                        };
+                                        ui.label(
+                                            egui::RichText::new(format!("({restriction})")).weak(),
+                                        );
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                // The Public room (id 0) can't be deleted.
+                                                if room.id != 0
+                                                    && ui.small_button("Delete").clicked()
+                                                {
+                                                    chat_delete = Some(room.id);
+                                                }
+                                                if ui.small_button("Edit").clicked() {
+                                                    chat_edit_load = Some(room.id);
+                                                }
+                                            },
+                                        );
+                                    });
+                                }
+
+                                ui.separator();
+                                // Create / edit form.
+                                ui.label(
+                                    egui::RichText::new(if chat_edit.is_some() {
+                                        "Edit chatroom"
+                                    } else {
+                                        "New chatroom"
+                                    })
+                                    .strong(),
+                                );
+                                ui.horizontal(|ui| {
+                                    ui.label("Name:");
+                                    ui.text_edit_singleline(&mut chat_name);
+                                });
+                                if groups.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new("No groups to restrict to.").weak(),
+                                    );
+                                } else {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label("Restrict to groups:");
+                                        for g in &groups {
+                                            let mut on = chat_groups.contains(&g.id);
+                                            if ui.checkbox(&mut on, &g.name).changed() {
+                                                if on {
+                                                    chat_groups.insert(g.id);
+                                                } else {
+                                                    chat_groups.remove(&g.id);
+                                                }
+                                            }
+                                        }
+                                    });
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "No groups selected means open to everyone.",
+                                        )
+                                        .weak()
+                                        .small(),
+                                    );
+                                }
+                                ui.horizontal(|ui| {
+                                    let can = !chat_name.trim().is_empty();
+                                    let label = if chat_edit.is_some() {
+                                        "Save"
+                                    } else {
+                                        "Create"
+                                    };
+                                    if ui.add_enabled(can, egui::Button::new(label)).clicked() {
+                                        chat_save = true;
+                                    }
+                                    if chat_edit.is_some() && ui.button("Cancel").clicked() {
+                                        chat_cancel = true;
+                                    }
+                                });
+                            });
+
                         ui.separator();
                         if ui.button("Refresh").clicked() {
                             refresh = true;
@@ -2110,12 +2460,60 @@ impl eframe::App for ConclaveGUI {
                             let _ = c.admin_list_trackers().await;
                         });
                     }
+                    if let Some(enabled) = chat_toggle {
+                        let c = conn.clone();
+                        tokio::spawn(async move {
+                            let _ = c.admin_set_chat_enabled(enabled).await;
+                        });
+                    }
+                    // Load an existing room into the edit form.
+                    if let Some(id) = chat_edit_load
+                        && let Some(room) = chatrooms.iter().find(|r| r.id == id)
+                    {
+                        chat_name.clone_from(&room.name);
+                        chat_groups = room.groups.iter().copied().collect();
+                        chat_edit = Some(id);
+                    }
+                    if chat_cancel {
+                        chat_name.clear();
+                        chat_groups.clear();
+                        chat_edit = None;
+                    }
+                    if chat_save {
+                        let c = conn.clone();
+                        let name = std::mem::take(&mut chat_name);
+                        let selected: Vec<u32> = chat_groups.iter().copied().collect();
+                        let edit = chat_edit;
+                        chat_groups.clear();
+                        chat_edit = None;
+                        tokio::spawn(async move {
+                            if let Some(id) = edit {
+                                let _ = c.admin_edit_chatroom(id, name, selected).await;
+                            } else {
+                                let _ = c.admin_create_chatroom(name, selected).await;
+                            }
+                            let _ = c.admin_list_chatrooms().await;
+                        });
+                    }
+                    if let Some(id) = chat_delete {
+                        let c = conn.clone();
+                        if chat_edit == Some(id) {
+                            chat_name.clear();
+                            chat_groups.clear();
+                            chat_edit = None;
+                        }
+                        tokio::spawn(async move {
+                            let _ = c.admin_delete_chatroom(id).await;
+                            let _ = c.admin_list_chatrooms().await;
+                        });
+                    }
                     if refresh {
                         let c = conn.clone();
                         tokio::spawn(async move {
                             let _ = c.admin_list_users().await;
                             let _ = c.admin_list_groups().await;
                             let _ = c.admin_list_trackers().await;
+                            let _ = c.admin_list_chatrooms().await;
                         });
                     }
 
@@ -2128,6 +2526,9 @@ impl eframe::App for ConclaveGUI {
                         d.insert_temp(new_groups_id, new_groups);
                         d.insert_temp(tracker_host_id, tracker_host);
                         d.insert_temp(tracker_port_id, tracker_port);
+                        d.insert_temp(chat_name_id, chat_name);
+                        d.insert_temp(chat_groups_id, chat_groups);
+                        d.insert_temp(chat_edit_id, chat_edit);
                     });
 
                     ctx.request_repaint_after(std::time::Duration::from_secs(2));
