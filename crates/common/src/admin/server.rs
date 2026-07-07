@@ -24,6 +24,15 @@ pub enum ServerAdminMessagesEncrypted {
     /// Request the list of groups.
     ListGroups,
 
+    /// Create a group, optionally with a description and colour.
+    CreateGroup(CreateGroup),
+
+    /// Rename a group and set its description and colour.
+    EditGroup(Group),
+
+    /// Delete a group by id.
+    DeleteGroup(u32),
+
     /// Create a user account.
     CreateUser(CreateUser),
 
@@ -160,6 +169,30 @@ pub struct Group {
 
     /// Optional human-readable description
     pub description: Option<String>,
+
+    /// Optional RGB colour; members' names are tinted a mix of their groups'
+    /// colours. Red is reserved for the admin group.
+    pub color: Option<[u8; 3]>,
+}
+
+/// Group creation request.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CreateGroup {
+    /// Group name (must be unique)
+    pub name: String,
+
+    /// Optional human-readable description
+    pub description: Option<String>,
+
+    /// Optional RGB colour; red is reserved for the admin group.
+    pub color: Option<[u8; 3]>,
+}
+
+/// Whether an RGB colour is "red-like" and therefore reserved for the admin
+/// group: a strong red channel with weak green and blue.
+#[must_use]
+pub fn is_reserved_red([r, g, b]: [u8; 3]) -> bool {
+    r >= 150 && g <= 70 && b <= 70
 }
 
 /// A user account's membership in a group, both identified by id.

@@ -207,6 +207,10 @@ impl From<(&str, &str)> for UserAuthentication {
     }
 }
 
+/// Minutes of inactivity after which a user is considered idle (and their name
+/// is greyed out in the clients).
+pub const IDLE_TIMEOUT_MINUTES: Duration = Duration::minutes(30);
+
 /// Information about a connected user
 #[derive(Clone, Debug, Hash, Deserialize, Serialize)]
 pub struct ConnectedUser {
@@ -222,6 +226,13 @@ pub struct ConnectedUser {
 
     /// Time since the user connected
     pub connected_since: Duration,
+
+    /// Time since the user was last active (sent anything but a keep-alive).
+    pub idle: Duration,
+
+    /// Name colour, mixed from the user's groups' colours (`None` if the user
+    /// belongs to no coloured groups).
+    pub color: Option<[u8; 3]>,
 
     /// User's ID, if authenticated.
     pub user_id: Option<u32>,

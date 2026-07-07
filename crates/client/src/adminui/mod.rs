@@ -6,6 +6,7 @@
 //! new areas can be added without growing a single giant function or file.
 
 mod chat;
+mod groups;
 mod server;
 mod trackers;
 mod users;
@@ -23,6 +24,9 @@ pub enum AdminTab {
     /// User accounts and group memberships.
     Users,
 
+    /// Groups and their colours.
+    Groups,
+
     /// Configured trackers.
     Trackers,
 
@@ -32,13 +36,20 @@ pub enum AdminTab {
 
 impl AdminTab {
     /// All tabs in display order.
-    const ALL: [Self; 4] = [Self::Server, Self::Users, Self::Trackers, Self::Chat];
+    const ALL: [Self; 5] = [
+        Self::Server,
+        Self::Users,
+        Self::Groups,
+        Self::Trackers,
+        Self::Chat,
+    ];
 
     /// The tab's label for the tab bar.
     const fn title(self) -> &'static str {
         match self {
             Self::Server => "Server",
             Self::Users => "Users",
+            Self::Groups => "Groups",
             Self::Trackers => "Trackers",
             Self::Chat => "Chat",
         }
@@ -90,6 +101,7 @@ pub fn admin_ui(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str) {
         match tab {
             AdminTab::Server => server::ui(ui, conn, key),
             AdminTab::Users => users::ui(ui, conn, key),
+            AdminTab::Groups => groups::ui(ui, conn, key),
             AdminTab::Trackers => trackers::ui(ui, conn, key),
             AdminTab::Chat => chat::ui(ui, conn, key),
         }

@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, Local};
 use conclave_common::admin::server::{
-    AdminUser, Chatroom, ClientAdminMessagesEncrypted, CreateUser, Group, GroupMembership,
-    ServerAdminMessagesEncrypted,
+    AdminUser, Chatroom, ClientAdminMessagesEncrypted, CreateGroup, CreateUser, Group,
+    GroupMembership, ServerAdminMessagesEncrypted,
 };
 use conclave_common::tracker::{Tracker, TrackerWithKey};
 use tokio::sync::RwLock;
@@ -521,6 +521,71 @@ impl ConclaveConnection {
         self.send_request(
             &ServerMessagesEncrypted::AdministrativeRequest(
                 ServerAdminMessagesEncrypted::ListGroups,
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Create a group with an optional description and colour.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_create_group(
+        &self,
+        name: String,
+        description: Option<String>,
+        color: Option<[u8; 3]>,
+    ) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::CreateGroup(CreateGroup {
+                    name,
+                    description,
+                    color,
+                }),
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Rename a group and set its description and colour.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_edit_group(
+        &self,
+        id: u32,
+        name: String,
+        description: Option<String>,
+        color: Option<[u8; 3]>,
+    ) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::EditGroup(Group {
+                    id,
+                    name,
+                    description,
+                    color,
+                }),
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Delete a group by id.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_delete_group(&self, id: u32) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::DeleteGroup(id),
             )
             .to_vec(),
         )

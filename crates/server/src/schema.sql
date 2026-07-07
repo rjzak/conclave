@@ -36,6 +36,7 @@ CREATE TABLE GRP (
     name text NOT NULL UNIQUE,
     description text,
     parent INTEGER,
+    color integer, -- 0xRRGGBB, or NULL for no colour
     FOREIGN KEY (parent) REFERENCES GRP(id)
 );
 
@@ -63,6 +64,7 @@ CREATE TABLE CHATROOM_GROUP (
 );
 
 INSERT INTO USER VALUES(0, 'admin', NULL, CURRENT_TIMESTAMP, false);
-INSERT INTO GRP VALUES(0, 'admin', 'Administrative users', NULL);
+-- The admin group is red (16711680 = 0xFF0000); red is reserved for admins.
+INSERT INTO GRP VALUES(0, 'admin', 'Administrative users', NULL, 16711680);
 INSERT INTO USERGROUP VALUES(0, 0, CURRENT_TIMESTAMP);
 INSERT INTO CHATROOM VALUES(0, 'Public');

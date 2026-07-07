@@ -9,14 +9,16 @@
 
 use conclave_common::URL_PROTOCOL;
 use conclave_common::admin::server::{
-    AdminUser, Chatroom, ClientAdminMessagesEncrypted, Group, ServerAdminMessagesEncrypted,
+    AdminUser, Chatroom, ClientAdminMessagesEncrypted, CreateGroup, Group,
+    ServerAdminMessagesEncrypted, is_reserved_red,
 };
 use conclave_common::net::{
     DEFAULT_REKEY_INTERVAL, DefaultEncryptedStream, EncryptedRead, EncryptedWrite, random_keypair,
 };
 use conclave_common::server::{
-    ChatEvent, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser, ServerError,
-    ServerInformation, ServerMessagesEncrypted, UserAuthentication, UserDetails, unencrypted,
+    ChatEvent, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser, IDLE_TIMEOUT_MINUTES,
+    ServerError, ServerInformation, ServerMessagesEncrypted, UserAuthentication, UserDetails,
+    unencrypted,
 };
 use conclave_common::tracker::TrackerProtocol::AdvertiseServer;
 use conclave_common::tracker::{Advertise, Tracker, TrackerWithKey};
@@ -24,7 +26,7 @@ use conclave_common::tracker::{Advertise, Tracker, TrackerWithKey};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock};
 
 use anyhow::{Result, anyhow, ensure};
@@ -70,6 +72,10 @@ struct ClientConnection {
     /// When the connection was established, for computing its duration.
     connected_at: DateTime<Utc>,
 
+    /// Unix timestamp (seconds) of the user's last activity, for computing idle
+    /// time. Shared so the per-client task can update it as messages arrive.
+    last_active: Arc<AtomicI64>,
+
     /// Fired to kick this connection: the per-client task stops reading and the
     /// connection is torn down.
     cancel: Arc<Notify>,
@@ -83,6 +89,7 @@ impl Clone for ClientConnection {
             user: self.user.clone(),
             addr: self.addr.clone(),
             connected_at: self.connected_at,
+            last_active: self.last_active.clone(),
             cancel: self.cancel.clone(),
         }
     }
@@ -702,19 +709,172 @@ impl State {
             .sqlite
             .conn(move |conn| {
                 let mut statement =
-                    conn.prepare("SELECT id, name, description FROM GRP ORDER BY name;")?;
+                    conn.prepare("SELECT id, name, description, color FROM GRP ORDER BY name;")?;
                 statement
                     .query_map([], |row| {
                         Ok(Group {
                             id: row.get::<_, u32>(0)?,
                             name: row.get::<_, String>(1)?,
                             description: row.get::<_, Option<String>>(2)?,
+                            color: row.get::<_, Option<i64>>(3)?.map(color_from_db),
                         })
                     })?
                     .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()
             })
             .await?;
         Ok(groups)
+    }
+
+    /// (Admin) Create a group. Red is reserved for the built-in admin group, so
+    /// a red colour is rejected here.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on an empty/duplicate name, a reserved-red colour, or a
+    /// database failure.
+    pub async fn create_group(
+        &self,
+        name: String,
+        description: Option<String>,
+        color: Option<[u8; 3]>,
+    ) -> Result<()> {
+        ensure!(!name.trim().is_empty(), "Group name cannot be empty");
+        ensure!(
+            !color.is_some_and(is_reserved_red),
+            "Red is reserved for the admin group"
+        );
+        let color_db = color.map(color_to_db);
+        self.sqlite
+            .conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO GRP(name, description, color) VALUES(?1, ?2, ?3);",
+                    params![name, description, color_db],
+                )
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// (Admin) Rename a group and set its description and colour. The built-in
+    /// admin group (id 0) keeps its name; only it may be red.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on an empty name, a reserved-red colour on a non-admin
+    /// group, or a database failure.
+    pub async fn edit_group(
+        &self,
+        id: u32,
+        name: String,
+        description: Option<String>,
+        color: Option<[u8; 3]>,
+    ) -> Result<()> {
+        ensure!(!name.trim().is_empty(), "Group name cannot be empty");
+        // Only the admin group (id 0) may be red.
+        ensure!(
+            id == 0 || !color.is_some_and(is_reserved_red),
+            "Red is reserved for the admin group"
+        );
+        // Don't let the admin group be renamed; admin detection relies on it.
+        let name = if id == 0 { "admin".to_string() } else { name };
+        let color_db = color.map(color_to_db);
+        self.sqlite
+            .conn(move |conn| {
+                conn.execute(
+                    "UPDATE GRP SET name = ?1, description = ?2, color = ?3 WHERE id = ?4;",
+                    params![name, description, color_db, id],
+                )
+            })
+            .await?;
+        self.refresh_user_colors().await;
+        Ok(())
+    }
+
+    /// (Admin) Delete a group by id. The built-in admin group (id 0) cannot be
+    /// deleted. Removes the group's memberships and chatroom restrictions too.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when deleting the admin group or on a database failure.
+    pub async fn delete_group(&self, id: u32) -> Result<()> {
+        ensure!(id != 0, "The admin group cannot be deleted");
+        self.sqlite
+            .conn(move |conn| {
+                conn.execute("DELETE FROM USERGROUP WHERE gid = ?1;", [id])?;
+                conn.execute("DELETE FROM CHATROOM_GROUP WHERE gid = ?1;", [id])?;
+                conn.execute("DELETE FROM GRP WHERE id = ?1;", [id])
+            })
+            .await?;
+        self.refresh_user_colors().await;
+        Ok(())
+    }
+
+    /// The mixed name colour for a user: the component-wise average of the
+    /// colours of the coloured groups they belong to, or `None` if none.
+    async fn user_color(&self, uid: u32) -> Option<[u8; 3]> {
+        let colors: Vec<i64> = self
+            .sqlite
+            .conn(move |conn| {
+                let mut statement = conn.prepare(
+                    "SELECT g.color FROM GRP g JOIN USERGROUP ug ON ug.gid = g.id \
+                     WHERE ug.uid = ?1 AND g.color IS NOT NULL;",
+                )?;
+                statement
+                    .query_map([uid], |row| row.get::<_, i64>(0))?
+                    .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()
+            })
+            .await
+            .unwrap_or_default();
+
+        if colors.is_empty() {
+            return None;
+        }
+        let count = i64::try_from(colors.len()).unwrap_or(1).max(1);
+        let (mut r, mut g, mut b) = (0_i64, 0_i64, 0_i64);
+        for color in colors {
+            let [cr, cg, cb] = color_from_db(color);
+            r += i64::from(cr);
+            g += i64::from(cg);
+            b += i64::from(cb);
+        }
+        let avg = |sum: i64| u8::try_from(sum / count).unwrap_or(u8::MAX);
+        Some([avg(r), avg(g), avg(b)])
+    }
+
+    /// Recompute the mixed colour of every connected authenticated user and, if
+    /// any changed, re-broadcast the roster. Called after group or membership
+    /// changes so tinting stays current.
+    async fn refresh_user_colors(&self) {
+        let targets: Vec<(u32, u32)> = self
+            .connections
+            .read()
+            .await
+            .iter()
+            .filter_map(|c| c.user.user_id.map(|uid| (c.connection_id, uid)))
+            .collect();
+
+        let mut new_colors: HashMap<u32, Option<[u8; 3]>> = HashMap::new();
+        for (connection_id, uid) in targets {
+            new_colors.insert(connection_id, self.user_color(uid).await);
+        }
+
+        let mut changed = false;
+        {
+            let mut connections = self.connections.write().await;
+            for conn in connections.iter_mut() {
+                if let Some(color) = new_colors.get(&conn.connection_id)
+                    && conn.user.color != *color
+                {
+                    let mut updated = (*conn.user).clone();
+                    updated.color = *color;
+                    conn.user = Arc::new(updated);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.broadcast_user_list().await;
+        }
     }
 
     /// Resolve a group name to its id, erroring if no such group exists.
@@ -750,6 +910,7 @@ impl State {
                 )
             })
             .await?;
+        self.refresh_user_colors().await;
         Ok(())
     }
 
@@ -775,6 +936,7 @@ impl State {
                 )
             })
             .await?;
+        self.refresh_user_colors().await;
         Ok(())
     }
 
@@ -1075,6 +1237,19 @@ impl State {
         // check this flag to decide whether to keep running.
         self.serving.store(true, Ordering::Relaxed);
         self.start_tracker_advertising().await;
+
+        // Periodically re-broadcast the roster so idle times (and idle-based
+        // greying) stay current even when nobody is sending anything.
+        let sweeper = self.clone();
+        tokio::spawn(async move {
+            while sweeper.serving.load(Ordering::Relaxed) {
+                tokio::time::sleep(std::time::Duration::from_mins(1)).await;
+                if !sweeper.connections.read().await.is_empty() {
+                    sweeper.broadcast_user_list().await;
+                }
+            }
+        });
+
         let self_clone = self.clone();
 
         if let Some(mdns) = &self_clone.mdns {
@@ -1192,11 +1367,20 @@ impl State {
                                                 .next_connection_id
                                                 .fetch_add(1, Ordering::Relaxed);
                                             let cancel = Arc::new(Notify::new());
+                                            let now = Local::now().to_utc();
+                                            let last_active =
+                                                Arc::new(AtomicI64::new(now.timestamp()));
+                                            let color = match user_id {
+                                                Some(uid) => self_clone.user_color(uid).await,
+                                                None => None,
+                                            };
                                             let user = Arc::new(ConnectedUser {
                                                 id,
                                                 display_name,
                                                 admin,
                                                 connected_since: Duration::default(),
+                                                idle: Duration::default(),
+                                                color,
                                                 user_id,
                                                 timezone: user_local_time,
                                             });
@@ -1205,7 +1389,8 @@ impl State {
                                                 conn: write.clone(),
                                                 user: user.clone(),
                                                 addr: addr.clone(),
-                                                connected_at: Local::now().to_utc(),
+                                                connected_at: now,
+                                                last_active: last_active.clone(),
                                                 cancel: cancel.clone(),
                                             };
                                             if let Some(uid) = user_id {
@@ -1260,7 +1445,12 @@ impl State {
                                             tokio::spawn(async move {
                                                 client_state
                                                     .handle_client(
-                                                        read_half, write, addr, user, cancel,
+                                                        read_half,
+                                                        write,
+                                                        addr,
+                                                        user,
+                                                        cancel,
+                                                        last_active,
                                                     )
                                                     .await;
                                             });
@@ -1324,6 +1514,7 @@ impl State {
         addr: Arc<SocketAddr>,
         user: Arc<ConnectedUser>,
         cancel: Arc<Notify>,
+        last_active: Arc<AtomicI64>,
     ) {
         let keep_alive_bytes = ServerMessagesEncrypted::KeepAlive.to_vec();
 
@@ -1344,6 +1535,13 @@ impl State {
                     break;
                 }
             };
+
+            // Treat anything but the keep-alive heartbeat as user activity, so an
+            // idle user's name un-greys as soon as they do something.
+            match ServerMessagesEncrypted::from_bytes(&message) {
+                Ok(ServerMessagesEncrypted::KeepAlive) | Err(_) => {}
+                Ok(_) => self.mark_active(&last_active).await,
+            }
 
             match ServerMessagesEncrypted::from_bytes(&message) {
                 Ok(ServerMessagesEncrypted::KeepAlive) => {
@@ -1464,6 +1662,26 @@ impl State {
                 .admin_list_groups()
                 .await
                 .map(ClientAdminMessagesEncrypted::GroupsResponse),
+            ServerAdminMessagesEncrypted::CreateGroup(CreateGroup {
+                name,
+                description,
+                color,
+            }) => self
+                .create_group(name, description, color)
+                .await
+                .map(|()| ok),
+            ServerAdminMessagesEncrypted::EditGroup(Group {
+                id,
+                name,
+                description,
+                color,
+            }) => self
+                .edit_group(id, name, description, color)
+                .await
+                .map(|()| ok),
+            ServerAdminMessagesEncrypted::DeleteGroup(id) => {
+                self.delete_group(id).await.map(|()| ok)
+            }
             ServerAdminMessagesEncrypted::CreateUser(user) => self
                 .create_user_admin(user.username, &user.password, user.groups)
                 .await
@@ -1963,6 +2181,7 @@ impl State {
     /// Get a list of connected users
     pub async fn connected_users(&self) -> Vec<ConnectedUser> {
         let now = Local::now().to_utc();
+        let now_ts = now.timestamp();
         self.connections
             .read()
             .await
@@ -1970,9 +2189,21 @@ impl State {
             .map(|conn| {
                 let mut user = (*conn.user).clone();
                 user.connected_since = now - conn.connected_at;
+                let idle_secs = (now_ts - conn.last_active.load(Ordering::Relaxed)).max(0);
+                user.idle = Duration::seconds(idle_secs);
                 user
             })
             .collect()
+    }
+
+    /// Record user activity on a connection. If the user had been idle past the
+    /// timeout, refresh the roster so their name un-greys promptly.
+    async fn mark_active(&self, last_active: &AtomicI64) {
+        let now = Local::now().to_utc().timestamp();
+        let previous = last_active.swap(now, Ordering::Relaxed);
+        if now - previous >= IDLE_TIMEOUT_MINUTES.num_seconds() {
+            self.broadcast_user_list().await;
+        }
     }
 
     /// Extra, on-demand details about a connected user by connection id. The
@@ -2249,6 +2480,22 @@ async fn reply(
     if let Err(e) = write.write().await.send(&msg.to_vec()).await {
         error!("Failed to send response to {addr:?}: {e}");
     }
+}
+
+/// Pack an RGB colour into the `0xRRGGBB` integer stored in the database.
+#[inline]
+fn color_to_db([r, g, b]: [u8; 3]) -> i64 {
+    (i64::from(r) << 16) | (i64::from(g) << 8) | i64::from(b)
+}
+
+/// Unpack a database `0xRRGGBB` integer into RGB bytes.
+#[inline]
+fn color_from_db(value: i64) -> [u8; 3] {
+    [
+        u8::try_from((value >> 16) & 0xFF).unwrap_or(0),
+        u8::try_from((value >> 8) & 0xFF).unwrap_or(0),
+        u8::try_from(value & 0xFF).unwrap_or(0),
+    ]
 }
 
 /// Argon hash for storing passwords.

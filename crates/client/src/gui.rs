@@ -3,10 +3,12 @@
 use conclave_client::config::{BookmarkEntry, KnownHost, UserAuth};
 use conclave_client::conn::{ChatLine, ConclaveConnection};
 use conclave_client::{Client, DiscoveredServer, discover_servers};
-use conclave_common::server::{UserAuthentication, VerifyingKey};
+use conclave_common::server::{
+    ConnectedUser, IDLE_TIMEOUT_MINUTES, UserAuthentication, VerifyingKey,
+};
 use conclave_common::tracker::{Advertise, Tracker, TrackerWithKey};
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -67,6 +69,47 @@ fn format_uptime(d: chrono::Duration) -> String {
         format!("{mins}m {secs}s")
     } else {
         format!("{secs}s")
+    }
+}
+
+/// Whether a user counts as idle (inactive for longer than the timeout), in
+/// which case their name is shown dulled.
+#[inline]
+fn is_idle(idle: chrono::Duration) -> bool {
+    idle >= IDLE_TIMEOUT_MINUTES
+}
+
+/// The base name colour for a user: the mix of their groups' colours, falling
+/// back to red for administrators with no colour of their own.
+fn base_name_color(user: &ConnectedUser) -> Option<egui::Color32> {
+    user.color
+        .map(|[r, g, b]| egui::Color32::from_rgb(r, g, b))
+        .or_else(|| user.admin.then_some(egui::Color32::RED))
+}
+
+/// A muted version of a colour: shifted toward its own grey so an idle user's
+/// name dims without becoming a flat grey.
+fn dull(color: egui::Color32) -> egui::Color32 {
+    let (r, g, b) = (
+        u16::from(color.r()),
+        u16::from(color.g()),
+        u16::from(color.b()),
+    );
+    let lum = (r * 3 + g * 6 + b) / 10; // approximate luminance
+    // 40% of the original colour, 60% of its luminance grey.
+    let mix = |c: u16| u8::try_from((c * 2 + lum * 3) / 5).unwrap_or(u8::MAX);
+    egui::Color32::from_rgb(mix(r), mix(g), mix(b))
+}
+
+/// Style a name with its colour and idle state: idle colours are dulled, and an
+/// idle user with no colour is greyed.
+fn styled_name(text: &str, color: Option<egui::Color32>, idle: bool) -> egui::RichText {
+    let text = egui::RichText::new(text);
+    match (color, idle) {
+        (Some(c), true) => text.color(dull(c)),
+        (Some(c), false) => text.color(c),
+        (None, true) => text.color(egui::Color32::GRAY),
+        (None, false) => text,
     }
 }
 
@@ -1728,13 +1771,13 @@ impl eframe::App for ConclaveGUI {
                                             ui.end_row();
 
                                             for user in &users {
-                                                // Administrators are shown with a red name.
-                                                let mut name =
-                                                    egui::RichText::new(&user.display_name);
-                                                if user.admin {
-                                                    name = name.color(egui::Color32::RED);
-                                                }
-                                                ui.label(name);
+                                                // Names are tinted their groups'
+                                                // colour, dulled when idle.
+                                                ui.label(styled_name(
+                                                    &user.display_name,
+                                                    base_name_color(user),
+                                                    is_idle(user.idle),
+                                                ));
                                                 ui.label(format_uptime(user.connected_since));
                                                 if ui.small_button("Details").clicked() {
                                                     details_request = Some(user.id);
@@ -1764,6 +1807,7 @@ impl eframe::App for ConclaveGUI {
                                     "Connected: {}",
                                     format_uptime(user.connected_since)
                                 ));
+                                ui.label(format!("Idle: {}", format_uptime(user.idle)));
                                 ui.label(timezone_offset_text(user.timezone));
 
                                 match details.as_ref().filter(|d| d.connection_id == sel) {
@@ -1931,6 +1975,16 @@ impl eframe::App for ConclaveGUI {
                     }
 
                     let state = conn.chat_room(room).unwrap_or_default();
+                    // Name colour and idle state per connected user, so chat
+                    // names can be tinted (and dulled when idle) to match.
+                    let user_styles: HashMap<String, (Option<egui::Color32>, bool)> = conn
+                        .get_connected_users()
+                        .into_iter()
+                        .map(|u| {
+                            let style = (base_name_color(&u), is_idle(u.idle));
+                            (u.display_name, style)
+                        })
+                        .collect();
 
                     let input_id = egui::Id::new(format!("chat_input:{key_owned}:{room}"));
                     let mut input: String = ctx.data(|d| d.get_temp(input_id).unwrap_or_default());
@@ -1968,7 +2022,9 @@ impl eframe::App for ConclaveGUI {
                             ui.separator();
                             egui::ScrollArea::vertical().show(ui, |ui| {
                                 for user in &state.users {
-                                    ui.label(user);
+                                    let (color, idle) =
+                                        user_styles.get(user).copied().unwrap_or((None, false));
+                                    ui.label(styled_name(user, color, idle));
                                 }
                             });
                         });
