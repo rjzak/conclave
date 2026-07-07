@@ -7,6 +7,9 @@
 #![deny(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
+/// Admin GUI elements
+pub mod adminui;
+
 /// Client configuration file data structures and I/O functions.
 pub mod config;
 
