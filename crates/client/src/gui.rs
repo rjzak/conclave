@@ -273,6 +273,10 @@ pub struct ConclaveGUI {
     /// Default display name from config, seeds the login form
     default_display_name: String,
 
+    /// Whether the config enables sharing the local timezone by default; seeds
+    /// the login form's "Share local time" checkbox.
+    default_share_timezone: bool,
+
     /// Show the direct-connect host/port form in the central panel
     show_direct_connect: bool,
 
@@ -328,6 +332,7 @@ pub struct ConclaveGUI {
 impl ConclaveGUI {
     pub fn new(client: Client, _cc: &eframe::CreationContext<'_>) -> Self {
         let default_display_name = client.default_display_name();
+        let default_share_timezone = client.default_share_timezone();
         Self {
             client: Arc::new(client),
             show_advertised_servers_list: false,
@@ -349,6 +354,7 @@ impl ConclaveGUI {
             connect_error: Arc::new(RwLock::new(None)),
             active_connections: Arc::new(RwLock::new(Vec::new())),
             default_display_name,
+            default_share_timezone,
             show_direct_connect: false,
             login_window_closed: Arc::new(AtomicBool::new(false)),
             show_servers_window: false,
@@ -1370,6 +1376,7 @@ impl eframe::App for ConclaveGUI {
             let active_conns = self.active_connections.clone();
             let client = self.client.clone();
             let default_name = self.default_display_name.clone();
+            let default_share = self.default_share_timezone;
 
             ui.ctx().show_viewport_deferred(
                 egui::ViewportId::from_hash_of("login_window"),
@@ -1400,7 +1407,7 @@ impl eframe::App for ConclaveGUI {
                     let mut password: String =
                         ctx.data(|d| d.get_temp(login_pass_id).unwrap_or_default());
                     let mut share_time: bool =
-                        ctx.data(|d| d.get_temp(login_share_id).unwrap_or(false));
+                        ctx.data(|d| d.get_temp(login_share_id).unwrap_or(default_share));
 
                     let is_pending = connect_pending.load(Ordering::SeqCst);
                     let conn_error: Option<String> =

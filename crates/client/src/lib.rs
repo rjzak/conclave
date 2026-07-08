@@ -489,6 +489,15 @@ impl Client {
             .unwrap_or_default()
     }
 
+    /// Read whether the user wants to share their local timezone by default when
+    /// connecting, without blocking.
+    #[must_use]
+    pub fn default_share_timezone(&self) -> bool {
+        self.config
+            .try_read()
+            .is_ok_and(|c| c.default_share_timezone)
+    }
+
     /// Read the user's saved server bookmarks without blocking.
     #[must_use]
     pub fn bookmarks(&self) -> Vec<BookmarkEntry> {
