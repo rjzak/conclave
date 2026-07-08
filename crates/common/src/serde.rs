@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use base64::Engine;
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use pqcrypto_mldsa::mldsa87;
 use pqcrypto_traits::sign::{PublicKey, SecretKey};
 use serde::{Deserialize, Deserializer, Serializer};
@@ -136,4 +136,52 @@ where
     let mut key_array = [0u8; 32];
     key_array.copy_from_slice(&key);
     VerifyingKey::from_bytes(&key_array).map_err(Error::custom)
+}
+
+/// Serialize an ed25519 private key as a hex string
+///
+/// # Errors
+///
+/// Returns an error if serialization fails
+#[inline]
+pub fn serialize_dalek_private_key<S>(k: &SigningKey, s: S) -> anyhow::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let key = base64::engine::general_purpose::STANDARD.encode(k.as_bytes());
+    s.serialize_str(&key)
+}
+
+/// Deserialize an ed25519 private key from a hex string
+///
+/// # Errors
+///
+/// Returns an error if the key is empty or if decoding fails
+#[inline]
+pub fn deserialize_dalek_private_key<'de, D>(
+    deserializer: D,
+) -> anyhow::Result<SigningKey, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    let key = String::deserialize(deserializer)?;
+    if key.is_empty() {
+        return Err(Error::custom("Public key is empty!"));
+    }
+
+    let key = base64::engine::general_purpose::STANDARD
+        .decode(key)
+        .map_err(Error::custom)?;
+    if key.len() != 32 {
+        return Err(Error::custom(format!(
+            "Public key was {} bytes long instead of the expected 32 bytes!",
+            key.len()
+        )));
+    }
+
+    let mut key_array = [0u8; 32];
+    key_array.copy_from_slice(&key);
+    Ok(SigningKey::from_bytes(&key_array))
 }

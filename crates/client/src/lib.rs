@@ -528,8 +528,12 @@ impl Client {
             .send(&mut stream)
             .await?;
 
+        let config = self.config.read().await;
+        let signing_key = config.signing_key.clone();
+
         info!("Creating encrypted stream to server");
-        let mut encrypted_stream = EncryptedStream::connect(stream, &key, None).await?;
+        let mut encrypted_stream =
+            EncryptedStream::connect(stream, &key, Some(&signing_key)).await?;
         info!("Client: EncryptedStream created");
 
         let login = ServerMessagesEncrypted::ServerAuthenticationRequest((

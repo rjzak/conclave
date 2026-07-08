@@ -10,7 +10,7 @@ use chacha20poly1305::{
     Key, XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit},
 };
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+pub use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use pqcrypto_mlkem::mlkem1024;
 use pqcrypto_traits::kem::{Ciphertext as _, PublicKey as _, SharedSecret as _};

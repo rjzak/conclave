@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use conclave_common::net::{SigningKey, random_keypair};
 use conclave_common::server::VerifyingKey;
 use conclave_common::tracker::TrackerWithKey;
 
@@ -43,10 +44,27 @@ pub fn default_config_path() -> PathBuf {
 }
 
 /// Client configuration
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct ClientConfig {
     /// Default display name to use when connecting to servers
     pub default_display_name: String,
+
+    /// Whether to share the local timezone with the server
+    pub default_share_timezone: bool,
+
+    /// Signing (private) key
+    #[serde(
+        serialize_with = "conclave_common::serde::serialize_dalek_private_key",
+        deserialize_with = "conclave_common::serde::deserialize_dalek_private_key"
+    )]
+    pub signing_key: SigningKey,
+
+    /// Verifying (public) key
+    #[serde(
+        serialize_with = "conclave_common::serde::serialize_dalek_public_key",
+        deserialize_with = "conclave_common::serde::deserialize_dalek_public_key"
+    )]
+    pub verifying_key: VerifyingKey,
 
     /// List of trackers to use
     pub trackers: Vec<TrackerWithKey>,
@@ -60,11 +78,16 @@ pub struct ClientConfig {
 
 impl Default for ClientConfig {
     fn default() -> Self {
+        let (signing_key, verifying_key) = random_keypair();
+
         Self {
             default_display_name: "Unnamed User".to_string(),
+            default_share_timezone: true,
             trackers: Vec::new(),
             bookmarks: Vec::new(),
             known_hosts: Vec::new(),
+            signing_key,
+            verifying_key,
         }
     }
 }
