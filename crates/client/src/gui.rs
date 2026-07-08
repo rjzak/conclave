@@ -1796,8 +1796,16 @@ impl eframe::App for ConclaveGUI {
                                                     is_idle(user.idle),
                                                 ));
                                                 ui.label(format_uptime(user.connected_since));
-                                                if ui.small_button("Details").clicked() {
-                                                    details_request = Some(user.id);
+                                                // The Details button toggles the
+                                                // detail panel for this user.
+                                                let shown = selected == Some(user.id);
+                                                let label = if shown { "Hide" } else { "Details" };
+                                                if ui.small_button(label).clicked() {
+                                                    if shown {
+                                                        clear_selection = true;
+                                                    } else {
+                                                        details_request = Some(user.id);
+                                                    }
                                                 }
                                                 ui.end_row();
                                             }
@@ -1809,17 +1817,7 @@ impl eframe::App for ConclaveGUI {
                         if let Some(sel) = selected {
                             if let Some(user) = users.iter().find(|u| u.id == sel) {
                                 ui.separator();
-                                ui.horizontal(|ui| {
-                                    ui.heading(&user.display_name);
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if ui.small_button("Close").clicked() {
-                                                clear_selection = true;
-                                            }
-                                        },
-                                    );
-                                });
+                                ui.heading(&user.display_name);
                                 ui.label(format!(
                                     "Connected: {}",
                                     format_uptime(user.connected_since)
