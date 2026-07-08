@@ -557,7 +557,12 @@ impl Client {
                         server_info.version, *VERSION
                     );
                 }
-                let conn = ConclaveConnection::new(encrypted_stream, server_info, &display_name);
+                let conn = ConclaveConnection::new(
+                    encrypted_stream,
+                    server_info,
+                    &display_name,
+                    signing_key,
+                );
                 self.connection.write().await.push(conn.clone());
                 Ok(conn)
             }

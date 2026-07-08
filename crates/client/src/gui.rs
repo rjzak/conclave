@@ -306,6 +306,12 @@ pub struct ConclaveGUI {
     /// Chat-window close requests emitted by viewport closures
     chat_window_close_requests: Arc<RwLock<Vec<(String, u16)>>>,
 
+    /// Open direct-message windows, keyed by (server key, peer connection id)
+    open_dms: Arc<RwLock<HashSet<(String, u16)>>>,
+
+    /// Direct-message-window close requests emitted by viewport closures
+    dm_window_close_requests: Arc<RwLock<Vec<(String, u16)>>>,
+
     /// Show the bookmarks management window
     show_bookmarks_window: bool,
 
@@ -352,6 +358,8 @@ impl ConclaveGUI {
             admin_window_close_requests: Arc::new(RwLock::new(Vec::new())),
             open_chats: Arc::new(RwLock::new(HashSet::new())),
             chat_window_close_requests: Arc::new(RwLock::new(Vec::new())),
+            open_dms: Arc::new(RwLock::new(HashSet::new())),
+            dm_window_close_requests: Arc::new(RwLock::new(Vec::new())),
             seen_servers: HashSet::new(),
             user_window_close_requests: Arc::new(RwLock::new(Vec::new())),
             show_bookmarks_window: false,
@@ -1732,6 +1740,7 @@ impl eframe::App for ConclaveGUI {
             let title = format!("Users — {name}");
             let close_reqs = self.user_window_close_requests.clone();
             let open_chats = self.open_chats.clone();
+            let open_dms = self.open_dms.clone();
 
             ui.ctx().show_viewport_deferred(
                 egui::ViewportId::from_hash_of(format!("server_users:{key}")),
@@ -1752,6 +1761,7 @@ impl eframe::App for ConclaveGUI {
                     let users = conn.get_connected_users();
                     let is_admin = conn.is_admin();
                     let details = conn.user_details();
+                    let own_name = conn.display_name();
                     // The server pushes the accessible chatrooms on connect and
                     // whenever chat config changes, so no request is needed here.
                     let chatrooms = conn.chatrooms_available();
@@ -1766,6 +1776,7 @@ impl eframe::App for ConclaveGUI {
                     let mut kick_request: Option<u16> = None;
                     let mut clear_selection = false;
                     let mut open_chat_request: Option<u16> = None;
+                    let mut open_dm_request: Option<u16> = None;
 
                     egui::CentralPanel::default().show(ctx, |ui| {
                         ui.heading(format!("Users on {}", server_info.name));
@@ -1796,17 +1807,34 @@ impl eframe::App for ConclaveGUI {
                                                     is_idle(user.idle),
                                                 ));
                                                 ui.label(format_uptime(user.connected_since));
-                                                // The Details button toggles the
-                                                // detail panel for this user.
-                                                let shown = selected == Some(user.id);
-                                                let label = if shown { "Hide" } else { "Details" };
-                                                if ui.small_button(label).clicked() {
-                                                    if shown {
-                                                        clear_selection = true;
-                                                    } else {
-                                                        details_request = Some(user.id);
+                                                ui.horizontal(|ui| {
+                                                    // The Details button toggles the
+                                                    // detail panel for this user.
+                                                    let shown = selected == Some(user.id);
+                                                    let label =
+                                                        if shown { "Hide" } else { "Details" };
+                                                    if ui.small_button(label).clicked() {
+                                                        if shown {
+                                                            clear_selection = true;
+                                                        } else {
+                                                            details_request = Some(user.id);
+                                                        }
                                                     }
-                                                }
+                                                    // Open a direct-message window (not
+                                                    // to oneself); a lock marks that the
+                                                    // peer's key allows E2E encryption.
+                                                    if user.display_name != own_name {
+                                                        let dm_label =
+                                                            if conn.dm_encrypted_with(user.id) {
+                                                                "🔒 Message"
+                                                            } else {
+                                                                "Message"
+                                                            };
+                                                        if ui.small_button(dm_label).clicked() {
+                                                            open_dm_request = Some(user.id);
+                                                        }
+                                                    }
+                                                });
                                                 ui.end_row();
                                             }
                                         });
@@ -1900,6 +1928,12 @@ impl eframe::App for ConclaveGUI {
                         tokio::spawn(async move {
                             let _ = conn.chat_join(room).await;
                         });
+                    }
+                    if let Some(peer) = open_dm_request {
+                        if let Ok(mut open) = open_dms.write() {
+                            open.insert((key_owned.clone(), peer));
+                        }
+                        ctx.request_repaint_of(egui::ViewportId::ROOT);
                     }
                     if let Some(id) = details_request {
                         ctx.data_mut(|d| d.insert_temp(selected_id, Some(id)));
@@ -2085,6 +2119,175 @@ impl eframe::App for ConclaveGUI {
                         let conn = conn.clone();
                         tokio::spawn(async move {
                             let _ = conn.chat_send(room, message).await;
+                        });
+                    }
+                    ctx.data_mut(|d| d.insert_temp(input_id, input));
+                    // Messages arrive asynchronously; repaint so they show promptly.
+                    ctx.request_repaint_after(std::time::Duration::from_millis(150));
+                },
+            );
+        }
+
+        // ── Direct-message windows ────────────────────────────────────────
+        // Drain close requests and drop windows whose server disconnected.
+        {
+            let live: HashSet<String> = conn_snapshots.iter().map(|(k, ..)| k.clone()).collect();
+            let closed: Vec<(String, u16)> = self
+                .dm_window_close_requests
+                .write()
+                .map(|mut r| r.drain(..).collect())
+                .unwrap_or_default();
+            if let Ok(mut open) = self.open_dms.write() {
+                for entry in &closed {
+                    open.remove(entry);
+                }
+                open.retain(|(k, _)| live.contains(k));
+            }
+        }
+
+        // Auto-open a window for any peer that just sent a direct message and
+        // does not already have one open.
+        for (key, _, _, conn) in &conn_snapshots {
+            let requests = conn.take_dm_open_requests();
+            if requests.is_empty() {
+                continue;
+            }
+            if let Ok(mut open) = self.open_dms.write() {
+                for peer in requests {
+                    open.insert((key.clone(), peer));
+                }
+            }
+        }
+        // Poll while connected so inbound messages surface even when the main
+        // window is otherwise idle.
+        if !conn_snapshots.is_empty() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(300));
+        }
+
+        let open_dms: Vec<(String, u16)> = self
+            .open_dms
+            .read()
+            .map(|o| o.iter().cloned().collect())
+            .unwrap_or_default();
+
+        for (key, peer) in open_dms {
+            let Some((_, server_name, _, conn)) = conn_snapshots.iter().find(|(k, ..)| *k == key)
+            else {
+                continue;
+            };
+            let conn = conn.clone();
+            let key_owned = key.clone();
+            let own_name = conn.display_name();
+            let peer_name = conn
+                .get_connected_users()
+                .into_iter()
+                .find(|u| u.id == peer)
+                .map_or_else(|| format!("#{peer}"), |u| u.display_name);
+            let encrypted = conn.dm_encrypted_with(peer);
+            let fingerprint = conn.peer_key_fingerprint(peer);
+            let title = format!("DM {peer_name} — {server_name}");
+            let close_reqs = self.dm_window_close_requests.clone();
+
+            // The window is identified by server name plus both display names,
+            // as requested.
+            ui.ctx().show_viewport_deferred(
+                egui::ViewportId::from_hash_of(format!("dm:{server_name}:{own_name}:{peer_name}")),
+                egui::ViewportBuilder::default()
+                    .with_title(title)
+                    .with_inner_size([460.0, 420.0])
+                    .with_resizable(true),
+                move |ctx, _class| {
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        if let Ok(mut r) = close_reqs.write() {
+                            r.push((key_owned.clone(), peer));
+                        }
+                        ctx.request_repaint_of(egui::ViewportId::ROOT);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+
+                    let thread = conn.dm_thread(peer);
+                    let input_id = egui::Id::new(format!("dm_input:{key_owned}:{peer}"));
+                    let mut input: String = ctx.data(|d| d.get_temp(input_id).unwrap_or_default());
+                    let mut send = false;
+
+                    // Top: encryption status and the peer's key fingerprint.
+                    egui::Panel::top(format!("dm_status:{key_owned}:{peer}")).show(ctx, |ui| {
+                        ui.add_space(2.0);
+                        if encrypted {
+                            ui.label(
+                                egui::RichText::new("🔒 End-to-end encrypted")
+                                    .color(egui::Color32::from_rgb(0x33, 0xaa, 0x33))
+                                    .strong(),
+                            );
+                            if let Some(fp) = &fingerprint {
+                                ui.label(
+                                    egui::RichText::new(format!("Key: {fp}"))
+                                        .weak()
+                                        .monospace()
+                                        .small(),
+                                );
+                            }
+                        } else {
+                            ui.label(
+                                egui::RichText::new("🔓 Not encrypted — peer has no key")
+                                    .color(egui::Color32::from_rgb(0xcc, 0x88, 0x00)),
+                            );
+                        }
+                        ui.add_space(2.0);
+                    });
+
+                    // Bottom: message composer.
+                    egui::Panel::bottom(format!("dm_compose:{key_owned}:{peer}")).show(ctx, |ui| {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            let response = ui.add(
+                                egui::TextEdit::singleline(&mut input)
+                                    .desired_width(ui.available_width() - 60.0)
+                                    .hint_text("Message"),
+                            );
+                            let entered = response.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            if (ui.button("Send").clicked() || entered) && !input.trim().is_empty()
+                            {
+                                send = true;
+                            }
+                        });
+                        ui.add_space(4.0);
+                    });
+
+                    // Center: the conversation.
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                for msg in &thread {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(
+                                                msg.time.format("%H:%M:%S").to_string(),
+                                            )
+                                            .weak()
+                                            .monospace(),
+                                        );
+                                        let who = if msg.from_me {
+                                            "You"
+                                        } else {
+                                            peer_name.as_str()
+                                        };
+                                        ui.label(egui::RichText::new(format!("{who}:")).strong());
+                                        ui.label(&msg.text);
+                                    });
+                                }
+                            });
+                    });
+
+                    if send {
+                        let message = std::mem::take(&mut input);
+                        let conn = conn.clone();
+                        tokio::spawn(async move {
+                            let _ = conn.send_dm(peer, message).await;
                         });
                     }
                     ctx.data_mut(|d| d.insert_temp(input_id, input));

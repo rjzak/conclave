@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use conclave_common::net::{DefaultEncryptedStream, EncryptedWrite};
+use conclave_common::dm;
+use conclave_common::net::{DefaultEncryptedStream, EncryptedWrite, SigningKey, VerifyingKey};
 use conclave_common::server::{
     ChatEvent, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser, ServerInformation,
     ServerMessagesEncrypted, UserDetails,
@@ -44,6 +45,23 @@ pub enum ChatLine {
         /// Message text.
         message: String,
     },
+}
+
+/// A single direct message in a conversation with another user. History is not
+/// preserved, so a thread only accumulates while the connection is open.
+#[derive(Clone, Debug)]
+pub struct DmMessage {
+    /// Local time the message was sent or received.
+    pub time: DateTime<Local>,
+
+    /// Whether this side sent the message (`true`) or received it (`false`).
+    pub from_me: bool,
+
+    /// Whether the message travelled end-to-end encrypted.
+    pub encrypted: bool,
+
+    /// Message text (or a placeholder if it could not be decrypted).
+    pub text: String,
 }
 
 /// Local view of a chatroom the user has joined. History is not preserved, so
@@ -103,6 +121,17 @@ pub struct ConclaveConnection {
     /// Local state of each joined chatroom, keyed by room id.
     pub(crate) chat_rooms: Arc<std::sync::RwLock<HashMap<u16, ChatRoom>>>,
 
+    /// Direct-message conversations, keyed by the peer's connection id.
+    pub(crate) dms: Arc<std::sync::RwLock<HashMap<u16, Vec<DmMessage>>>>,
+
+    /// Peers whose newly-arrived direct message should surface a window if one
+    /// is not already open; drained by the GUI each frame.
+    pub(crate) dm_open_requests: Arc<std::sync::RwLock<Vec<u16>>>,
+
+    /// This client's ed25519 identity key, used to derive the shared key for
+    /// end-to-end encrypted direct messages.
+    pub(crate) signing_key: Arc<SigningKey>,
+
     /// Join handle for the task which listens for messages from the server
     pub(crate) listen_handle: Arc<JoinHandle<()>>,
 
@@ -117,7 +146,12 @@ pub struct ConclaveConnection {
 impl ConclaveConnection {
     /// Create a connection object
     #[allow(clippy::too_many_lines)]
-    pub fn new(conn: DefaultEncryptedStream, info: ServerInformation, display_name: &str) -> Self {
+    pub fn new(
+        conn: DefaultEncryptedStream,
+        info: ServerInformation,
+        display_name: &str,
+        signing_key: SigningKey,
+    ) -> Self {
         let (mut read, write) = conn.into_split();
         let server_info = Arc::new(std::sync::RwLock::new(info));
         let connected_users = Arc::new(std::sync::RwLock::new(Vec::new()));
@@ -136,6 +170,9 @@ impl ConclaveConnection {
             chatrooms_available: Arc::new(std::sync::RwLock::new(Vec::new())),
             admin_chatrooms: Arc::new(std::sync::RwLock::new(Vec::new())),
             chat_rooms: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            dms: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            dm_open_requests: Arc::new(std::sync::RwLock::new(Vec::new())),
+            signing_key: Arc::new(signing_key),
             listen_handle: Arc::new(tokio::spawn(tokio::time::sleep(
                 tokio::time::Duration::from_millis(1),
             ))),
@@ -207,6 +244,14 @@ impl ConclaveConnection {
                     }
                     ClientMessagesEncrypted::ChatActivity(event) => {
                         conn_clone.apply_chat_event(event);
+                    }
+                    ClientMessagesEncrypted::DirectMessageReceived {
+                        from,
+                        from_display_name: _,
+                        encrypted,
+                        payload,
+                    } => {
+                        conn_clone.apply_direct_message(from, encrypted, &payload);
                     }
                     ClientMessagesEncrypted::SessionInfo { admin, .. } => {
                         conn_clone.is_admin.store(admin, Ordering::SeqCst);
@@ -393,6 +438,135 @@ impl ConclaveConnection {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&room)
             .cloned()
+    }
+
+    /// Record an inbound direct message from `peer`, decrypting it when it
+    /// arrived end-to-end encrypted.
+    fn apply_direct_message(&self, peer: u16, encrypted: bool, payload: &[u8]) {
+        let text = if encrypted {
+            match self.peer_verifying_key(peer) {
+                Some(their_key) => {
+                    let key = dm::shared_key(&self.signing_key, &their_key);
+                    dm::decrypt(&key, payload).map_or_else(
+                        |_| "[unable to decrypt]".to_string(),
+                        |bytes| String::from_utf8_lossy(&bytes).into_owned(),
+                    )
+                }
+                None => "[unable to decrypt]".to_string(),
+            }
+        } else {
+            String::from_utf8_lossy(payload).into_owned()
+        };
+        self.push_dm(
+            peer,
+            DmMessage {
+                time: Local::now(),
+                from_me: false,
+                encrypted,
+                text,
+            },
+        );
+        // Ask the GUI to open a window for this conversation if one is not
+        // already showing.
+        self.dm_open_requests
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(peer);
+    }
+
+    /// Append a direct message to the conversation with `peer`.
+    fn push_dm(&self, peer: u16, message: DmMessage) {
+        self.dms
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(peer)
+            .or_default()
+            .push(message);
+    }
+
+    /// The identity public key `peer` advertised, if any.
+    fn peer_public_key(&self, peer: u16) -> Option<[u8; 32]> {
+        self.connected_users
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|user| user.id == peer)
+            .and_then(|user| user.public_key)
+    }
+
+    /// `peer`'s identity key parsed into a [`VerifyingKey`], if usable.
+    fn peer_verifying_key(&self, peer: u16) -> Option<VerifyingKey> {
+        VerifyingKey::from_bytes(&self.peer_public_key(peer)?).ok()
+    }
+
+    /// Whether direct messages with `peer` can be end-to-end encrypted (the peer
+    /// provided a usable identity key).
+    #[must_use]
+    pub fn dm_encrypted_with(&self, peer: u16) -> bool {
+        self.peer_verifying_key(peer).is_some()
+    }
+
+    /// A hex fingerprint of `peer`'s identity key, for out-of-band verification.
+    #[must_use]
+    pub fn peer_key_fingerprint(&self, peer: u16) -> Option<String> {
+        self.peer_public_key(peer).as_ref().map(dm::fingerprint)
+    }
+
+    /// Drain the peers whose inbound direct message should open a window. Empty
+    /// once consumed, so manually closing a window is not immediately undone
+    /// (a later message re-requests it).
+    #[must_use]
+    pub fn take_dm_open_requests(&self) -> Vec<u16> {
+        std::mem::take(
+            &mut *self
+                .dm_open_requests
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// A snapshot of the direct-message conversation with `peer`.
+    #[must_use]
+    pub fn dm_thread(&self, peer: u16) -> Vec<DmMessage> {
+        self.dms
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&peer)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Send a direct message to `peer`. It is end-to-end encrypted when the peer
+    /// provided an identity key; otherwise it is relayed as plaintext (still
+    /// over the encrypted link to the server).
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn send_dm(&self, peer: u16, message: String) -> Result<()> {
+        let (encrypted, payload) = match self.peer_verifying_key(peer) {
+            Some(their_key) => {
+                let key = dm::shared_key(&self.signing_key, &their_key);
+                (true, dm::encrypt(&key, message.as_bytes()))
+            }
+            None => (false, message.clone().into_bytes()),
+        };
+        // Record locally first so the message appears immediately.
+        self.push_dm(
+            peer,
+            DmMessage {
+                time: Local::now(),
+                from_me: true,
+                encrypted,
+                text: message,
+            },
+        );
+        let request = ServerMessagesEncrypted::DirectMessage {
+            to: peer,
+            encrypted,
+            payload,
+        };
+        self.send_request(&request.to_vec()).await
     }
 
     /// The most recently received administrative chatroom list.

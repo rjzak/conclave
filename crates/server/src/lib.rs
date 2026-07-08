@@ -1374,6 +1374,14 @@ impl State {
                                                 Some(uid) => self_clone.user_color(uid).await,
                                                 None => None,
                                             };
+                                            // The client's verified identity key (if it
+                                            // provided one), so peers can end-to-end
+                                            // encrypt direct messages to this user.
+                                            let public_key = write
+                                                .read()
+                                                .await
+                                                .client_key()
+                                                .map(VerifyingKey::to_bytes);
                                             let user = Arc::new(ConnectedUser {
                                                 id,
                                                 display_name,
@@ -1382,6 +1390,7 @@ impl State {
                                                 idle: Duration::default(),
                                                 color,
                                                 user_id,
+                                                public_key,
                                                 timezone: user_local_time,
                                             });
                                             let connection = ClientConnection {
@@ -1521,6 +1530,7 @@ impl State {
     /// the client disconnects or the socket errors, then drop it from the roster
     /// and notify the remaining clients. The read half is owned here; the write
     /// half is shared so the server can also push roster updates to this client.
+    #[allow(clippy::too_many_lines)]
     async fn handle_client(
         &self,
         mut read: EncryptedRead<DEFAULT_REKEY_INTERVAL>,
@@ -1612,6 +1622,22 @@ impl State {
 
                 Ok(ServerMessagesEncrypted::ChatSend { room, message }) => {
                     self.chat_send(user.id, room, message, &user).await;
+                }
+
+                Ok(ServerMessagesEncrypted::DirectMessage {
+                    to,
+                    encrypted,
+                    payload,
+                }) => {
+                    // Relay to the recipient verbatim; when `encrypted` the
+                    // payload is end-to-end ciphertext the server cannot read.
+                    let delivery = ClientMessagesEncrypted::DirectMessageReceived {
+                        from: user.id,
+                        from_display_name: user.display_name.clone(),
+                        encrypted,
+                        payload,
+                    };
+                    self.send_to_connection(to, &delivery).await;
                 }
 
                 Ok(ServerMessagesEncrypted::Disconnect) => break,

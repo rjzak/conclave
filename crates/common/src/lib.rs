@@ -16,6 +16,9 @@ pub mod tracker;
 /// Networking utilities
 pub mod net;
 
+/// End-to-end encryption for direct messages between users
+pub mod dm;
+
 /// Serialization and deserialization utilities, only to be used to load/save some cryptographic keys
 /// as hex-encoded bytes for use with config files. Any cryptographic materials sent over the network
 /// will be as raw bytes using the respective crates' default `serde` implementations.

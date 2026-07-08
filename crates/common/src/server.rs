@@ -237,6 +237,10 @@ pub struct ConnectedUser {
     /// User's ID, if authenticated.
     pub user_id: Option<u32>,
 
+    /// The user's ed25519 identity public key (compressed), if they connected
+    /// with one. Lets other users end-to-end encrypt direct messages to them.
+    pub public_key: Option<[u8; 32]>,
+
     /// User-provided local time, used to display timezone offsets.
     pub timezone: Option<DateTime<Local>>,
 }
@@ -294,6 +298,18 @@ pub enum ServerMessagesEncrypted {
         room: u16,
         /// Message text
         message: String,
+    },
+
+    /// Send a direct message to another connected user, by connection id. The
+    /// server relays `payload` verbatim without inspecting it; when `encrypted`
+    /// is set it is end-to-end ciphertext the server cannot read.
+    DirectMessage {
+        /// Recipient's connection id
+        to: u16,
+        /// Whether `payload` is end-to-end encrypted
+        encrypted: bool,
+        /// Message bytes (UTF-8 plaintext, or [`crate::dm`] ciphertext)
+        payload: Vec<u8>,
     },
 
     /// Do nothing message to keep the connection alive.
@@ -377,6 +393,18 @@ pub enum ClientMessagesEncrypted {
 
     /// Live activity within a chatroom the user is a member of.
     ChatActivity(ChatEvent),
+
+    /// A direct message relayed from another connected user.
+    DirectMessageReceived {
+        /// Sender's connection id
+        from: u16,
+        /// Sender's display name
+        from_display_name: String,
+        /// Whether `payload` is end-to-end encrypted
+        encrypted: bool,
+        /// Message bytes (UTF-8 plaintext, or [`crate::dm`] ciphertext)
+        payload: Vec<u8>,
+    },
 
     /// Container for administrative responses.
     AdministrativeResponse(ClientAdminMessagesEncrypted),
