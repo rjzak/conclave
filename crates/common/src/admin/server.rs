@@ -55,7 +55,7 @@ pub enum ServerAdminMessagesEncrypted {
     RemoveTracker(Tracker),
 
     /// Kick a connected user by connection id.
-    KickUser(u32),
+    KickUser(u16),
 
     /// Enable or disable chat on the server.
     SetChatEnabled(bool),
@@ -74,7 +74,7 @@ pub enum ServerAdminMessagesEncrypted {
     /// Rename a chatroom and replace its group restrictions.
     EditChatroom {
         /// Chatroom id
-        id: u32,
+        id: u16,
         /// New chatroom name
         name: String,
         /// Group ids the room is restricted to; empty means open to everyone.
@@ -82,7 +82,7 @@ pub enum ServerAdminMessagesEncrypted {
     },
 
     /// Delete a chatroom by id.
-    DeleteChatroom(u32),
+    DeleteChatroom(u16),
 }
 
 /// Server to Client administrative messages
@@ -110,7 +110,7 @@ pub enum ClientAdminMessagesEncrypted {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Chatroom {
     /// Database id of the chatroom
-    pub id: u32,
+    pub id: u16,
 
     /// Chatroom name
     pub name: String,

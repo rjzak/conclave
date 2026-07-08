@@ -301,10 +301,10 @@ pub struct ConclaveGUI {
     admin_window_close_requests: Arc<RwLock<Vec<String>>>,
 
     /// Open chatroom windows, keyed by (server key, room id)
-    open_chats: Arc<RwLock<HashSet<(String, u32)>>>,
+    open_chats: Arc<RwLock<HashSet<(String, u16)>>>,
 
     /// Chat-window close requests emitted by viewport closures
-    chat_window_close_requests: Arc<RwLock<Vec<(String, u32)>>>,
+    chat_window_close_requests: Arc<RwLock<Vec<(String, u16)>>>,
 
     /// Show the bookmarks management window
     show_bookmarks_window: bool,
@@ -1549,12 +1549,31 @@ impl eframe::App for ConclaveGUI {
             .map(|c| c.clone())
             .unwrap_or_default();
 
+        // Server public keys shared by more than one connection, so those
+        // windows can be disambiguated by the user's display name.
+        let mut server_counts: HashMap<String, usize> = HashMap::new();
+        for conn in &conns {
+            *server_counts
+                .entry(hex::encode(conn.server_info().key.as_bytes()))
+                .or_default() += 1;
+        }
+
+        // Each snapshot is keyed uniquely per connection (server key + a
+        // process-unique connection id) so two connections to the same server
+        // don't collide on egui window/viewport ids or temp state.
         let conn_snapshots: Vec<(String, String, bool, ConclaveConnection)> = conns
             .into_iter()
             .map(|conn| {
                 let info = conn.server_info();
+                let server_key = hex::encode(info.key.as_bytes());
                 let active = conn.connected_since().is_some();
-                (hex::encode(info.key.as_bytes()), info.name, active, conn)
+                let key = format!("{server_key}:{}", conn.local_id());
+                let name = if server_counts.get(&server_key).is_some_and(|&n| n > 1) {
+                    format!("{} ({})", info.name, conn.display_name())
+                } else {
+                    info.name
+                };
+                (key, name, active, conn)
             })
             .collect();
 
@@ -1671,10 +1690,16 @@ impl eframe::App for ConclaveGUI {
                     if let Some(key) = disconnect_key {
                         // server_info() is a synchronous (std-lock) read, so it is safe
                         // to match on it while briefly holding the connections write lock.
+                        // The window key is `{server_key}:{local_id}`, so reconstruct
+                        // it per connection to find the exact one to disconnect.
                         let removed = active_conns.write().ok().and_then(|mut c| {
-                            let idx = c
-                                .iter()
-                                .position(|conn| hex::encode(conn.server_info().key) == key);
+                            let idx = c.iter().position(|conn| {
+                                format!(
+                                    "{}:{}",
+                                    hex::encode(conn.server_info().key),
+                                    conn.local_id()
+                                ) == key
+                            });
                             idx.map(|i| c.remove(i))
                         });
                         if let Some(conn) = removed {
@@ -1727,28 +1752,20 @@ impl eframe::App for ConclaveGUI {
                     let users = conn.get_connected_users();
                     let is_admin = conn.is_admin();
                     let details = conn.user_details();
-
-                    // Fetch the available chatrooms once when the window opens.
-                    let chat_loaded_id = egui::Id::new(format!("chat_loaded:{key_owned}"));
-                    if !ctx.data(|d| d.get_temp::<bool>(chat_loaded_id).unwrap_or(false)) {
-                        ctx.data_mut(|d| d.insert_temp(chat_loaded_id, true));
-                        let c = conn.clone();
-                        tokio::spawn(async move {
-                            let _ = c.request_chatrooms().await;
-                        });
-                    }
+                    // The server pushes the accessible chatrooms on connect and
+                    // whenever chat config changes, so no request is needed here.
                     let chatrooms = conn.chatrooms_available();
 
                     // Which user's detail panel is expanded (by connection id).
                     let selected_id = egui::Id::new(format!("user_details_sel:{key_owned}"));
-                    let selected: Option<u32> = ctx
-                        .data(|d| d.get_temp::<Option<u32>>(selected_id))
+                    let selected: Option<u16> = ctx
+                        .data(|d| d.get_temp::<Option<u16>>(selected_id))
                         .flatten();
 
-                    let mut details_request: Option<u32> = None;
-                    let mut kick_request: Option<u32> = None;
+                    let mut details_request: Option<u16> = None;
+                    let mut kick_request: Option<u16> = None;
                     let mut clear_selection = false;
-                    let mut open_chat_request: Option<u32> = None;
+                    let mut open_chat_request: Option<u16> = None;
 
                     egui::CentralPanel::default().show(ctx, |ui| {
                         ui.heading(format!("Users on {}", server_info.name));
@@ -1898,16 +1915,16 @@ impl eframe::App for ConclaveGUI {
                         tokio::spawn(async move {
                             let _ = conn.admin_kick_user(id).await;
                         });
-                        ctx.data_mut(|d| d.insert_temp(selected_id, Option::<u32>::None));
+                        ctx.data_mut(|d| d.insert_temp(selected_id, Option::<u16>::None));
                     }
                     if clear_selection {
-                        ctx.data_mut(|d| d.insert_temp(selected_id, Option::<u32>::None));
+                        ctx.data_mut(|d| d.insert_temp(selected_id, Option::<u16>::None));
                     }
 
                     // The server pushes roster changes automatically, and detail
-                    // replies arrive asynchronously; repaint periodically so both
+                    // replies arrive asynchronously; repaint frequently so both
                     // are picked up promptly.
-                    ctx.request_repaint_after(std::time::Duration::from_millis(500));
+                    ctx.request_repaint_after(std::time::Duration::from_millis(200));
                 },
             );
         }
@@ -1917,7 +1934,7 @@ impl eframe::App for ConclaveGUI {
         // has disconnected.
         {
             let live: HashSet<String> = conn_snapshots.iter().map(|(k, ..)| k.clone()).collect();
-            let closed: Vec<(String, u32)> = self
+            let closed: Vec<(String, u16)> = self
                 .chat_window_close_requests
                 .write()
                 .map(|mut r| r.drain(..).collect())
@@ -1938,7 +1955,7 @@ impl eframe::App for ConclaveGUI {
             }
         }
 
-        let open_chats: Vec<(String, u32)> = self
+        let open_chats: Vec<(String, u16)> = self
             .open_chats
             .read()
             .map(|o| o.iter().cloned().collect())
@@ -2074,7 +2091,7 @@ impl eframe::App for ConclaveGUI {
                     }
                     ctx.data_mut(|d| d.insert_temp(input_id, input));
                     // Messages arrive asynchronously; repaint so they show promptly.
-                    ctx.request_repaint_after(std::time::Duration::from_millis(300));
+                    ctx.request_repaint_after(std::time::Duration::from_millis(150));
                 },
             );
         }
@@ -2099,7 +2116,7 @@ impl eframe::App for ConclaveGUI {
                 egui::ViewportId::from_hash_of(format!("server_admin:{key}")),
                 egui::ViewportBuilder::default()
                     .with_title(title)
-                    .with_inner_size([540.0, 600.0])
+                    .with_inner_size([500.0, 300.0])
                     .with_resizable(true),
                 move |ctx, _class| {
                     if ctx.input(|i| i.viewport().close_requested()) {

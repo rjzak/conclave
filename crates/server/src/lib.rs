@@ -26,7 +26,7 @@ use conclave_common::tracker::{Advertise, Tracker, TrackerWithKey};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock};
 
 use anyhow::{Result, anyhow, ensure};
@@ -57,7 +57,7 @@ pub static VERSION: LazyLock<Version> =
 /// Client connection
 struct ClientConnection {
     /// Opaque, server-assigned handle for this connection.
-    connection_id: u32,
+    connection_id: u16,
 
     /// Write half of the encrypted connection to the client. The read half is
     /// owned by the per-client task spawned in [`State::serve`].
@@ -151,7 +151,7 @@ pub struct State {
     total_visits: Arc<AtomicU32>,
 
     /// Source of unique per-connection ids.
-    next_connection_id: Arc<AtomicU32>,
+    next_connection_id: Arc<AtomicU16>,
 
     /// Whether anonymous connections are allowed
     allow_anonymous: Arc<AtomicBool>,
@@ -160,7 +160,7 @@ pub struct State {
     chat_enabled: Arc<AtomicBool>,
 
     /// Chatroom membership: room id -> the connection ids currently present.
-    chat_members: Arc<RwLock<HashMap<u32, HashSet<u32>>>>,
+    chat_members: Arc<RwLock<HashMap<u16, HashSet<u16>>>>,
 
     /// Whether the server is currently serving requests
     serving: Arc<AtomicBool>,
@@ -295,7 +295,7 @@ impl State {
                 tracker_update: Arc::new(tokio::sync::watch::channel(0u64).0),
                 connections: Arc::new(RwLock::new(Vec::new())),
                 total_visits: Arc::new(AtomicU32::new(0)),
-                next_connection_id: Arc::new(AtomicU32::new(0)),
+                next_connection_id: Arc::new(AtomicU16::new(0)),
                 allow_anonymous: Arc::new(AtomicBool::new(true)), // Database default
                 chat_enabled: Arc::new(AtomicBool::new(false)),   // Database default
                 chat_members: Arc::new(RwLock::new(HashMap::new())),
@@ -450,7 +450,7 @@ impl State {
             tracker_update: Arc::new(tokio::sync::watch::channel(0u64).0),
             connections: Arc::new(RwLock::new(Vec::new())),
             total_visits: Arc::new(AtomicU32::new(0)),
-            next_connection_id: Arc::new(AtomicU32::new(0)),
+            next_connection_id: Arc::new(AtomicU16::new(0)),
             allow_anonymous: Arc::new(AtomicBool::new(allow_anonymous)),
             chat_enabled: Arc::new(AtomicBool::new(chat_enabled)),
             chat_members: Arc::new(RwLock::new(HashMap::new())),
@@ -845,7 +845,7 @@ impl State {
     /// any changed, re-broadcast the roster. Called after group or membership
     /// changes so tinting stays current.
     async fn refresh_user_colors(&self) {
-        let targets: Vec<(u32, u32)> = self
+        let targets: Vec<(u16, u32)> = self
             .connections
             .read()
             .await
@@ -853,7 +853,7 @@ impl State {
             .filter_map(|c| c.user.user_id.map(|uid| (c.connection_id, uid)))
             .collect();
 
-        let mut new_colors: HashMap<u32, Option<[u8; 3]>> = HashMap::new();
+        let mut new_colors: HashMap<u16, Option<[u8; 3]>> = HashMap::new();
         for (connection_id, uid) in targets {
             new_colors.insert(connection_id, self.user_color(uid).await);
         }
@@ -1421,12 +1421,26 @@ impl State {
                                                     admin,
                                                 }
                                                 .to_vec();
+                                            // Push the chatrooms this user may see
+                                            // so chat is available immediately,
+                                            // without the client having to ask.
+                                            let chat_bytes =
+                                                ClientMessagesEncrypted::ChatRoomsResponse(
+                                                    self_clone
+                                                        .chatrooms_for_user(user_id, admin)
+                                                        .await,
+                                                )
+                                                .to_vec();
                                             let send_result = {
                                                 let mut guard = write.write().await;
-                                                match guard.send(&server_bytes).await {
-                                                    Ok(()) => guard.send(&session_bytes).await,
-                                                    Err(e) => Err(e),
+                                                let mut result = guard.send(&server_bytes).await;
+                                                if result.is_ok() {
+                                                    result = guard.send(&session_bytes).await;
                                                 }
+                                                if result.is_ok() {
+                                                    result = guard.send(&chat_bytes).await;
+                                                }
+                                                result
                                             };
                                             if let Err(e) = send_result {
                                                 error!("Failed to send handshake to {client}: {e}");
@@ -1833,9 +1847,9 @@ impl State {
                 let mut stmt = conn.prepare("SELECT id, name FROM CHATROOM ORDER BY id;")?;
                 let rows = stmt
                     .query_map([], |row| {
-                        Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
+                        Ok((row.get::<_, u16>(0)?, row.get::<_, String>(1)?))
                     })?
-                    .collect::<async_sqlite::rusqlite::Result<Vec<(u32, String)>>>()?;
+                    .collect::<async_sqlite::rusqlite::Result<Vec<(u16, String)>>>()?;
 
                 let mut chatrooms = Vec::with_capacity(rows.len());
                 for (id, name) in rows {
@@ -1883,7 +1897,7 @@ impl State {
     /// # Errors
     ///
     /// Returns an error if the name is empty, or on a database failure.
-    pub async fn edit_chatroom(&self, id: u32, name: String, groups: Vec<u32>) -> Result<()> {
+    pub async fn edit_chatroom(&self, id: u16, name: String, groups: Vec<u32>) -> Result<()> {
         ensure!(!name.trim().is_empty(), "Chatroom name cannot be empty");
         self.sqlite
             .conn(move |conn| {
@@ -1911,7 +1925,7 @@ impl State {
     /// # Errors
     ///
     /// Returns an error when deleting the Public room or on a database failure.
-    pub async fn delete_chatroom(&self, id: u32) -> Result<()> {
+    pub async fn delete_chatroom(&self, id: u16) -> Result<()> {
         ensure!(id != 0, "The Public chatroom cannot be deleted");
         self.sqlite
             .conn(move |conn| {
@@ -1956,7 +1970,7 @@ impl State {
     }
 
     /// Whether a user may access a specific chatroom.
-    async fn can_access_room(&self, room: u32, user_id: Option<u32>, admin: bool) -> bool {
+    async fn can_access_room(&self, room: u16, user_id: Option<u32>, admin: bool) -> bool {
         if !self.chat_enabled.load(Ordering::Relaxed) {
             return false;
         }
@@ -1999,7 +2013,7 @@ impl State {
     }
 
     /// Display names of the members currently in a room.
-    async fn room_member_names(&self, room: u32) -> Vec<String> {
+    async fn room_member_names(&self, room: u16) -> Vec<String> {
         let ids = self
             .chat_members
             .read()
@@ -2020,9 +2034,9 @@ impl State {
     /// connection (e.g. the sender of a join notice).
     async fn broadcast_to_room(
         &self,
-        room: u32,
+        room: u16,
         message: &ClientMessagesEncrypted,
-        exclude: Option<u32>,
+        exclude: Option<u16>,
     ) {
         let ids = self
             .chat_members
@@ -2048,7 +2062,7 @@ impl State {
     }
 
     /// Send a single message to a specific connection by id.
-    async fn send_to_connection(&self, connection_id: u32, message: &ClientMessagesEncrypted) {
+    async fn send_to_connection(&self, connection_id: u16, message: &ClientMessagesEncrypted) {
         let writer = self
             .connections
             .read()
@@ -2065,7 +2079,7 @@ impl State {
 
     /// Handle a user joining a chatroom: register membership, send them the
     /// current member list, and tell the others someone arrived.
-    async fn chat_join(&self, connection_id: u32, room: u32, user: &ConnectedUser) {
+    async fn chat_join(&self, connection_id: u16, room: u16, user: &ConnectedUser) {
         if !self.can_access_room(room, user.user_id, user.admin).await {
             return;
         }
@@ -2094,7 +2108,7 @@ impl State {
     }
 
     /// Handle a user leaving a chatroom, telling the remaining members.
-    async fn chat_leave(&self, connection_id: u32, room: u32, display_name: &str) {
+    async fn chat_leave(&self, connection_id: u16, room: u16, display_name: &str) {
         let was_member = {
             let mut members = self.chat_members.write().await;
             if let Some(set) = members.get_mut(&room) {
@@ -2122,8 +2136,8 @@ impl State {
 
     /// Remove a connection from every chatroom, telling each room's remaining
     /// members. Used when a connection drops.
-    async fn chat_leave_all(&self, connection_id: u32, display_name: &str) {
-        let left_rooms: Vec<u32> = {
+    async fn chat_leave_all(&self, connection_id: u16, display_name: &str) {
+        let left_rooms: Vec<u16> = {
             let mut members = self.chat_members.write().await;
             let mut left = Vec::new();
             members.retain(|room, set| {
@@ -2151,8 +2165,8 @@ impl State {
     /// sender isn't a member of the room or the message is blank.
     async fn chat_send(
         &self,
-        connection_id: u32,
-        room: u32,
+        connection_id: u16,
+        room: u16,
         message: String,
         user: &ConnectedUser,
     ) {
@@ -2209,7 +2223,7 @@ impl State {
     /// Extra, on-demand details about a connected user by connection id. The
     /// `requester_admin` flag decides whether the privileged fields (login name
     /// and IP address) are included.
-    async fn user_details(&self, connection_id: u32, requester_admin: bool) -> Option<UserDetails> {
+    async fn user_details(&self, connection_id: u16, requester_admin: bool) -> Option<UserDetails> {
         let (user_id, ip) = {
             let connections = self.connections.read().await;
             let conn = connections
@@ -2265,7 +2279,7 @@ impl State {
     /// # Errors
     ///
     /// Returns an error if no connected user has that id.
-    async fn kick_user(&self, connection_id: u32) -> Result<()> {
+    async fn kick_user(&self, connection_id: u16) -> Result<()> {
         // Remove from the roster up front so the kick takes effect immediately,
         // regardless of when the client's read loop notices.
         let target = {

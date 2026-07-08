@@ -137,7 +137,7 @@ pub struct ServerInformation {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ChatroomInfo {
     /// Database id of the chatroom
-    pub id: u32,
+    pub id: u16,
 
     /// Chatroom name
     pub name: String,
@@ -150,7 +150,7 @@ pub enum ChatEvent {
     /// A user joined the room.
     Joined {
         /// Chatroom id
-        room: u32,
+        room: u16,
         /// Joining user's display name
         display_name: String,
     },
@@ -158,7 +158,7 @@ pub enum ChatEvent {
     /// A user left the room.
     Left {
         /// Chatroom id
-        room: u32,
+        room: u16,
         /// Leaving user's display name
         display_name: String,
     },
@@ -166,7 +166,7 @@ pub enum ChatEvent {
     /// A user posted a message.
     Message {
         /// Chatroom id
-        room: u32,
+        room: u16,
         /// Author's display name
         display_name: String,
         /// Message text
@@ -216,7 +216,7 @@ pub const IDLE_TIMEOUT_MINUTES: Duration = Duration::minutes(30);
 pub struct ConnectedUser {
     /// Opaque handle for this connection, used to request more details about the
     /// user or (for administrators) to kick them.
-    pub id: u32,
+    pub id: u16,
 
     /// Display name of the user which might be different from their username
     pub display_name: String,
@@ -247,7 +247,7 @@ pub struct ConnectedUser {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct UserDetails {
     /// Connection handle this refers to (matches [`ConnectedUser::connection_id`]).
-    pub connection_id: u32,
+    pub connection_id: u16,
 
     /// Groups the user belongs to (empty for unauthenticated guests).
     pub groups: Vec<String>,
@@ -277,21 +277,21 @@ pub enum ServerMessagesEncrypted {
     ListConnectedUsersRequest,
 
     /// Ask the server for extra details about a connected user, by connection id.
-    UserDetailsRequest(u32),
+    UserDetailsRequest(u16),
 
     /// Ask the server for the chatrooms this user may access.
     ChatRoomsRequest,
 
     /// Join a chatroom by id (the server replies with the current member list).
-    ChatJoin(u32),
+    ChatJoin(u16),
 
     /// Leave a chatroom by id.
-    ChatLeave(u32),
+    ChatLeave(u16),
 
     /// Post a message to a chatroom.
     ChatSend {
         /// Chatroom id
-        room: u32,
+        room: u16,
         /// Message text
         message: String,
     },
@@ -370,7 +370,7 @@ pub enum ClientMessagesEncrypted {
     /// the members currently present.
     ChatJoined {
         /// Chatroom id
-        room: u32,
+        room: u16,
         /// Display names of the members currently in the room
         users: Vec<String>,
     },

@@ -9,7 +9,11 @@ use std::collections::HashMap;
 use std::ops::Not;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+
+/// Source of process-unique ids so two connections (even to the same server)
+/// can be told apart in the GUI.
+static NEXT_LOCAL_ID: AtomicU16 = AtomicU16::new(0);
 
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, Local};
@@ -97,13 +101,17 @@ pub struct ConclaveConnection {
     pub(crate) admin_chatrooms: Arc<std::sync::RwLock<Vec<Chatroom>>>,
 
     /// Local state of each joined chatroom, keyed by room id.
-    pub(crate) chat_rooms: Arc<std::sync::RwLock<HashMap<u32, ChatRoom>>>,
+    pub(crate) chat_rooms: Arc<std::sync::RwLock<HashMap<u16, ChatRoom>>>,
 
     /// Join handle for the task which listens for messages from the server
     pub(crate) listen_handle: Arc<JoinHandle<()>>,
 
     /// When the connection was established
     pub(crate) connection_time: DateTime<Local>,
+
+    /// Process-unique id for this connection, distinguishing it from other
+    /// connections (including a second connection to the same server).
+    pub(crate) local_id: u16,
 }
 
 impl ConclaveConnection {
@@ -132,6 +140,7 @@ impl ConclaveConnection {
                 tokio::time::Duration::from_millis(1),
             ))),
             connection_time: Local::now(),
+            local_id: NEXT_LOCAL_ID.fetch_add(1, Ordering::Relaxed),
         };
 
         let conn_clone = conn.clone();
@@ -275,6 +284,23 @@ impl ConclaveConnection {
             .clone()
     }
 
+    /// A process-unique id for this connection, so two connections (even to the
+    /// same server) can be distinguished when keying GUI windows.
+    #[must_use]
+    pub fn local_id(&self) -> u16 {
+        self.local_id
+    }
+
+    /// The display name this connection logged in with. Synchronous: the name is
+    /// set once at connect and never changes, so a non-blocking read suffices.
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        self.display_name
+            .try_read()
+            .map(|name| name.clone())
+            .unwrap_or_default()
+    }
+
     /// Get a copy of the connected users. Synchronous: callable directly from the
     /// GUI render thread without blocking on the async runtime.
     #[must_use]
@@ -301,7 +327,7 @@ impl ConclaveConnection {
     /// # Errors
     ///
     /// Network errors are possible.
-    pub async fn request_user_details(&self, connection_id: u32) -> Result<()> {
+    pub async fn request_user_details(&self, connection_id: u16) -> Result<()> {
         self.send_request(&ServerMessagesEncrypted::UserDetailsRequest(connection_id).to_vec())
             .await
     }
@@ -361,7 +387,7 @@ impl ConclaveConnection {
 
     /// A snapshot of a joined chatroom's local state, if present.
     #[must_use]
-    pub fn chat_room(&self, room: u32) -> Option<ChatRoom> {
+    pub fn chat_room(&self, room: u16) -> Option<ChatRoom> {
         self.chat_rooms
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -394,7 +420,7 @@ impl ConclaveConnection {
     /// # Errors
     ///
     /// Network errors are possible.
-    pub async fn chat_join(&self, room: u32) -> Result<()> {
+    pub async fn chat_join(&self, room: u16) -> Result<()> {
         self.send_request(&ServerMessagesEncrypted::ChatJoin(room).to_vec())
             .await
     }
@@ -404,7 +430,7 @@ impl ConclaveConnection {
     /// # Errors
     ///
     /// Network errors are possible.
-    pub async fn chat_leave(&self, room: u32) -> Result<()> {
+    pub async fn chat_leave(&self, room: u16) -> Result<()> {
         self.chat_rooms
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -418,7 +444,7 @@ impl ConclaveConnection {
     /// # Errors
     ///
     /// Network errors are possible.
-    pub async fn chat_send(&self, room: u32, message: String) -> Result<()> {
+    pub async fn chat_send(&self, room: u16, message: String) -> Result<()> {
         self.send_request(&ServerMessagesEncrypted::ChatSend { room, message }.to_vec())
             .await
     }
@@ -712,7 +738,7 @@ impl ConclaveConnection {
     /// # Errors
     ///
     /// Network errors are possible.
-    pub async fn admin_kick_user(&self, connection_id: u32) -> Result<()> {
+    pub async fn admin_kick_user(&self, connection_id: u16) -> Result<()> {
         self.send_request(
             &ServerMessagesEncrypted::AdministrativeRequest(
                 ServerAdminMessagesEncrypted::KickUser(connection_id),
@@ -773,7 +799,7 @@ impl ConclaveConnection {
     /// # Errors
     ///
     /// Network errors are possible.
-    pub async fn admin_edit_chatroom(&self, id: u32, name: String, groups: Vec<u32>) -> Result<()> {
+    pub async fn admin_edit_chatroom(&self, id: u16, name: String, groups: Vec<u32>) -> Result<()> {
         self.send_request(
             &ServerMessagesEncrypted::AdministrativeRequest(
                 ServerAdminMessagesEncrypted::EditChatroom { id, name, groups },
@@ -788,7 +814,7 @@ impl ConclaveConnection {
     /// # Errors
     ///
     /// Network errors are possible.
-    pub async fn admin_delete_chatroom(&self, id: u32) -> Result<()> {
+    pub async fn admin_delete_chatroom(&self, id: u16) -> Result<()> {
         self.send_request(
             &ServerMessagesEncrypted::AdministrativeRequest(
                 ServerAdminMessagesEncrypted::DeleteChatroom(id),

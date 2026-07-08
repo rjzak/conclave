@@ -20,13 +20,13 @@ pub fn ui(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str) {
     let edit_id = egui::Id::new(format!("admin_ce:{key}"));
     let mut chat_name: String = ui.data(|d| d.get_temp(name_id).unwrap_or_default());
     let mut chat_groups: HashSet<u32> = ui.data(|d| d.get_temp(groups_id).unwrap_or_default());
-    let mut chat_edit: Option<u32> = ui.data(|d| d.get_temp::<Option<u32>>(edit_id)).flatten();
+    let mut chat_edit: Option<u16> = ui.data(|d| d.get_temp::<Option<u16>>(edit_id)).flatten();
 
     // Actions are flagged during rendering and performed afterwards.
     let mut chat_toggle: Option<bool> = None;
     let mut chat_save = false;
-    let mut chat_delete: Option<u32> = None;
-    let mut chat_edit_load: Option<u32> = None;
+    let mut chat_delete: Option<u16> = None;
+    let mut chat_edit_load: Option<u16> = None;
     let mut chat_cancel = false;
 
     let mut enabled = info.chat_enabled;
