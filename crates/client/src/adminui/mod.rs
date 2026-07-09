@@ -65,6 +65,8 @@ fn refresh_all(conn: &ConclaveConnection) {
         let _ = conn.admin_list_groups().await;
         let _ = conn.admin_list_trackers().await;
         let _ = conn.admin_list_chatrooms().await;
+        let _ = conn.admin_get_share_info().await;
+        let _ = conn.admin_get_server_limits().await;
     });
 }
 

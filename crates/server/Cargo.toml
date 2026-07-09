@@ -32,7 +32,9 @@ futures = { workspace = true, features = ["executor"] }
 hex = { workspace = true, features = ["alloc", "std"] }
 mdns-sd = { workspace = true }
 semver = { workspace = true }
+sysinfo = { workspace = true, features = ["disk"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+toml = { workspace = true, features = ["parse"] }
 tracing = { workspace = true, features = ["attributes", "max_level_info", "std"] }
 tracing-subscriber = { workspace = true, features = ["fmt", "registry", "std"], optional = true }
 uuid = { workspace = true, features = ["v4"] }

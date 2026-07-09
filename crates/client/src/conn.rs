@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use conclave_common::dm;
+use conclave_common::files::{DirAcl, FileEntry, ShareInfo};
 use conclave_common::net::{DefaultEncryptedStream, EncryptedWrite, SigningKey, VerifyingKey};
 use conclave_common::server::{
     ChatEvent, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser, ServerInformation,
@@ -16,11 +17,17 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 /// can be told apart in the GUI.
 static NEXT_LOCAL_ID: AtomicU16 = AtomicU16::new(0);
 
+/// A shared-directory listing: the directory path and its entries.
+type FileListing = (String, Vec<FileEntry>);
+
+/// A directory path paired with its access-control list.
+type NamedAcl = (String, DirAcl);
+
 use anyhow::{Result, anyhow};
-use chrono::{DateTime, Duration, Local};
+use chrono::{DateTime, Duration, FixedOffset, Local};
 use conclave_common::admin::server::{
     AdminUser, Chatroom, ClientAdminMessagesEncrypted, CreateGroup, CreateUser, Group,
-    GroupMembership, ServerAdminMessagesEncrypted,
+    GroupMembership, ServerAdminMessagesEncrypted, ServerLimits,
 };
 use conclave_common::tracker::{Tracker, TrackerWithKey};
 use tokio::sync::RwLock;
@@ -62,6 +69,22 @@ pub struct DmMessage {
 
     /// Message text (or a placeholder if it could not be decrypted).
     pub text: String,
+}
+
+/// A file download in progress or completed, accumulated from streamed chunks.
+#[derive(Clone, Debug)]
+pub struct Download {
+    /// Path (relative to the share root) being downloaded.
+    pub path: String,
+
+    /// Total size in bytes reported by the server.
+    pub size: u64,
+
+    /// Bytes received so far.
+    pub data: Vec<u8>,
+
+    /// Whether all chunks have arrived.
+    pub done: bool,
 }
 
 /// Local view of a chatroom the user has joined. History is not preserved, so
@@ -121,6 +144,24 @@ pub struct ConclaveConnection {
     /// Local state of each joined chatroom, keyed by room id.
     pub(crate) chat_rooms: Arc<std::sync::RwLock<HashMap<u16, ChatRoom>>>,
 
+    /// Most recent shared-directory listing: `(path, entries)`.
+    pub(crate) file_listing: Arc<std::sync::RwLock<Option<FileListing>>>,
+
+    /// The current/last file download.
+    pub(crate) download: Arc<std::sync::RwLock<Option<Download>>>,
+
+    /// Most recent shared-directory ACL fetched for administration.
+    pub(crate) file_acl: Arc<std::sync::RwLock<Option<NamedAcl>>>,
+
+    /// Read-only shared-directory info (path, disk use) for administrators.
+    pub(crate) admin_share_info: Arc<std::sync::RwLock<Option<ShareInfo>>>,
+
+    /// Server-wide limits (max upload size, max connections) for administrators.
+    pub(crate) admin_limits: Arc<std::sync::RwLock<Option<ServerLimits>>>,
+
+    /// Latest file-operation notice (e.g. upload status) for the Files window.
+    pub(crate) file_notice: Arc<std::sync::RwLock<Option<String>>>,
+
     /// Direct-message conversations, keyed by the peer's connection id.
     pub(crate) dms: Arc<std::sync::RwLock<HashMap<u16, Vec<DmMessage>>>>,
 
@@ -138,6 +179,10 @@ pub struct ConclaveConnection {
     /// When the connection was established
     pub(crate) connection_time: DateTime<Local>,
 
+    /// This viewer's own shared timezone (the offset sent at connect), so the
+    /// GUI can show other users' offsets relative to us. `None` if not shared.
+    pub(crate) own_timezone: Option<DateTime<FixedOffset>>,
+
     /// Process-unique id for this connection, distinguishing it from other
     /// connections (including a second connection to the same server).
     pub(crate) local_id: u16,
@@ -151,6 +196,7 @@ impl ConclaveConnection {
         info: ServerInformation,
         display_name: &str,
         signing_key: SigningKey,
+        own_timezone: Option<DateTime<FixedOffset>>,
     ) -> Self {
         let (mut read, write) = conn.into_split();
         let server_info = Arc::new(std::sync::RwLock::new(info));
@@ -170,6 +216,12 @@ impl ConclaveConnection {
             chatrooms_available: Arc::new(std::sync::RwLock::new(Vec::new())),
             admin_chatrooms: Arc::new(std::sync::RwLock::new(Vec::new())),
             chat_rooms: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            file_listing: Arc::new(std::sync::RwLock::new(None)),
+            download: Arc::new(std::sync::RwLock::new(None)),
+            file_acl: Arc::new(std::sync::RwLock::new(None)),
+            admin_share_info: Arc::new(std::sync::RwLock::new(None)),
+            admin_limits: Arc::new(std::sync::RwLock::new(None)),
+            file_notice: Arc::new(std::sync::RwLock::new(None)),
             dms: Arc::new(std::sync::RwLock::new(HashMap::new())),
             dm_open_requests: Arc::new(std::sync::RwLock::new(Vec::new())),
             signing_key: Arc::new(signing_key),
@@ -177,6 +229,7 @@ impl ConclaveConnection {
                 tokio::time::Duration::from_millis(1),
             ))),
             connection_time: Local::now(),
+            own_timezone,
             local_id: NEXT_LOCAL_ID.fetch_add(1, Ordering::Relaxed),
         };
 
@@ -245,6 +298,58 @@ impl ConclaveConnection {
                     ClientMessagesEncrypted::ChatActivity(event) => {
                         conn_clone.apply_chat_event(event);
                     }
+                    ClientMessagesEncrypted::FileListResponse { path, entries } => {
+                        *conn_clone
+                            .file_listing
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some((path, entries));
+                    }
+                    ClientMessagesEncrypted::FileDownloadBegin { path, size } => {
+                        *conn_clone
+                            .download
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Download {
+                            path,
+                            size,
+                            data: Vec::new(),
+                            done: false,
+                        });
+                    }
+                    ClientMessagesEncrypted::FileDownloadChunk { data } => {
+                        if let Some(download) = conn_clone
+                            .download
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .as_mut()
+                        {
+                            download.data.extend_from_slice(&data);
+                        }
+                    }
+                    ClientMessagesEncrypted::FileDownloadEnd => {
+                        if let Some(download) = conn_clone
+                            .download
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .as_mut()
+                        {
+                            download.done = true;
+                        }
+                    }
+                    ClientMessagesEncrypted::FileUploadReady => {
+                        *conn_clone
+                            .file_notice
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some("Uploading…".to_string());
+                    }
+                    ClientMessagesEncrypted::FileUploadComplete => {
+                        *conn_clone
+                            .file_notice
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some("Upload complete.".to_string());
+                    }
                     ClientMessagesEncrypted::DirectMessageReceived {
                         from,
                         from_display_name: _,
@@ -280,6 +385,25 @@ impl ConclaveConnection {
                                 .admin_chatrooms
                                 .write()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner) = chatrooms;
+                        }
+                        ClientAdminMessagesEncrypted::FileAclResponse { path, acl } => {
+                            *conn_clone
+                                .file_acl
+                                .write()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                Some((path, acl));
+                        }
+                        ClientAdminMessagesEncrypted::ShareInfoResponse(info) => {
+                            *conn_clone
+                                .admin_share_info
+                                .write()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = info;
+                        }
+                        ClientAdminMessagesEncrypted::ServerLimitsResponse(limits) => {
+                            *conn_clone
+                                .admin_limits
+                                .write()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(limits);
                         }
                         ClientAdminMessagesEncrypted::ActionOk => {
                             *conn_clone
@@ -334,6 +458,12 @@ impl ConclaveConnection {
     #[must_use]
     pub fn local_id(&self) -> u16 {
         self.local_id
+    }
+
+    /// This viewer's own shared timezone on this connection, if shared.
+    #[must_use]
+    pub fn own_timezone(&self) -> Option<DateTime<FixedOffset>> {
+        self.own_timezone
     }
 
     /// The display name this connection logged in with. Synchronous: the name is
@@ -587,6 +717,238 @@ impl ConclaveConnection {
     pub async fn request_chatrooms(&self) -> Result<()> {
         self.send_request(&ServerMessagesEncrypted::ChatRoomsRequest.to_vec())
             .await
+    }
+
+    /// Request a shared-directory listing (`path` relative to the share root,
+    /// empty for the root). The reply is available from [`Self::file_listing`].
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn request_file_list(&self, path: String) -> Result<()> {
+        self.send_request(&ServerMessagesEncrypted::FileListRequest { path }.to_vec())
+            .await
+    }
+
+    /// Request a file download; chunks accumulate into [`Self::download`].
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn request_file_download(&self, path: String) -> Result<()> {
+        // Reset any prior transfer so progress reflects this one.
+        *self
+            .download
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        self.send_request(&ServerMessagesEncrypted::FileDownloadRequest { path }.to_vec())
+            .await
+    }
+
+    /// The most recent shared-directory listing, if any.
+    #[must_use]
+    pub fn file_listing(&self) -> Option<FileListing> {
+        self.file_listing
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// A snapshot of the current/last file download, if any.
+    #[must_use]
+    pub fn download(&self) -> Option<Download> {
+        self.download
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Clear the current download (e.g. after saving it).
+    pub fn clear_download(&self) {
+        *self
+            .download
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    /// (Admin) Request read-only shared-directory info; the reply is available
+    /// from [`Self::admin_share_info`].
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_get_share_info(&self) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::GetShareInfo,
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// The most recently fetched shared-directory info, if any.
+    #[must_use]
+    pub fn admin_share_info(&self) -> Option<ShareInfo> {
+        self.admin_share_info
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// (Admin) Request the server-wide limits; the reply is available from
+    /// [`Self::admin_limits`].
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_get_server_limits(&self) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::GetServerLimits,
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Set the maximum accepted upload size in bytes (`None` removes it).
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_set_max_upload_size(&self, max: Option<u64>) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::SetMaxUploadSize(max),
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Set the maximum number of concurrent connections (`None` removes
+    /// the limit).
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_set_max_connections(&self, max: Option<u16>) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::SetMaxConnections(max),
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// The most recently fetched server-wide limits, if any.
+    #[must_use]
+    pub fn admin_limits(&self) -> Option<ServerLimits> {
+        *self
+            .admin_limits
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// (Admin) Request a shared directory's ACL; the reply is available from
+    /// [`Self::file_acl`].
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_get_file_acl(&self, path: String) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::GetFileAcl(path),
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Replace a shared directory's ACL.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_set_file_acl(&self, path: String, acl: DirAcl) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::SetFileAcl { path, acl },
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// The most recently fetched shared-directory ACL, if any.
+    #[must_use]
+    pub fn file_acl(&self) -> Option<NamedAcl> {
+        self.file_acl
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Upload `data` to `path` (relative to the share root). Streams the request,
+    /// chunks, and end; status lands in [`Self::file_notice`], errors in
+    /// [`Self::admin_error`].
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn upload_file(&self, path: String, data: Vec<u8>) -> Result<()> {
+        let size = data.len() as u64;
+        self.send_request(&ServerMessagesEncrypted::FileUploadRequest { path, size }.to_vec())
+            .await?;
+        for chunk in data.chunks(64 * 1024) {
+            self.send_request(
+                &ServerMessagesEncrypted::FileUploadChunk {
+                    data: chunk.to_vec(),
+                }
+                .to_vec(),
+            )
+            .await?;
+        }
+        self.send_request(&ServerMessagesEncrypted::FileUploadEnd.to_vec())
+            .await
+    }
+
+    /// Delete a shared file or empty directory (relative to the share root).
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn delete_file(&self, path: String) -> Result<()> {
+        self.send_request(&ServerMessagesEncrypted::FileDeleteRequest { path }.to_vec())
+            .await
+    }
+
+    /// The latest file-operation notice (e.g. upload status), if any.
+    #[must_use]
+    pub fn file_notice(&self) -> Option<String> {
+        self.file_notice
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Set the file-operation notice (e.g. a client-side error).
+    pub fn set_file_notice(&self, message: String) {
+        *self
+            .file_notice
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(message);
+    }
+
+    /// Clear the current file-operation notice.
+    pub fn clear_file_notice(&self) {
+        *self
+            .file_notice
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     /// Join a chatroom by id.

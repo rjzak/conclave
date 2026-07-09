@@ -79,6 +79,206 @@ fn is_idle(idle: chrono::Duration) -> bool {
     idle >= IDLE_TIMEOUT_MINUTES
 }
 
+/// Save a downloaded file under a `conclave-downloads` folder in the current
+/// directory, returning the path written.
+fn save_download(name: &str, data: &[u8]) -> std::io::Result<std::path::PathBuf> {
+    let dir = std::env::current_dir()
+        .unwrap_or_default()
+        .join("conclave-downloads");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(name);
+    std::fs::write(&path, data)?;
+    Ok(path)
+}
+
+/// Toggleable List/Download checkboxes for one principal in the ACL grid.
+/// Returns whether anything changed.
+fn acl_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    perms: &mut Vec<conclave_common::files::FilePermission>,
+) {
+    ui.label(label);
+    for perm in conclave_common::files::FilePermission::ALL {
+        let mut has = perms.contains(&perm);
+        if ui.checkbox(&mut has, "").changed() {
+            if has {
+                perms.push(perm);
+            } else {
+                perms.retain(|held| *held != perm);
+            }
+        }
+    }
+}
+
+/// Collapsible upload panel. Reads a local file and uploads it to a destination
+/// folder on the server (which enforces the Write permission).
+fn file_upload_panel(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str, path: &str) {
+    let local_id = egui::Id::new(format!("file_upload_local:{key}"));
+    let dest_id = egui::Id::new(format!("file_upload_dest:{key}"));
+    let dest_seed_id = egui::Id::new(format!("file_upload_dest_seed:{key}"));
+
+    // Default the destination to the folder currently open; reseed on navigation.
+    let seeded: String = ui.data(|d| d.get_temp(dest_seed_id).unwrap_or_default());
+    if seeded != path {
+        ui.data_mut(|d| {
+            d.insert_temp(dest_id, path.to_string());
+            d.insert_temp(dest_seed_id, path.to_string());
+        });
+    }
+    let mut local: String = ui.data(|d| d.get_temp(local_id).unwrap_or_default());
+    let mut dest: String = ui.data(|d| d.get_temp(dest_id).unwrap_or_default());
+
+    ui.collapsing("Upload", |ui| {
+        egui::Grid::new(format!("upload_grid:{key}"))
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("Local file:");
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut local);
+                    if ui.button("Browse…").clicked()
+                        && let Some(picked) = rfd::FileDialog::new().pick_file()
+                    {
+                        local = picked.display().to_string();
+                    }
+                });
+                ui.end_row();
+                ui.label("Destination folder:");
+                ui.text_edit_singleline(&mut dest);
+                ui.end_row();
+            });
+
+        if ui
+            .add_enabled(!local.trim().is_empty(), egui::Button::new("Upload"))
+            .clicked()
+        {
+            match std::fs::read(local.trim()) {
+                Ok(data) => {
+                    let name = std::path::Path::new(local.trim()).file_name().map_or_else(
+                        || "upload".to_string(),
+                        |n| n.to_string_lossy().into_owned(),
+                    );
+                    let target = if dest.trim().is_empty() {
+                        name
+                    } else {
+                        format!("{}/{name}", dest.trim().trim_matches('/'))
+                    };
+                    let c = conn.clone();
+                    tokio::spawn(async move {
+                        let _ = c.upload_file(target, data).await;
+                    });
+                }
+                Err(e) => {
+                    conn.set_file_notice(format!("Cannot read {}: {e}", local.trim()));
+                }
+            }
+        }
+
+        if let Some(notice) = conn.file_notice() {
+            ui.label(egui::RichText::new(notice).weak());
+        }
+    });
+
+    ui.data_mut(|d| {
+        d.insert_temp(local_id, local);
+        d.insert_temp(dest_id, dest);
+    });
+}
+
+/// Admin sub-panel to view and edit the ACL of the current shared directory.
+fn file_acl_editor(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str, path: &str) {
+    use conclave_common::files::DirAcl;
+
+    let edit_id = egui::Id::new(format!("file_acl_edit:{key}"));
+    let seeded_id = egui::Id::new(format!("file_acl_seeded:{key}"));
+
+    ui.collapsing("Permissions (admin)", |ui| {
+        if ui.button("Load / refresh").clicked() {
+            let c = conn.clone();
+            let p = path.to_string();
+            tokio::spawn(async move {
+                let _ = c.admin_list_groups().await;
+                let _ = c.admin_get_file_acl(p).await;
+            });
+            // A sentinel that no real path equals, forcing the reply to reseed.
+            ui.data_mut(|d| d.insert_temp(seeded_id, "\u{0}".to_string()));
+        }
+
+        // Seed the editor when the ACL for this path arrives.
+        let seeded: String = ui.data(|d| d.get_temp(seeded_id).unwrap_or_default());
+        if seeded != path
+            && let Some((loaded_path, acl)) = conn.file_acl()
+            && loaded_path == path
+        {
+            ui.data_mut(|d| {
+                d.insert_temp(edit_id, acl);
+                d.insert_temp(seeded_id, path.to_string());
+            });
+        }
+
+        let current_seed: String = ui.data(|d| d.get_temp(seeded_id).unwrap_or_default());
+        let Some(mut acl): Option<DirAcl> = ui.data(|d| d.get_temp(edit_id)) else {
+            ui.label(egui::RichText::new("Load to view or edit permissions.").weak());
+            return;
+        };
+        if current_seed != path {
+            ui.label(egui::RichText::new("Load to view or edit permissions.").weak());
+            return;
+        }
+
+        egui::Grid::new(format!("acl_grid:{key}"))
+            .num_columns(1 + conclave_common::files::FilePermission::ALL.len())
+            .spacing([10.0, 4.0])
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new("Principal").strong());
+                for perm in conclave_common::files::FilePermission::ALL {
+                    ui.label(egui::RichText::new(perm.label()).strong());
+                }
+                ui.end_row();
+
+                acl_row(ui, "guests (anyone)", &mut acl.guests);
+                ui.end_row();
+
+                for group in conn.admin_groups() {
+                    let perms = acl.groups.entry(group.name.clone()).or_default();
+                    acl_row(ui, &group.name, perms);
+                    ui.end_row();
+                }
+            });
+        // Keep the stored ACL tidy: drop groups with no permissions.
+        acl.groups.retain(|_, perms| !perms.is_empty());
+
+        if ui.button("Save").clicked() {
+            let c = conn.clone();
+            let p = path.to_string();
+            let to_save = acl.clone();
+            tokio::spawn(async move {
+                let _ = c.admin_set_file_acl(p, to_save).await;
+            });
+        }
+
+        ui.data_mut(|d| d.insert_temp(edit_id, acl));
+    });
+}
+
+/// A human-readable byte size.
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "XiB"];
+
+    #[allow(clippy::cast_precision_loss)]
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
 /// The base name colour for a user: the mix of their groups' colours, falling
 /// back to red for administrators with no colour of their own.
 fn base_name_color(user: &ConnectedUser) -> Option<egui::Color32> {
@@ -113,22 +313,35 @@ fn styled_name(text: &str, color: Option<egui::Color32>, idle: bool) -> egui::Ri
     }
 }
 
-/// Describe a user's timezone relative to ours, rounded to whole hours. `None`
-/// means the user did not share their local time.
-fn timezone_offset_text(tz: Option<chrono::DateTime<chrono::Local>>) -> String {
+/// Describe another user's timezone relative to the viewing user's, rounded to
+/// whole hours. Both offsets are the timezones the two users shared with the
+/// server (the viewer's `ours`, the other user's `theirs`); the server's own
+/// timezone is never involved. `None` for either means it was not shared.
+#[inline]
+fn timezone_offset_text(
+    theirs: Option<chrono::DateTime<chrono::FixedOffset>>,
+    ours: Option<chrono::DateTime<chrono::FixedOffset>>,
+) -> String {
     use chrono::Offset;
 
-    let Some(tz) = tz else {
+    let Some(theirs) = theirs else {
         return "Timezone: not shared".to_string();
     };
+    let their_offset = theirs.offset().fix().local_minus_utc();
 
-    let theirs = tz.offset().fix().local_minus_utc();
-    let ours = chrono::Local::now().offset().fix().local_minus_utc();
-    // Difference in seconds, rounded to the nearest whole hour (halves away
-    // from zero) without floating point.
-    let diff_secs = i64::from(theirs - ours);
-    let hours = (diff_secs + if diff_secs >= 0 { 1800 } else { -1800 }) / 3600;
+    let Some(ours) = ours else {
+        // We don't know our own timezone, so show the other user's absolute
+        // offset from UTC instead of a difference.
+        let hours = round_secs_to_hours(i64::from(their_offset));
+        return match hours.cmp(&0) {
+            std::cmp::Ordering::Greater => format!("Timezone: UTC+{hours}"),
+            std::cmp::Ordering::Less => format!("Timezone: UTC{hours}"),
+            std::cmp::Ordering::Equal => "Timezone: UTC".to_string(),
+        };
+    };
+    let our_offset = ours.offset().fix().local_minus_utc();
 
+    let hours = round_secs_to_hours(i64::from(their_offset - our_offset));
     match hours.cmp(&0) {
         std::cmp::Ordering::Greater => format!("Timezone: {hours}h ahead of you"),
         std::cmp::Ordering::Less => format!("Timezone: {}h behind you", hours.abs()),
@@ -136,9 +349,15 @@ fn timezone_offset_text(tz: Option<chrono::DateTime<chrono::Local>>) -> String {
     }
 }
 
+/// Round a number of seconds to the nearest whole hour (halves away from zero),
+/// without floating point.
+fn round_secs_to_hours(secs: i64) -> i64 {
+    (secs + if secs >= 0 { 1800 } else { -1800 }) / 3600
+}
+
 /// Parse host and port from a `"conclave://host:port"` URL.
 fn parse_server_url(url: &str) -> Option<(String, u16)> {
-    let rest = url.strip_prefix("conclave://")?;
+    let rest = url.strip_prefix(conclave_common::URL_PROTOCOL)?;
     let colon = rest.rfind(':')?;
     let host = rest[..colon].to_string();
     let port = rest[colon + 1..].parse().ok()?;
@@ -316,6 +535,12 @@ pub struct ConclaveGUI {
     /// Direct-message-window close requests emitted by viewport closures
     dm_window_close_requests: Arc<RwLock<Vec<(String, u16)>>>,
 
+    /// Open file-browser windows, keyed by server key
+    open_file_windows: Arc<RwLock<HashSet<String>>>,
+
+    /// File-window close requests emitted by viewport closures
+    file_window_close_requests: Arc<RwLock<Vec<String>>>,
+
     /// Show the bookmarks management window
     show_bookmarks_window: bool,
 
@@ -366,6 +591,8 @@ impl ConclaveGUI {
             chat_window_close_requests: Arc::new(RwLock::new(Vec::new())),
             open_dms: Arc::new(RwLock::new(HashSet::new())),
             dm_window_close_requests: Arc::new(RwLock::new(Vec::new())),
+            open_file_windows: Arc::new(RwLock::new(HashSet::new())),
+            file_window_close_requests: Arc::new(RwLock::new(Vec::new())),
             seen_servers: HashSet::new(),
             user_window_close_requests: Arc::new(RwLock::new(Vec::new())),
             show_bookmarks_window: false,
@@ -1624,10 +1851,19 @@ impl eframe::App for ConclaveGUI {
             let active_conns = self.active_connections.clone();
             let open_windows = self.open_user_windows.clone();
             let open_admin = self.open_admin_windows.clone();
+            let open_files = self.open_file_windows.clone();
             // (key, name, active, is_admin)
-            let servers: Vec<(String, String, bool, bool)> = conn_snapshots
+            let servers: Vec<(String, String, bool, bool, bool)> = conn_snapshots
                 .iter()
-                .map(|(k, n, a, c)| (k.clone(), n.clone(), *a, c.is_admin()))
+                .map(|(k, n, a, c)| {
+                    (
+                        k.clone(),
+                        n.clone(),
+                        *a,
+                        c.is_admin(),
+                        c.server_info().sharing_enabled,
+                    )
+                })
                 .collect();
 
             ui.ctx().show_viewport_deferred(
@@ -1653,7 +1889,7 @@ impl eframe::App for ConclaveGUI {
                             ui.label(egui::RichText::new("Not connected to any server.").weak());
                         }
 
-                        for (key, name, active, is_admin) in &servers {
+                        for (key, name, active, is_admin, sharing) in &servers {
                             ui.group(|ui| {
                                 let label = if *active {
                                     name.clone()
@@ -1673,6 +1909,22 @@ impl eframe::App for ConclaveGUI {
                                             }
                                         }
                                         repaint_root = true;
+                                    }
+                                    // Files are offered when the server shares a
+                                    // directory.
+                                    if *sharing {
+                                        let mut files_shown =
+                                            open_files.read().is_ok_and(|o| o.contains(key));
+                                        if ui.checkbox(&mut files_shown, "Files").changed() {
+                                            if let Ok(mut o) = open_files.write() {
+                                                if files_shown {
+                                                    o.insert(key.clone());
+                                                } else {
+                                                    o.remove(key);
+                                                }
+                                            }
+                                            repaint_root = true;
+                                        }
                                     }
                                     // The admin panel is offered only for connections
                                     // whose authenticated user holds admin rights.
@@ -1858,7 +2110,7 @@ impl eframe::App for ConclaveGUI {
                                     format_uptime(user.connected_since)
                                 ));
                                 ui.label(format!("Idle: {}", format_uptime(user.idle)));
-                                ui.label(timezone_offset_text(user.timezone));
+                                ui.label(timezone_offset_text(user.timezone, conn.own_timezone()));
 
                                 match details.as_ref().filter(|d| d.connection_id == sel) {
                                     Some(d) => {
@@ -2304,6 +2556,200 @@ impl eframe::App for ConclaveGUI {
             );
         }
 
+        // ── Per-server file-browser windows ───────────────────────────────
+        {
+            let live: HashSet<String> = conn_snapshots.iter().map(|(k, ..)| k.clone()).collect();
+            let closed: Vec<String> = self
+                .file_window_close_requests
+                .write()
+                .map(|mut r| r.drain(..).collect())
+                .unwrap_or_default();
+            if let Ok(mut open) = self.open_file_windows.write() {
+                for key in &closed {
+                    open.remove(key);
+                }
+                open.retain(|k| live.contains(k));
+            }
+        }
+        let file_open_keys: HashSet<String> = self
+            .open_file_windows
+            .read()
+            .map(|o| o.clone())
+            .unwrap_or_default();
+
+        for (key, name, _active, conn) in &conn_snapshots {
+            if !file_open_keys.contains(key) {
+                continue;
+            }
+            let conn = conn.clone();
+            let key_owned = key.clone();
+            let title = format!("Files — {name}");
+            let close_reqs = self.file_window_close_requests.clone();
+
+            ui.ctx().show_viewport_deferred(
+                egui::ViewportId::from_hash_of(format!("server_files:{key}")),
+                egui::ViewportBuilder::default()
+                    .with_title(title)
+                    .with_inner_size([460.0, 420.0])
+                    .with_resizable(true),
+                move |ctx, _class| {
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        if let Ok(mut r) = close_reqs.write() {
+                            r.push(key_owned.clone());
+                        }
+                        ctx.request_repaint_of(egui::ViewportId::ROOT);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+
+                    let path_id = egui::Id::new(format!("file_path:{key_owned}"));
+                    let req_id = egui::Id::new(format!("file_req:{key_owned}"));
+                    let status_id = egui::Id::new(format!("file_status:{key_owned}"));
+                    let mut path: String = ctx.data(|d| d.get_temp(path_id).unwrap_or_default());
+
+                    // Fetch the listing whenever the path changes.
+                    let requested: Option<String> = ctx.data(|d| d.get_temp(req_id));
+                    if requested.as_deref() != Some(path.as_str()) {
+                        ctx.data_mut(|d| d.insert_temp(req_id, path.clone()));
+                        let c = conn.clone();
+                        let p = path.clone();
+                        tokio::spawn(async move {
+                            let _ = c.request_file_list(p).await;
+                        });
+                    }
+
+                    // Save a completed download.
+                    if let Some(download) = conn.download()
+                        && download.done
+                    {
+                        let name = download
+                            .path
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or("download")
+                            .to_string();
+                        let status = match save_download(&name, &download.data) {
+                            Ok(saved) => format!("Saved to {}", saved.display()),
+                            Err(e) => format!("Failed to save {name}: {e}"),
+                        };
+                        ctx.data_mut(|d| d.insert_temp(status_id, status));
+                        conn.clear_download();
+                    }
+                    let status: String = ctx.data(|d| d.get_temp(status_id).unwrap_or_default());
+
+                    let mut nav: Option<String> = None;
+                    let is_admin = conn.is_admin();
+
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        // Path bar.
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(!path.is_empty(), egui::Button::new("⬆ Up"))
+                                .clicked()
+                            {
+                                nav = Some(
+                                    path.rsplit_once('/')
+                                        .map_or_else(String::new, |(parent, _)| parent.to_string()),
+                                );
+                            }
+                            let shown = if path.is_empty() { "/" } else { path.as_str() };
+                            ui.label(egui::RichText::new(shown).monospace());
+                        });
+                        ui.separator();
+
+                        // Listing (only shown when it matches the current path).
+                        match conn.file_listing() {
+                            Some((listed, entries)) if listed == path => {
+                                egui::ScrollArea::vertical().show(ui, |ui| {
+                                    if entries.is_empty() {
+                                        ui.label(egui::RichText::new("Empty.").weak());
+                                    }
+                                    for entry in &entries {
+                                        ui.horizontal(|ui| {
+                                            let child = if path.is_empty() {
+                                                entry.name.clone()
+                                            } else {
+                                                format!("{path}/{}", entry.name)
+                                            };
+                                            if entry.is_dir {
+                                                if ui.button(format!("📁 {}", entry.name)).clicked()
+                                                {
+                                                    nav = Some(child);
+                                                }
+                                            } else {
+                                                ui.label(format!("📄 {}", entry.name));
+                                                ui.label(
+                                                    egui::RichText::new(human_size(entry.size))
+                                                        .weak()
+                                                        .small(),
+                                                );
+                                                if ui.small_button("Download").clicked() {
+                                                    let c = conn.clone();
+                                                    let target = child.clone();
+                                                    tokio::spawn(async move {
+                                                        let _ =
+                                                            c.request_file_download(target).await;
+                                                    });
+                                                }
+                                                // Deletion is server-enforced by the
+                                                // Delete permission; the listing is
+                                                // refreshed afterwards.
+                                                if ui.small_button("🗑").clicked() {
+                                                    let c = conn.clone();
+                                                    let target = child.clone();
+                                                    let refresh = path.clone();
+                                                    tokio::spawn(async move {
+                                                        let _ = c.delete_file(target).await;
+                                                        let _ = c.request_file_list(refresh).await;
+                                                    });
+                                                }
+                                            }
+                                        });
+                                    }
+                                });
+                            }
+                            _ => {
+                                ui.label(egui::RichText::new("Loading…").weak());
+                            }
+                        }
+
+                        // Download progress / status.
+                        if let Some(download) = conn.download() {
+                            if !download.done {
+                                ui.separator();
+                                ui.label(format!(
+                                    "Downloading {}: {} / {}",
+                                    download.path,
+                                    human_size(download.data.len() as u64),
+                                    human_size(download.size),
+                                ));
+                            }
+                        } else if !status.is_empty() {
+                            ui.separator();
+                            ui.label(egui::RichText::new(&status).weak());
+                        }
+
+                        // Upload (server-enforced by the Write permission). A
+                        // drop box works even without List: type the destination
+                        // folder directly.
+                        ui.separator();
+                        file_upload_panel(ui, &conn, &key_owned, &path);
+
+                        // Admin: per-directory permissions.
+                        if is_admin {
+                            ui.separator();
+                            file_acl_editor(ui, &conn, &key_owned, &path);
+                        }
+                    });
+
+                    if let Some(target) = nav {
+                        path = target;
+                    }
+                    ctx.data_mut(|d| d.insert_temp(path_id, path));
+                    ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                },
+            );
+        }
+
         // ── Per-server admin windows (admin connections only) ─────────────
         let admin_open_keys: HashSet<String> = self
             .open_admin_windows
@@ -2324,7 +2770,7 @@ impl eframe::App for ConclaveGUI {
                 egui::ViewportId::from_hash_of(format!("server_admin:{key}")),
                 egui::ViewportBuilder::default()
                     .with_title(title)
-                    .with_inner_size([500.0, 300.0])
+                    .with_inner_size([500.0, 400.0])
                     .with_resizable(true),
                 move |ctx, _class| {
                     if ctx.input(|i| i.viewport().close_requested()) {

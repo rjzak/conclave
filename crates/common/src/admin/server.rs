@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::files::{DirAcl, ShareInfo};
 use crate::tracker::{Tracker, TrackerWithKey};
 
 use chrono::{DateTime, Utc};
@@ -83,6 +84,29 @@ pub enum ServerAdminMessagesEncrypted {
 
     /// Delete a chatroom by id.
     DeleteChatroom(u16),
+
+    /// Request the server-wide limits (max upload size, max connections).
+    GetServerLimits,
+
+    /// Set the maximum accepted upload size in bytes; `None` removes the cap.
+    SetMaxUploadSize(Option<u64>),
+
+    /// Set the maximum number of concurrent connections; `None` removes the limit.
+    SetMaxConnections(Option<u16>),
+
+    /// Request read-only information about the shared directory (path, disk use).
+    GetShareInfo,
+
+    /// Read the access-control list of a shared directory (empty path = root).
+    GetFileAcl(String),
+
+    /// Replace the access-control list of a shared directory.
+    SetFileAcl {
+        /// Directory path relative to the share root
+        path: String,
+        /// The new access-control list
+        acl: DirAcl,
+    },
 }
 
 /// Server to Client administrative messages
@@ -102,8 +126,33 @@ pub enum ClientAdminMessagesEncrypted {
     /// The chatrooms and their group restrictions.
     ChatroomsResponse(Vec<Chatroom>),
 
+    /// The server-wide limits (max upload size, max connections).
+    ServerLimitsResponse(ServerLimits),
+
+    /// Read-only information about the shared directory, or `None` if the server
+    /// is not sharing files.
+    ShareInfoResponse(Option<ShareInfo>),
+
+    /// The access-control list of a shared directory.
+    FileAclResponse {
+        /// Directory path relative to the share root
+        path: String,
+        /// The directory's access-control list
+        acl: DirAcl,
+    },
+
     /// Acknowledges that an administrative action succeeded.
     ActionOk,
+}
+
+/// Server-wide limits an administrator can view and change.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+pub struct ServerLimits {
+    /// Maximum accepted upload size in bytes, or `None` for uncapped.
+    pub max_upload_size: Option<u64>,
+
+    /// Maximum number of concurrent connections, or `None` for unlimited.
+    pub max_connections: Option<u16>,
 }
 
 /// A chatroom as seen by an administrator, including its group restrictions.

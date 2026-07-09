@@ -545,9 +545,12 @@ impl Client {
             EncryptedStream::connect(stream, &key, Some(&signing_key)).await?;
         info!("Client: EncryptedStream created");
 
+        // Carry our real UTC offset so peers can compute the difference; keep a
+        // copy so the GUI can show offsets relative to *us*, the viewer.
+        let own_timezone = share_time.then(|| chrono::Local::now().fixed_offset());
         let login = ServerMessagesEncrypted::ServerAuthenticationRequest((
             display_name.clone(),
-            share_time.then(chrono::Local::now),
+            own_timezone,
             auth,
         ))
         .to_vec();
@@ -571,6 +574,7 @@ impl Client {
                     server_info,
                     &display_name,
                     signing_key,
+                    own_timezone,
                 );
                 self.connection.write().await.push(conn.clone());
                 Ok(conn)

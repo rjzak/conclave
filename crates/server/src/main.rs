@@ -11,7 +11,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueHint};
 use dialoguer::Password;
 use zeroize::Zeroize;
 
@@ -64,12 +64,16 @@ struct Run {
     port: u16,
 
     /// Database file path
-    #[arg(short, long, default_value = DEFAULT_DATABASE)]
+    #[arg(short, long, default_value = DEFAULT_DATABASE, value_hint = ValueHint::FilePath)]
     config: PathBuf,
 
     /// Advertise this server via Multicast DNS
     #[arg(short, long)]
     mdns: bool,
+
+    /// Directory to share with clients (enables file sharing)
+    #[arg(short, long, value_hint = ValueHint::DirPath)]
+    share: Option<PathBuf>,
 }
 
 async fn common_main(args: Args) -> Result<State> {
@@ -91,7 +95,7 @@ async fn common_main(args: Args) -> Result<State> {
         Args::Run(run) => run,
     };
 
-    Ok(if run.config.exists() {
+    let state = if run.config.exists() {
         State::load(run.ip, run.port, run.mdns, &run.config)?
     } else {
         let (state, mut password) = State::new(
@@ -110,7 +114,9 @@ async fn common_main(args: Args) -> Result<State> {
         );
         password.zeroize();
         state
-    })
+    };
+
+    Ok(state.with_share_directory(run.share))
 }
 
 #[cfg(not(feature = "gui"))]

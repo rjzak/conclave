@@ -9,7 +9,9 @@ CREATE TABLE SERVER_CONFIG (
     version text NOT NULL,
     advertised_domain text,
     allow_anonymous_clients boolean DEFAULT TRUE NOT NULL,
-    chat_enabled boolean DEFAULT TRUE NOT NULL
+    chat_enabled boolean DEFAULT TRUE NOT NULL,
+    max_upload_size integer, -- NULL means uploads are uncapped
+    max_connections integer -- NULL means unlimited concurrent connections
 );
 
 CREATE TABLE TRACKER (

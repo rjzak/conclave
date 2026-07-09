@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::admin::server::{ClientAdminMessagesEncrypted, ServerAdminMessagesEncrypted};
+use crate::files::FileEntry;
 
-use chrono::{DateTime, Duration, Local, Utc};
+use chrono::{DateTime, Duration, FixedOffset, Utc};
 pub use ed25519_dalek::VerifyingKey;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -131,6 +132,9 @@ pub struct ServerInformation {
 
     /// Whether chat is enabled on the server
     pub chat_enabled: bool,
+
+    /// Whether the server exposes a shared file directory
+    pub sharing_enabled: bool,
 }
 
 /// A chatroom the user is allowed to see and join.
@@ -241,8 +245,10 @@ pub struct ConnectedUser {
     /// with one. Lets other users end-to-end encrypt direct messages to them.
     pub public_key: Option<[u8; 32]>,
 
-    /// User-provided local time, used to display timezone offsets.
-    pub timezone: Option<DateTime<Local>>,
+    /// User-provided local time, carrying their real UTC offset so other users
+    /// can compute the timezone difference. A fixed offset (not `Local`) so the
+    /// original offset survives being relayed through the server.
+    pub timezone: Option<DateTime<FixedOffset>>,
 }
 
 /// Extra, on-demand information about a connected user. The base fields (display
@@ -275,7 +281,13 @@ pub enum ServerMessagesEncrypted {
     /// User tries to authenticate
     /// Send the display name and the optional authentication message
     /// Server responds with Server Information if successful
-    ServerAuthenticationRequest((String, Option<DateTime<Local>>, Option<UserAuthentication>)),
+    ServerAuthenticationRequest(
+        (
+            String,
+            Option<DateTime<FixedOffset>>,
+            Option<UserAuthentication>,
+        ),
+    ),
 
     /// Ask the server for a list of connected users
     ListConnectedUsersRequest,
@@ -298,6 +310,44 @@ pub enum ServerMessagesEncrypted {
         room: u16,
         /// Message text
         message: String,
+    },
+
+    /// List a shared directory. `path` is relative to the share root, using `/`
+    /// separators; an empty string is the root.
+    FileListRequest {
+        /// Directory path relative to the share root
+        path: String,
+    },
+
+    /// Download a shared file. `path` is relative to the share root.
+    FileDownloadRequest {
+        /// File path relative to the share root
+        path: String,
+    },
+
+    /// Begin uploading a file to `path` (relative to the share root). The server
+    /// replies with [`ClientMessagesEncrypted::FileUploadReady`] or an error;
+    /// chunks and [`ServerMessagesEncrypted::FileUploadEnd`] follow.
+    FileUploadRequest {
+        /// Destination path relative to the share root
+        path: String,
+        /// Total size of the upload in bytes
+        size: u64,
+    },
+
+    /// A chunk of the file currently uploading, in order.
+    FileUploadChunk {
+        /// Raw file bytes
+        data: Vec<u8>,
+    },
+
+    /// Marks the end of the current upload; the server finalizes the file.
+    FileUploadEnd,
+
+    /// Delete a shared file or empty directory (relative to the share root).
+    FileDeleteRequest {
+        /// Path relative to the share root
+        path: String,
     },
 
     /// Send a direct message to another connected user, by connection id. The
@@ -394,6 +444,38 @@ pub enum ClientMessagesEncrypted {
     /// Live activity within a chatroom the user is a member of.
     ChatActivity(ChatEvent),
 
+    /// A shared-directory listing.
+    FileListResponse {
+        /// Directory path relative to the share root that was listed
+        path: String,
+        /// The directory's entries (excluding hidden ACL files)
+        entries: Vec<FileEntry>,
+    },
+
+    /// Marks the start of a file download; chunks follow in order, then
+    /// [`ClientMessagesEncrypted::FileDownloadEnd`].
+    FileDownloadBegin {
+        /// File path relative to the share root
+        path: String,
+        /// Total size of the file in bytes
+        size: u64,
+    },
+
+    /// A chunk of the file currently downloading, delivered in order.
+    FileDownloadChunk {
+        /// Raw file bytes
+        data: Vec<u8>,
+    },
+
+    /// Marks the end of the current file download.
+    FileDownloadEnd,
+
+    /// The server accepted an upload request; the client may stream chunks.
+    FileUploadReady,
+
+    /// The server finalized an upload successfully.
+    FileUploadComplete,
+
     /// A direct message relayed from another connected user.
     DirectMessageReceived {
         /// Sender's connection id
@@ -447,6 +529,9 @@ pub enum ServerError {
     /// The action requires administrator privileges
     NotAuthorized,
 
+    /// The maximum number of clients has been reached
+    AtCapacity,
+
     /// An administrative action failed; the string carries a human-readable reason
     ActionFailed(String),
 }
@@ -457,6 +542,7 @@ impl std::fmt::Display for ServerError {
             ServerError::AuthenticationFailed => write!(f, "Authentication failed"),
             ServerError::AuthenticationRequired => write!(f, "Authentication required"),
             ServerError::NotAuthorized => write!(f, "Administrator privileges required"),
+            ServerError::AtCapacity => write!(f, "Server at capacity"),
             ServerError::ActionFailed(reason) => write!(f, "{reason}"),
         }
     }

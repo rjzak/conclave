@@ -7,6 +7,8 @@
 #![deny(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
+mod files;
+
 use conclave_common::URL_PROTOCOL;
 use conclave_common::admin::server::{
     AdminUser, Chatroom, ClientAdminMessagesEncrypted, CreateGroup, Group,
@@ -25,8 +27,8 @@ use conclave_common::tracker::{Advertise, Tracker, TrackerWithKey};
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, AtomicU32, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 
 use anyhow::{Result, anyhow, ensure};
@@ -168,6 +170,18 @@ pub struct State {
     /// Advertising via Multicast DNS
     mdns: Option<ServiceDaemon>,
 
+    /// Root of the optional shared file directory, canonicalized; `None` when
+    /// the server is not sharing files.
+    share_directory: Option<PathBuf>,
+
+    /// Optional maximum accepted upload size, in bytes. `-1` means uncapped;
+    /// stored as an atomic so admins can change it at runtime.
+    max_upload_size: Arc<AtomicU64>,
+
+    /// Optional maximum number of concurrent connections. `-1` means unlimited;
+    /// stored as an atomic so admins can change it at runtime.
+    max_connections: Arc<AtomicU16>,
+
     /// Show the log window
     #[cfg(feature = "gui")]
     log: bool,
@@ -301,6 +315,9 @@ impl State {
                 chat_members: Arc::new(RwLock::new(HashMap::new())),
                 serving: Arc::new(AtomicBool::new(false)),
                 mdns: mdns.then(|| ServiceDaemon::new().expect("Failed to start Multicast DNS")),
+                share_directory: None,
+                max_upload_size: Arc::new(AtomicU64::new(u64::MAX)),
+                max_connections: Arc::new(AtomicU16::new(u16::MAX)),
                 #[cfg(feature = "gui")]
                 log: false,
                 #[cfg(feature = "gui")]
@@ -341,10 +358,12 @@ impl State {
             trackers,
             allow_anonymous,
             chat_enabled,
+            max_upload_size,
+            max_connections,
         ) = {
             let conn = Connection::open(&sqlite_path)?;
             let mut stmt = conn
-                .prepare("SELECT name, description, key, version, advertised_domain, allow_anonymous_clients, chat_enabled FROM SERVER_CONFIG")?;
+                .prepare("SELECT name, description, key, version, advertised_domain, allow_anonymous_clients, chat_enabled, max_upload_size, max_connections FROM SERVER_CONFIG")?;
             let (
                 name,
                 description,
@@ -353,6 +372,8 @@ impl State {
                 advertised_domain,
                 allow_anonymous,
                 chat_enabled,
+                max_upload_size,
+                max_connections,
             ) = stmt.query_row([], |row| {
                 let name: String = row.get(0)?;
                 let description: String = row.get(1)?;
@@ -361,6 +382,8 @@ impl State {
                 let advertised_domain: Option<String> = row.get(4)?;
                 let allow_anonymous: bool = row.get(5)?;
                 let chat_enabled: bool = row.get(6)?;
+                let max_upload_size: Option<u64> = row.get(7)?;
+                let max_connections: Option<u16> = row.get(8)?;
                 Ok((
                     name,
                     description,
@@ -369,6 +392,8 @@ impl State {
                     advertised_domain,
                     allow_anonymous,
                     chat_enabled,
+                    max_upload_size,
+                    max_connections,
                 ))
             })?;
 
@@ -427,6 +452,8 @@ impl State {
                 trackers,
                 allow_anonymous,
                 chat_enabled,
+                max_upload_size,
+                max_connections,
             )
         };
 
@@ -456,6 +483,9 @@ impl State {
             chat_members: Arc::new(RwLock::new(HashMap::new())),
             serving: Arc::new(AtomicBool::new(false)),
             mdns: mdns.then(|| ServiceDaemon::new().expect("Failed to start Multicast DNS")),
+            share_directory: None,
+            max_upload_size: Arc::new(AtomicU64::new(max_upload_size.unwrap_or(u64::MAX))),
+            max_connections: Arc::new(AtomicU16::new(max_connections.unwrap_or(u16::MAX))),
             #[cfg(feature = "gui")]
             log: false,
             #[cfg(feature = "gui")]
@@ -463,6 +493,90 @@ impl State {
             #[cfg(feature = "gui")]
             password_acknowledged: Arc::new(AtomicBool::new(true)),
         })
+    }
+
+    /// Set the shared file directory (builder-style). The path is canonicalized;
+    /// if it does not resolve to an existing directory, file sharing stays off
+    /// and a warning is logged. Call before the state is cloned/served.
+    #[must_use]
+    pub fn with_share_directory(mut self, dir: Option<PathBuf>) -> Self {
+        self.share_directory = match dir {
+            Some(dir) => match std::fs::canonicalize(&dir) {
+                Ok(canonical) if canonical.is_dir() => {
+                    info!("Sharing files from {}", canonical.display());
+                    Some(canonical)
+                }
+                Ok(_) => {
+                    warn!(
+                        "Share path {} is not a directory; file sharing disabled",
+                        dir.display()
+                    );
+                    None
+                }
+                Err(e) => {
+                    warn!(
+                        "Cannot use share path {}: {e}; file sharing disabled",
+                        dir.display()
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+        self
+    }
+
+    /// The current maximum accepted upload size in bytes, or `None` if uncapped.
+    fn max_upload_size(&self) -> Option<u64> {
+        let value = self.max_upload_size.load(Ordering::Relaxed);
+        if value == u64::MAX { None } else { Some(value) }
+    }
+
+    /// The current maximum number of concurrent connections, or `None` if
+    /// unlimited.
+    fn max_connections(&self) -> Option<u16> {
+        let value = self.max_connections.load(Ordering::Relaxed);
+        if value == u16::MAX { None } else { Some(value) }
+    }
+
+    /// Set the maximum accepted upload size in bytes, persisting it to the
+    /// database. `None` removes the cap (stores SQL NULL).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on a database failure.
+    pub async fn set_max_upload_size(&self, max: Option<u64>) -> Result<()> {
+        self.sqlite
+            .conn(move |conn| {
+                conn.execute(
+                    "UPDATE SERVER_CONFIG SET max_upload_size = ?1;",
+                    params![max],
+                )
+            })
+            .await?;
+        self.max_upload_size
+            .store(max.unwrap_or(u64::MAX), Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Set the maximum number of concurrent connections, persisting it to the
+    /// database. `None` removes the limit (stores SQL NULL).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on a database failure.
+    pub async fn set_max_connections(&self, max: Option<u16>) -> Result<()> {
+        self.sqlite
+            .conn(move |conn| {
+                conn.execute(
+                    "UPDATE SERVER_CONFIG SET max_connections = ?1;",
+                    params![max],
+                )
+            })
+            .await?;
+        self.max_connections
+            .store(max.unwrap_or(u16::MAX), Ordering::Relaxed);
+        Ok(())
     }
 
     /// Returns the number of total visitors
@@ -953,6 +1067,262 @@ impl State {
             .map_err(Into::into)
     }
 
+    /// Group names for a connection's requester (empty for a guest).
+    async fn requester_groups(&self, user: &ConnectedUser) -> Vec<String> {
+        match user.user_id {
+            Some(uid) => self.user_groups(uid).await.unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Handle a shared-directory listing request, producing the reply to send.
+    async fn file_list(&self, path: &str, user: &ConnectedUser) -> ClientMessagesEncrypted {
+        use conclave_common::files::FilePermission;
+        let Some(root) = self.share_directory.clone() else {
+            return file_error("File sharing is not enabled");
+        };
+        let dir = match files::resolve(&root, path) {
+            Ok(dir) if dir.is_dir() => dir,
+            Ok(_) => return file_error("Not a directory"),
+            Err(e) => return file_error(e.to_string()),
+        };
+        let groups = self.requester_groups(user).await;
+        let allowed = user.admin
+            || files::has_permission(
+                &root,
+                &dir,
+                &groups,
+                user.user_id.is_none(),
+                FilePermission::List,
+            );
+        if !allowed {
+            return ClientMessagesEncrypted::Error(ServerError::NotAuthorized);
+        }
+        match files::list_dir(&dir) {
+            Ok(entries) => ClientMessagesEncrypted::FileListResponse {
+                path: path.to_string(),
+                entries,
+            },
+            Err(e) => file_error(e.to_string()),
+        }
+    }
+
+    /// Handle a file-download request by streaming the file to the client.
+    async fn file_download(
+        &self,
+        path: &str,
+        user: &ConnectedUser,
+        write: &Arc<RwLock<EncryptedWrite<DEFAULT_REKEY_INTERVAL>>>,
+        addr: &SocketAddr,
+    ) {
+        use conclave_common::files::FilePermission;
+        let Some(root) = self.share_directory.clone() else {
+            reply(write, addr, &file_error("File sharing is not enabled")).await;
+            return;
+        };
+        let file = match files::resolve(&root, path) {
+            Ok(file) if file.is_file() => file,
+            Ok(_) => {
+                reply(write, addr, &file_error("Not a file")).await;
+                return;
+            }
+            Err(e) => {
+                reply(write, addr, &file_error(e.to_string())).await;
+                return;
+            }
+        };
+        // Read permission is checked on the file's containing directory.
+        let dir = file.parent().unwrap_or(&root).to_path_buf();
+        let groups = self.requester_groups(user).await;
+        let allowed = user.admin
+            || files::has_permission(
+                &root,
+                &dir,
+                &groups,
+                user.user_id.is_none(),
+                FilePermission::Read,
+            );
+        if !allowed {
+            reply(
+                write,
+                addr,
+                &ClientMessagesEncrypted::Error(ServerError::NotAuthorized),
+            )
+            .await;
+            return;
+        }
+
+        let mut handle = match std::fs::File::open(&file) {
+            Ok(handle) => handle,
+            Err(e) => {
+                reply(write, addr, &file_error(e.to_string())).await;
+                return;
+            }
+        };
+        let size = handle.metadata().map_or(0, |m| m.len());
+        let begin = ClientMessagesEncrypted::FileDownloadBegin {
+            path: path.to_string(),
+            size,
+        };
+        if write.write().await.send(&begin.to_vec()).await.is_err() {
+            return;
+        }
+        let mut buffer = vec![0u8; 64 * 1024];
+        loop {
+            let read = match std::io::Read::read(&mut handle, &mut buffer) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(e) => {
+                    error!("Error reading {}: {e}", file.display());
+                    break;
+                }
+            };
+            let chunk = ClientMessagesEncrypted::FileDownloadChunk {
+                data: buffer[..read].to_vec(),
+            };
+            if write.write().await.send(&chunk.to_vec()).await.is_err() {
+                return;
+            }
+        }
+        let _ = write
+            .write()
+            .await
+            .send(&ClientMessagesEncrypted::FileDownloadEnd.to_vec())
+            .await;
+    }
+
+    /// Validate an upload request and open the temp file to receive it.
+    async fn file_upload_begin(
+        &self,
+        path: &str,
+        size: u64,
+        user: &ConnectedUser,
+        connection_id: u16,
+    ) -> Result<Upload> {
+        use conclave_common::files::FilePermission;
+        let root = self
+            .share_directory
+            .clone()
+            .ok_or_else(|| anyhow!("File sharing is not enabled"))?;
+        if let Some(max) = self.max_upload_size() {
+            ensure!(size <= max, "Upload exceeds the size limit of {max} bytes");
+        }
+        let final_path = files::resolve_target(&root, path)?;
+        ensure!(
+            std::fs::symlink_metadata(&final_path).is_err(),
+            "A file with that name already exists"
+        );
+        let parent = final_path.parent().unwrap_or(&root).to_path_buf();
+        let groups = self.requester_groups(user).await;
+        let allowed = user.admin
+            || files::has_permission(
+                &root,
+                &parent,
+                &groups,
+                user.user_id.is_none(),
+                FilePermission::Write,
+            );
+        ensure!(allowed, "Permission denied");
+
+        let temp_path = parent.join(format!(".conclave-upload-{connection_id}.tmp"));
+        let _ = std::fs::remove_file(&temp_path);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        Ok(Upload {
+            temp_path,
+            final_path,
+            file,
+            written: 0,
+            max: self.max_upload_size(),
+        })
+    }
+
+    /// Delete a shared file or empty directory, returning an error reply on
+    /// failure and `None` on success.
+    async fn file_delete(
+        &self,
+        path: &str,
+        user: &ConnectedUser,
+    ) -> Option<ClientMessagesEncrypted> {
+        use conclave_common::files::FilePermission;
+        let root = self.share_directory.clone()?;
+        let target = match files::resolve(&root, path) {
+            Ok(target) => target,
+            Err(e) => return Some(file_error(e.to_string())),
+        };
+        let parent = target.parent().unwrap_or(&root).to_path_buf();
+        let groups = self.requester_groups(user).await;
+        let allowed = user.admin
+            || files::has_permission(
+                &root,
+                &parent,
+                &groups,
+                user.user_id.is_none(),
+                FilePermission::Delete,
+            );
+        if !allowed {
+            return Some(ClientMessagesEncrypted::Error(ServerError::NotAuthorized));
+        }
+        match files::delete(&target) {
+            Ok(()) => None,
+            Err(e) => Some(file_error(e.to_string())),
+        }
+    }
+
+    /// (Admin) The current server-wide limits.
+    #[inline]
+    fn server_limits(&self) -> conclave_common::admin::server::ServerLimits {
+        conclave_common::admin::server::ServerLimits {
+            max_upload_size: self.max_upload_size(),
+            max_connections: self.max_connections(),
+        }
+    }
+
+    /// (Admin) Read-only information about the shared directory: its path and
+    /// the total/available space on its filesystem.
+    #[inline]
+    fn share_info(&self) -> Option<conclave_common::files::ShareInfo> {
+        let root = self.share_directory.as_ref()?;
+        // The filesystem holding the share is the disk whose mount point is the
+        // deepest prefix of the share path.
+        let disks = sysinfo::Disks::new_with_refreshed_list();
+        let disk = disks
+            .list()
+            .iter()
+            .filter(|disk| root.starts_with(disk.mount_point()))
+            .max_by_key(|disk| disk.mount_point().as_os_str().len())?;
+        Some(conclave_common::files::ShareInfo {
+            path: root.display().to_string(),
+            total_bytes: disk.total_space(),
+            available_bytes: disk.available_space(),
+        })
+    }
+
+    /// (Admin) Read a shared directory's ACL.
+    #[inline]
+    fn get_file_acl(&self, path: &str) -> Result<files::DirAcl> {
+        let root = self
+            .share_directory
+            .clone()
+            .ok_or_else(|| anyhow!("File sharing is not enabled"))?;
+        let dir = files::resolve(&root, path)?;
+        ensure!(dir.is_dir(), "Not a directory");
+        Ok(files::read_acl(&dir))
+    }
+
+    /// (Admin) Replace a shared directory's ACL.
+    fn set_file_acl(&self, path: &str, acl: &files::DirAcl) -> Result<()> {
+        let root = self
+            .share_directory
+            .clone()
+            .ok_or_else(|| anyhow!("File sharing is not enabled"))?;
+        let dir = files::resolve(&root, path)?;
+        ensure!(dir.is_dir(), "Not a directory");
+        files::write_acl(&dir, acl)
+    }
+
     /// (Admin) Delete a user account by login name. The built-in `admin`
     /// account cannot be deleted.
     ///
@@ -1357,6 +1727,29 @@ impl State {
                                                 continue;
                                             };
 
+                                            // Enforce the optional concurrent-connection
+                                            // limit. Administrators are exempt so a full
+                                            // server can still be managed.
+                                            if !admin
+                                                && let Some(max) = self_clone.max_connections()
+                                                && self_clone.connections.read().await.len()
+                                                    >= usize::from(max)
+                                            {
+                                                warn!(
+                                                    "Rejecting {client}: server at capacity ({max} connections)"
+                                                );
+                                                let full = ClientMessagesEncrypted::Error(
+                                                    ServerError::AtCapacity,
+                                                )
+                                                .to_vec();
+                                                if let Err(e) = stream.send(&full).await {
+                                                    error!(
+                                                        "Failed to send capacity rejection to {client}: {e}"
+                                                    );
+                                                }
+                                                continue;
+                                            }
+
                                             // Register the connection BEFORE replying, so any
                                             // client that has received its response is already
                                             // present in the roster (closes a connect race).
@@ -1542,6 +1935,9 @@ impl State {
     ) {
         let keep_alive_bytes = ServerMessagesEncrypted::KeepAlive.to_vec();
 
+        // In-progress upload for this connection, if any.
+        let mut upload: Option<Upload> = None;
+
         loop {
             let message = tokio::select! {
                 result = read.recv() => match result {
@@ -1624,6 +2020,65 @@ impl State {
                     self.chat_send(user.id, room, message, &user).await;
                 }
 
+                Ok(ServerMessagesEncrypted::FileListRequest { path }) => {
+                    let response = self.file_list(&path, &user).await;
+                    reply(&write, &addr, &response).await;
+                }
+
+                Ok(ServerMessagesEncrypted::FileDownloadRequest { path }) => {
+                    self.file_download(&path, &user, &write, &addr).await;
+                }
+
+                Ok(ServerMessagesEncrypted::FileUploadRequest { path, size }) => {
+                    // Discard any half-finished prior upload.
+                    if let Some(previous) = upload.take() {
+                        let _ = std::fs::remove_file(&previous.temp_path);
+                    }
+                    match self.file_upload_begin(&path, size, &user, user.id).await {
+                        Ok(started) => {
+                            upload = Some(started);
+                            reply(&write, &addr, &ClientMessagesEncrypted::FileUploadReady).await;
+                        }
+                        Err(e) => reply(&write, &addr, &file_error(e.to_string())).await,
+                    }
+                }
+
+                Ok(ServerMessagesEncrypted::FileUploadChunk { data }) => {
+                    if let Some(active) = upload.as_mut() {
+                        active.written += data.len() as u64;
+                        let too_big = active.max.is_some_and(|max| active.written > max);
+                        let write_failed =
+                            !too_big && std::io::Write::write_all(&mut active.file, &data).is_err();
+                        if too_big || write_failed {
+                            if let Some(aborted) = upload.take() {
+                                let _ = std::fs::remove_file(&aborted.temp_path);
+                            }
+                            let reason = if too_big {
+                                "Upload exceeds the size limit"
+                            } else {
+                                "Failed to write upload"
+                            };
+                            reply(&write, &addr, &file_error(reason)).await;
+                        }
+                    }
+                }
+
+                Ok(ServerMessagesEncrypted::FileUploadEnd) => {
+                    if let Some(finished) = upload.take() {
+                        let response = match finalize_upload(finished) {
+                            Ok(()) => ClientMessagesEncrypted::FileUploadComplete,
+                            Err(e) => file_error(e.to_string()),
+                        };
+                        reply(&write, &addr, &response).await;
+                    }
+                }
+
+                Ok(ServerMessagesEncrypted::FileDeleteRequest { path }) => {
+                    if let Some(err) = self.file_delete(&path, &user).await {
+                        reply(&write, &addr, &err).await;
+                    }
+                }
+
                 Ok(ServerMessagesEncrypted::DirectMessage {
                     to,
                     encrypted,
@@ -1669,8 +2124,12 @@ impl State {
             }
         }
 
-        // The client is gone: drop it from any chatrooms and the roster, tell
-        // everyone else, and refresh the user count advertised to trackers.
+        // The client is gone: discard any half-finished upload, then drop it
+        // from any chatrooms and the roster, tell everyone else, and refresh the
+        // user count advertised to trackers.
+        if let Some(pending) = upload {
+            let _ = std::fs::remove_file(&pending.temp_path);
+        }
         self.chat_leave_all(user.id, &user.display_name).await;
         self.connections.write().await.retain(|c| c.addr != addr);
         self.broadcast_user_list().await;
@@ -1680,6 +2139,7 @@ impl State {
     /// Perform an administrative request and reply to the requester. The caller
     /// (`handle_client`) has already confirmed the connection is an admin.
     #[inline]
+    #[allow(clippy::too_many_lines)]
     async fn handle_admin(
         &self,
         msg: ServerAdminMessagesEncrypted,
@@ -1763,6 +2223,24 @@ impl State {
             ServerAdminMessagesEncrypted::DeleteChatroom(id) => {
                 self.delete_chatroom(id).await.map(|()| ok)
             }
+            ServerAdminMessagesEncrypted::GetServerLimits => Ok(
+                ClientAdminMessagesEncrypted::ServerLimitsResponse(self.server_limits()),
+            ),
+            ServerAdminMessagesEncrypted::SetMaxUploadSize(max) => {
+                self.set_max_upload_size(max).await.map(|()| ok)
+            }
+            ServerAdminMessagesEncrypted::SetMaxConnections(max) => {
+                self.set_max_connections(max).await.map(|()| ok)
+            }
+            ServerAdminMessagesEncrypted::GetShareInfo => Ok(
+                ClientAdminMessagesEncrypted::ShareInfoResponse(self.share_info()),
+            ),
+            ServerAdminMessagesEncrypted::GetFileAcl(path) => self
+                .get_file_acl(&path)
+                .map(|acl| ClientAdminMessagesEncrypted::FileAclResponse { path, acl }),
+            ServerAdminMessagesEncrypted::SetFileAcl { path, acl } => {
+                self.set_file_acl(&path, &acl).map(|()| ok)
+            }
             // Unreachable: the caller only dispatches admin variants here.
             _ => return,
         };
@@ -1789,6 +2267,7 @@ impl State {
             anonymous: self.allow_anonymous.load(Ordering::Relaxed),
             users_connected: u32::try_from(self.connections.read().await.len()).unwrap_or_default(),
             chat_enabled: self.chat_enabled.load(Ordering::Relaxed),
+            sharing_enabled: self.share_directory.is_some(),
         }
     }
 
@@ -2512,6 +2991,39 @@ impl eframe::App for State {
 
 /// Send a single encrypted message to a client over its write half.
 #[inline]
+/// Build a file-operation error reply carrying a human-readable reason.
+fn file_error(reason: impl Into<String>) -> ClientMessagesEncrypted {
+    ClientMessagesEncrypted::Error(ServerError::ActionFailed(reason.into()))
+}
+
+/// In-progress upload for a single client connection: bytes are written to a
+/// reserved temp file and renamed into place on completion.
+struct Upload {
+    /// Temp file receiving the bytes.
+    temp_path: PathBuf,
+    /// Destination the temp file is renamed to on success.
+    final_path: PathBuf,
+    /// Open handle to the temp file.
+    file: std::fs::File,
+    /// Bytes written so far.
+    written: u64,
+    /// Optional maximum size, enforced as bytes arrive.
+    max: Option<u64>,
+}
+
+/// Finalize an upload: flush, ensure the destination is still free, then rename.
+fn finalize_upload(mut upload: Upload) -> Result<()> {
+    use std::io::Write;
+    upload.file.flush()?;
+    drop(upload.file); // close before renaming
+    if std::fs::symlink_metadata(&upload.final_path).is_ok() {
+        let _ = std::fs::remove_file(&upload.temp_path);
+        return Err(anyhow!("A file with that name already exists"));
+    }
+    std::fs::rename(&upload.temp_path, &upload.final_path)?;
+    Ok(())
+}
+
 async fn reply(
     write: &Arc<RwLock<EncryptedWrite<DEFAULT_REKEY_INTERVAL>>>,
     addr: &SocketAddr,
