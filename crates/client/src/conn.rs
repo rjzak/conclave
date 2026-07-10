@@ -24,7 +24,7 @@ type FileListing = (String, Vec<FileEntry>);
 type NamedAcl = (String, DirAcl);
 
 use anyhow::{Result, anyhow};
-use chrono::{DateTime, Duration, FixedOffset, Local};
+use chrono::{DateTime, Duration, Local};
 use conclave_common::admin::server::{
     AdminUser, Chatroom, ClientAdminMessagesEncrypted, CreateGroup, CreateUser, Group,
     GroupMembership, ServerAdminMessagesEncrypted, ServerLimits,
@@ -179,9 +179,10 @@ pub struct ConclaveConnection {
     /// When the connection was established
     pub(crate) connection_time: DateTime<Local>,
 
-    /// This viewer's own shared timezone (the offset sent at connect), so the
-    /// GUI can show other users' offsets relative to us. `None` if not shared.
-    pub(crate) own_timezone: Option<DateTime<FixedOffset>>,
+    /// This viewer's own shared timezone (whole hours relative to GMT sent at
+    /// connect), so the GUI can show other users' offsets relative to us.
+    /// `None` if not shared.
+    pub(crate) own_timezone: Option<i16>,
 
     /// Process-unique id for this connection, distinguishing it from other
     /// connections (including a second connection to the same server).
@@ -196,7 +197,7 @@ impl ConclaveConnection {
         info: ServerInformation,
         display_name: &str,
         signing_key: SigningKey,
-        own_timezone: Option<DateTime<FixedOffset>>,
+        own_timezone: Option<i16>,
     ) -> Self {
         let (mut read, write) = conn.into_split();
         let server_info = Arc::new(std::sync::RwLock::new(info));
@@ -456,13 +457,13 @@ impl ConclaveConnection {
     /// A process-unique id for this connection, so two connections (even to the
     /// same server) can be distinguished when keying GUI windows.
     #[must_use]
-    pub fn local_id(&self) -> u16 {
+    pub const fn local_id(&self) -> u16 {
         self.local_id
     }
 
-    /// This viewer's own shared timezone on this connection, if shared.
+    /// This viewer's own shared timezone (whole hours east of GMT), if shared.
     #[must_use]
-    pub fn own_timezone(&self) -> Option<DateTime<FixedOffset>> {
+    pub const fn own_timezone(&self) -> Option<i16> {
         self.own_timezone
     }
 

@@ -313,46 +313,32 @@ fn styled_name(text: &str, color: Option<egui::Color32>, idle: bool) -> egui::Ri
     }
 }
 
-/// Describe another user's timezone relative to the viewing user's, rounded to
-/// whole hours. Both offsets are the timezones the two users shared with the
-/// server (the viewer's `ours`, the other user's `theirs`); the server's own
-/// timezone is never involved. `None` for either means it was not shared.
+/// Describe another user's timezone relative to the viewing user's, in whole
+/// hours. Both are the hours-east-of-GMT the two users shared with the server
+/// (the viewer's `ours`, the other user's `theirs`); the server's own timezone
+/// is never involved. `None` for either means it was not shared.
 #[inline]
-fn timezone_offset_text(
-    theirs: Option<chrono::DateTime<chrono::FixedOffset>>,
-    ours: Option<chrono::DateTime<chrono::FixedOffset>>,
-) -> String {
-    use chrono::Offset;
-
+fn timezone_offset_text(theirs: Option<i16>, ours: Option<i16>) -> String {
     let Some(theirs) = theirs else {
         return "Timezone: not shared".to_string();
     };
-    let their_offset = theirs.offset().fix().local_minus_utc();
 
     let Some(ours) = ours else {
         // We don't know our own timezone, so show the other user's absolute
-        // offset from UTC instead of a difference.
-        let hours = round_secs_to_hours(i64::from(their_offset));
-        return match hours.cmp(&0) {
-            std::cmp::Ordering::Greater => format!("Timezone: UTC+{hours}"),
-            std::cmp::Ordering::Less => format!("Timezone: UTC{hours}"),
-            std::cmp::Ordering::Equal => "Timezone: UTC".to_string(),
+        // offset from GMT instead of a difference.
+        return match theirs.cmp(&0) {
+            std::cmp::Ordering::Greater => format!("Timezone: GMT+{theirs}"),
+            std::cmp::Ordering::Less => format!("Timezone: GMT{theirs}"),
+            std::cmp::Ordering::Equal => "Timezone: GMT".to_string(),
         };
     };
-    let our_offset = ours.offset().fix().local_minus_utc();
 
-    let hours = round_secs_to_hours(i64::from(their_offset - our_offset));
-    match hours.cmp(&0) {
-        std::cmp::Ordering::Greater => format!("Timezone: {hours}h ahead of you"),
-        std::cmp::Ordering::Less => format!("Timezone: {}h behind you", hours.abs()),
+    let diff = theirs - ours;
+    match diff.cmp(&0) {
+        std::cmp::Ordering::Greater => format!("Timezone: {diff}h ahead of you"),
+        std::cmp::Ordering::Less => format!("Timezone: {}h behind you", diff.abs()),
         std::cmp::Ordering::Equal => "Timezone: same as yours".to_string(),
     }
-}
-
-/// Round a number of seconds to the nearest whole hour (halves away from zero),
-/// without floating point.
-fn round_secs_to_hours(secs: i64) -> i64 {
-    (secs + if secs >= 0 { 1800 } else { -1800 }) / 3600
 }
 
 /// Parse host and port from a `"conclave://host:port"` URL.

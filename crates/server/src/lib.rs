@@ -2271,9 +2271,11 @@ impl State {
         }
     }
 
-    /// Send a message to every connected client.
+    /// Send a message to every connected client. Serialized once, then sent to
+    /// all clients concurrently so a slow client cannot delay delivery to the
+    /// rest.
     async fn broadcast(&self, message: &ClientMessagesEncrypted) {
-        let bytes = message.to_vec();
+        let bytes = Arc::new(message.to_vec());
 
         // Clone the write-half handles out from under the read lock, then send
         // without holding the connections lock.
@@ -2285,11 +2287,15 @@ impl State {
             .map(|c| c.conn.clone())
             .collect();
 
-        for writer in writers {
-            if let Err(e) = writer.write().await.send(&bytes).await {
-                error!("Failed to broadcast message: {e}");
+        let sends = writers.into_iter().map(|writer| {
+            let bytes = Arc::clone(&bytes);
+            async move {
+                if let Err(e) = writer.write().await.send(&bytes).await {
+                    error!("Failed to broadcast message: {e}");
+                }
             }
-        }
+        });
+        futures::future::join_all(sends).await;
     }
 
     /// Send the current connected-users list to every connected client so their

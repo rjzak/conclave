@@ -545,9 +545,14 @@ impl Client {
             EncryptedStream::connect(stream, &key, Some(&signing_key)).await?;
         info!("Client: EncryptedStream created");
 
-        // Carry our real UTC offset so peers can compute the difference; keep a
-        // copy so the GUI can show offsets relative to *us*, the viewer.
-        let own_timezone = share_time.then(|| chrono::Local::now().fixed_offset());
+        // Share our timezone as whole hours relative to GMT so peers can compute the
+        // difference; keep a copy so the GUI shows offsets relative to us.
+        let own_timezone: Option<i16> = share_time.then(|| {
+            let seconds = chrono::Local::now().offset().local_minus_utc();
+            // Round to the nearest hour (halves away from zero).
+            let hours = (seconds + if seconds >= 0 { 1800 } else { -1800 }) / 3600;
+            i16::try_from(hours).unwrap_or(0)
+        });
         let login = ServerMessagesEncrypted::ServerAuthenticationRequest((
             display_name.clone(),
             own_timezone,

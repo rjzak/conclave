@@ -3,7 +3,7 @@
 use crate::admin::server::{ClientAdminMessagesEncrypted, ServerAdminMessagesEncrypted};
 use crate::files::FileEntry;
 
-use chrono::{DateTime, Duration, FixedOffset, Utc};
+use chrono::{DateTime, Duration, Utc};
 pub use ed25519_dalek::VerifyingKey;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -245,10 +245,9 @@ pub struct ConnectedUser {
     /// with one. Lets other users end-to-end encrypt direct messages to them.
     pub public_key: Option<[u8; 32]>,
 
-    /// User-provided local time, carrying their real UTC offset so other users
-    /// can compute the timezone difference. A fixed offset (not `Local`) so the
-    /// original offset survives being relayed through the server.
-    pub timezone: Option<DateTime<FixedOffset>>,
+    /// The user's timezone as whole hours relative to GMT (e.g. `-5`, `2`), if
+    /// shared. Other users compute the difference against their own.
+    pub timezone: Option<i16>,
 }
 
 /// Extra, on-demand information about a connected user. The base fields (display
@@ -279,15 +278,9 @@ pub enum ServerMessagesEncrypted {
     ServerInformationRequest,
 
     /// User tries to authenticate
-    /// Send the display name and the optional authentication message
+    /// Send the display name and the optional timezone offset and authentication message
     /// Server responds with Server Information if successful
-    ServerAuthenticationRequest(
-        (
-            String,
-            Option<DateTime<FixedOffset>>,
-            Option<UserAuthentication>,
-        ),
-    ),
+    ServerAuthenticationRequest((String, Option<i16>, Option<UserAuthentication>)),
 
     /// Ask the server for a list of connected users
     ListConnectedUsersRequest,
