@@ -4,11 +4,9 @@ use std::io;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use chacha20poly1305::aead::OsRng;
-use chacha20poly1305::aead::rand_core::RngCore;
 use chacha20poly1305::{
-    Key, XChaCha20Poly1305, XNonce,
-    aead::{Aead, KeyInit},
+    XChaCha20Poly1305, XNonce,
+    aead::{Aead, Generate, KeyInit},
 };
 pub use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
@@ -57,7 +55,7 @@ struct DirectionalCrypto<const REKEY_INTERVAL: u16> {
 impl<const REKEY_INTERVAL: u16> DirectionalCrypto<REKEY_INTERVAL> {
     fn new(key: [u8; 32]) -> Self {
         Self {
-            cipher: XChaCha20Poly1305::new(Key::from_slice(&key)),
+            cipher: XChaCha20Poly1305::new((&key).into()),
             key,
             count: 0,
         }
@@ -68,7 +66,7 @@ impl<const REKEY_INTERVAL: u16> DirectionalCrypto<REKEY_INTERVAL> {
         let mut new_key = [0u8; 32];
         hk.expand(REKEY_INFO, &mut new_key)
             .map_err(|_| anyhow!("Rekey failed"))?;
-        self.cipher = XChaCha20Poly1305::new(Key::from_slice(&new_key));
+        self.cipher = XChaCha20Poly1305::new((&new_key).into());
         self.key = new_key;
         self.count = 0;
         Ok(())
@@ -91,7 +89,7 @@ impl<const REKEY_INTERVAL: u16> DirectionalCrypto<REKEY_INTERVAL> {
 
         let mut nonce_bytes = [0u8; 24];
         stream.read_exact(&mut nonce_bytes).await?;
-        let nonce = XNonce::from_slice(&nonce_bytes);
+        let nonce: &XNonce = (&nonce_bytes).into();
 
         let ciphertext_len = len as usize - 24;
         let mut buf = vec![0u8; ciphertext_len];
@@ -124,9 +122,8 @@ impl<const REKEY_INTERVAL: u16> DirectionalCrypto<REKEY_INTERVAL> {
         }
 
         // Generate random 192-bit nonce
-        let mut nonce_bytes = [0u8; 24];
-        OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = XNonce::from_slice(&nonce_bytes);
+        let nonce_bytes: [u8; 24] = Generate::generate();
+        let nonce: &XNonce = (&nonce_bytes).into();
 
         // Ciphertext length = nonce (24) + plaintext + 16-byte tag
         let len = u32::try_from(24 + data.len() + 16)?;
@@ -514,10 +511,7 @@ fn derive_key(info: &[u8], shared: &[u8]) -> [u8; 32] {
 /// Generate random keypair
 #[must_use]
 pub fn random_keypair() -> (SigningKey, VerifyingKey) {
-    let mut bytes = [0u8; 32];
-    let mut rng = OsRng;
-
-    rng.fill_bytes(&mut bytes);
+    let bytes: [u8; 32] = Generate::generate();
     let signing = SigningKey::from_bytes(&bytes);
     let verifying = signing.verifying_key();
     (signing, verifying)

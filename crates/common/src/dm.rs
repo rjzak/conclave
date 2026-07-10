@@ -10,9 +10,8 @@
 //! key out of band to detect a server substituting its own key.
 
 use anyhow::{Result, anyhow};
-use chacha20poly1305::aead::rand_core::RngCore;
-use chacha20poly1305::aead::{Aead, OsRng};
-use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce};
+use chacha20poly1305::aead::{Aead, Generate};
+use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
 use sha2::{Digest, Sha384};
 
@@ -49,12 +48,13 @@ pub fn shared_key(my_signing: &SigningKey, their_verifying: &VerifyingKey) -> [u
 ///
 /// Never in practice: XChaCha20-Poly1305 encryption cannot fail.
 #[must_use]
+#[track_caller]
 pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
-    let mut nonce_bytes = [0u8; NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce_bytes);
+    let cipher = XChaCha20Poly1305::new(key.into());
+    let nonce_bytes: [u8; NONCE_LEN] = Generate::generate();
+    let nonce: &XNonce = (&nonce_bytes).into();
     let ciphertext = cipher
-        .encrypt(XNonce::from_slice(&nonce_bytes), plaintext)
+        .encrypt(nonce, plaintext)
         .expect("XChaCha20-Poly1305 encryption never fails");
     let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
     out.extend_from_slice(&nonce_bytes);
@@ -72,9 +72,10 @@ pub fn decrypt(key: &[u8; 32], data: &[u8]) -> Result<Vec<u8>> {
         return Err(anyhow!("Direct message too short"));
     }
     let (nonce_bytes, ciphertext) = data.split_at(NONCE_LEN);
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = XChaCha20Poly1305::new(key.into());
+    let nonce = <&XNonce>::try_from(nonce_bytes).map_err(|_| anyhow!("Invalid nonce"))?;
     cipher
-        .decrypt(XNonce::from_slice(nonce_bytes), ciphertext)
+        .decrypt(nonce, ciphertext)
         .map_err(|e| anyhow!("Direct message decryption failed: {e}"))
 }
 
