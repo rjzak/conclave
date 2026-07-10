@@ -51,6 +51,9 @@ pub const MDNS_KEY: &str = "key";
 /// Multicast DNS property for the server's version
 pub const MDNS_VERSION: &str = "version";
 
+/// DNS SRV record if just given a domain name without a port
+pub const DNS_SRV_RECORD: &str = "_conclave._tcp.conclave-srv.";
+
 /// Initialize tracing
 pub fn init_tracing() {
     use std::sync::Once;

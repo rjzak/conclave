@@ -4,7 +4,7 @@ use conclave_client::config::{BookmarkEntry, KnownHost, UserAuth};
 use conclave_client::conn::{ChatLine, ConclaveConnection};
 use conclave_client::{Client, DiscoveredServer, discover_servers};
 use conclave_common::server::{
-    ConnectedUser, IDLE_TIMEOUT_MINUTES, UserAuthentication, VerifyingKey,
+    ChatroomInfo, ConnectedUser, IDLE_TIMEOUT_MINUTES, UserAuthentication, VerifyingKey,
 };
 use conclave_common::tracker::{Advertise, Tracker, TrackerWithKey};
 
@@ -413,6 +413,23 @@ struct PendingServer {
     anonymous_allowed: bool,
 }
 
+/// A per-server entry for the Servers menu, snapshotted each frame.
+struct MenuServer {
+    /// Composite window key (`{server_key}:{local_id}`), matching the windows.
+    key: String,
+    /// Display label: the server name, plus the display name when the server
+    /// has more than one connection.
+    label: String,
+    /// Whether the server shares a file directory.
+    sharing: bool,
+    /// Whether this connection holds admin rights.
+    is_admin: bool,
+    /// Whether chat is enabled on the server.
+    chat_enabled: bool,
+    /// Chatrooms this user may access on the server.
+    rooms: Vec<ChatroomInfo>,
+}
+
 /// GUI client state
 #[derive(Debug)]
 #[allow(clippy::struct_excessive_bools)]
@@ -490,6 +507,12 @@ pub struct ConclaveGUI {
 
     /// Show the "Connected Servers" window
     show_servers_window: bool,
+
+    /// Show the About window
+    show_about: bool,
+
+    /// About window close flag, set by its viewport closure
+    about_closed: Arc<AtomicBool>,
 
     /// Connected Servers window close flag
     servers_window_closed: Arc<AtomicBool>,
@@ -569,6 +592,8 @@ impl ConclaveGUI {
             show_direct_connect: false,
             login_window_closed: Arc::new(AtomicBool::new(false)),
             show_servers_window: false,
+            show_about: false,
+            about_closed: Arc::new(AtomicBool::new(false)),
             servers_window_closed: Arc::new(AtomicBool::new(false)),
             open_user_windows: Arc::new(RwLock::new(HashSet::new())),
             open_admin_windows: Arc::new(RwLock::new(HashSet::new())),
@@ -607,6 +632,9 @@ impl eframe::App for ConclaveGUI {
         }
         if self.bookmarks_viewport_closed.swap(false, Ordering::SeqCst) {
             self.show_bookmarks_window = false;
+        }
+        if self.about_closed.swap(false, Ordering::SeqCst) {
+            self.show_about = false;
         }
 
         // Keep the live tracker-server subscription running exactly while the
@@ -673,12 +701,101 @@ impl eframe::App for ConclaveGUI {
             ui.ctx().request_repaint();
         }
 
+        // Snapshot of connections for the Servers menu, keyed the same way as
+        // the per-server windows so a menu item opens the correct window. If a
+        // server has more than one connection, its display name disambiguates.
+        let menu_servers: Vec<MenuServer> = {
+            let conns = self
+                .active_connections
+                .read()
+                .map(|c| c.clone())
+                .unwrap_or_default();
+            let mut counts: HashMap<String, usize> = HashMap::new();
+            for conn in &conns {
+                *counts
+                    .entry(hex::encode(conn.server_info().key.as_bytes()))
+                    .or_default() += 1;
+            }
+            conns
+                .iter()
+                .map(|conn| {
+                    let info = conn.server_info();
+                    let server_key = hex::encode(info.key.as_bytes());
+                    let key = format!("{server_key}:{}", conn.local_id());
+                    let label = if counts.get(&server_key).is_some_and(|&n| n > 1) {
+                        format!("{} ({})", info.name, conn.display_name())
+                    } else {
+                        info.name.clone()
+                    };
+                    MenuServer {
+                        key,
+                        label,
+                        sharing: info.sharing_enabled,
+                        is_admin: conn.is_admin(),
+                        chat_enabled: info.chat_enabled,
+                        rooms: conn.chatrooms_available(),
+                    }
+                })
+                .collect()
+        };
+
         // ── Top-bar menu ──────────────────────────────────────────────────
         egui::Panel::top("top_panel").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
+                    if ui.button("About").clicked() {
+                        self.show_about = true;
+                    }
+                    ui.separator();
                     if ui.button("Quit").clicked() {
                         ui.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+                ui.menu_button("Servers", |ui| {
+                    if menu_servers.is_empty() {
+                        ui.add_enabled(false, egui::Button::new("Not connected to any server"));
+                    }
+                    for server in &menu_servers {
+                        ui.menu_button(&server.label, |ui| {
+                            if ui.button("Users").clicked()
+                                && let Ok(mut open) = self.open_user_windows.write()
+                            {
+                                open.insert(server.key.clone());
+                            }
+                            // Chat: a submenu of the server's rooms when enabled,
+                            // greyed out otherwise.
+                            if server.chat_enabled {
+                                ui.menu_button("Chat", |ui| {
+                                    if server.rooms.is_empty() {
+                                        ui.add_enabled(
+                                            false,
+                                            egui::Button::new("No chatrooms available"),
+                                        );
+                                    }
+                                    for room in &server.rooms {
+                                        if ui.button(&room.name).clicked()
+                                            && let Ok(mut open) = self.open_chats.write()
+                                        {
+                                            open.insert((server.key.clone(), room.id));
+                                        }
+                                    }
+                                });
+                            } else {
+                                ui.add_enabled(false, egui::Button::new("Chat"));
+                            }
+                            if server.sharing
+                                && ui.button("Files").clicked()
+                                && let Ok(mut open) = self.open_file_windows.write()
+                            {
+                                open.insert(server.key.clone());
+                            }
+                            if server.is_admin
+                                && ui.button("Admin").clicked()
+                                && let Ok(mut open) = self.open_admin_windows.write()
+                            {
+                                open.insert(server.key.clone());
+                            }
+                        });
                     }
                 });
                 ui.menu_button("View", |ui| {
@@ -695,6 +812,34 @@ impl eframe::App for ConclaveGUI {
                 egui::widgets::global_theme_preference_buttons(ui);
             });
         });
+
+        // ── About window ──────────────────────────────────────────────────
+        if self.show_about {
+            let closed = self.about_closed.clone();
+            ui.ctx().show_viewport_deferred(
+                egui::ViewportId::from_hash_of("about_window"),
+                egui::ViewportBuilder::default()
+                    .with_title("About Conclave")
+                    .with_inner_size([300.0, 150.0])
+                    .with_resizable(false),
+                move |ctx, _class| {
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        closed.store(true, Ordering::SeqCst);
+                        ctx.request_repaint_of(egui::ViewportId::ROOT);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(16.0);
+                            ui.heading("Conclave");
+                            ui.add_space(8.0);
+                            ui.label(format!("Version {}", env!("CONCLAVE_VERSION")));
+                            ui.label(format!("Built {}", env!("CONCLAVE_BUILD_DATE")));
+                        });
+                    });
+                },
+            );
+        }
 
         // ── Server Discovery viewport ─────────────────────────────────────
         if self.show_advertised_servers_list {
