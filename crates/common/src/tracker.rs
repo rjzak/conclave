@@ -192,6 +192,9 @@ pub struct Advertise {
     /// Number of users currently connected to the server
     pub users_connected: u32,
 
+    /// Maximum number of users allowed on the server
+    pub max_users: u16,
+
     /// For how long the server has been running
     pub uptime: Duration,
 

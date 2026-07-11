@@ -486,6 +486,12 @@ pub struct ConclaveGUI {
     /// Async connect operation is in-flight
     connect_pending: Arc<AtomicBool>,
 
+    /// A successful SRV lookup `(host, port)` to apply to the Direct Connect form
+    srv_result: Arc<RwLock<Option<(String, u16)>>>,
+
+    /// An SRV lookup for the Direct Connect form is in-flight
+    srv_pending: Arc<AtomicBool>,
+
     /// Error from the most recent connect attempt
     connect_error: Arc<RwLock<Option<String>>>,
 
@@ -585,6 +591,8 @@ impl ConclaveGUI {
             tracker_servers_watch: None,
             pending_server: Arc::new(RwLock::new(None)),
             connect_pending: Arc::new(AtomicBool::new(false)),
+            srv_result: Arc::new(RwLock::new(None)),
+            srv_pending: Arc::new(AtomicBool::new(false)),
             connect_error: Arc::new(RwLock::new(None)),
             active_connections: Arc::new(RwLock::new(Vec::new())),
             default_display_name,
@@ -697,6 +705,7 @@ impl eframe::App for ConclaveGUI {
             || self.connect_pending.load(Ordering::SeqCst)
             || self.tracker_op_pending.load(Ordering::SeqCst)
             || self.bookmarks_op_pending.load(Ordering::SeqCst)
+            || self.srv_pending.load(Ordering::SeqCst)
         {
             ui.ctx().request_repaint();
         }
@@ -794,6 +803,30 @@ impl eframe::App for ConclaveGUI {
                                 && let Ok(mut open) = self.open_admin_windows.write()
                             {
                                 open.insert(server.key.clone());
+                            }
+                            ui.separator();
+                            if ui.button("Disconnect").clicked() {
+                                // Reconstruct each connection's composite key to
+                                // find and remove the exact one to disconnect.
+                                let removed =
+                                    self.active_connections.write().ok().and_then(|mut c| {
+                                        let idx = c.iter().position(|conn| {
+                                            format!(
+                                                "{}:{}",
+                                                hex::encode(conn.server_info().key),
+                                                conn.local_id()
+                                            ) == server.key
+                                        });
+                                        idx.map(|i| c.remove(i))
+                                    });
+                                if let Some(conn) = removed {
+                                    if let Ok(mut o) = self.open_user_windows.write() {
+                                        o.remove(&server.key);
+                                    }
+                                    tokio::spawn(async move {
+                                        let _ = conn.disconnect().await;
+                                    });
+                                }
                             }
                         });
                     }
@@ -2990,33 +3023,72 @@ impl eframe::App for ConclaveGUI {
                             .ctx()
                             .data(|d| d.get_temp(port_id).unwrap_or_else(|| "9101".to_string()));
 
+                        // A completed SRV lookup fills in the resolved host and
+                        // port so the user can see and use them.
+                        if let Some((srv_host, srv_port)) =
+                            self.srv_result.write().ok().and_then(|mut r| r.take())
+                        {
+                            host = srv_host;
+                            port_str = srv_port.to_string();
+                        }
+
                         ui.horizontal(|ui| {
                             ui.label("Host:");
                             ui.text_edit_singleline(&mut host);
                             ui.label("Port:");
-                            ui.add(egui::TextEdit::singleline(&mut port_str).desired_width(60.0));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut port_str)
+                                    .desired_width(60.0)
+                                    .hint_text("SRV"),
+                            );
                         });
 
                         let port_ok = port_str.parse::<u16>().is_ok();
-                        let can_connect = !host.is_empty() && port_ok && !bm_is_pending;
+                        let no_port = port_str.trim().is_empty();
+                        let srv_pending = self.srv_pending.load(Ordering::SeqCst);
+                        // Connecting is allowed with a valid port, or with no
+                        // port (which triggers an SRV lookup instead).
+                        let can_connect = !host.is_empty()
+                            && (port_ok || no_port)
+                            && !bm_is_pending
+                            && !srv_pending;
 
                         ui.add_space(4.0);
                         if ui
                             .add_enabled(can_connect, egui::Button::new("Connect"))
                             .clicked()
                         {
-                            let port = port_str.parse::<u16>().unwrap_or(9101);
-                            if let Ok(mut p) = self.pending_server.write() {
-                                *p = Some(PendingServer {
-                                    host: host.clone(),
-                                    port,
-                                    key: None,
-                                    name: format!("{host}:{port}"),
-                                    anonymous_allowed: true,
+                            if no_port {
+                                // No port: look up the SRV record and, if
+                                // successful, fill in the host and port above.
+                                // Errors are ignored.
+                                self.srv_pending.store(true, Ordering::SeqCst);
+                                let lookup_host = host.clone();
+                                let result = self.srv_result.clone();
+                                let pending = self.srv_pending.clone();
+                                tokio::spawn(async move {
+                                    if let Ok(found) =
+                                        conclave_client::lookup_srv_record(&lookup_host).await
+                                        && let Ok(mut slot) = result.write()
+                                    {
+                                        *slot = Some(found);
+                                    }
+                                    pending.store(false, Ordering::SeqCst);
                                 });
-                            }
-                            if let Ok(mut e) = self.connect_error.write() {
-                                *e = None;
+                            } else {
+                                let port = port_str.parse::<u16>().unwrap_or(9101);
+                                if let Ok(mut p) = self.pending_server.write() {
+                                    *p = Some(PendingServer {
+                                        host: host.clone(),
+                                        port,
+                                        key: None,
+                                        name: format!("{host}:{port}"),
+                                        anonymous_allowed: true,
+                                    });
+                                }
+                                if let Ok(mut e) = self.connect_error.write() {
+                                    *e = None;
+                                }
                             }
                         }
 
