@@ -20,6 +20,7 @@ base64 = { workspace = true, features = ["alloc"] }
 clap = { workspace = true, features = ["color", "derive", "help", "std", "suggestions"] }
 chrono = { workspace = true, features = ["clock", "serde", "std"] }
 dashmap = { workspace = true, features = ["inline"] }
+domain = { workspace = true, features = ["resolv"] }
 eframe = { workspace = true, features = ["accesskit", "default_fonts", "serde", "wayland", "wgpu", "x11"] }
 hex = { workspace = true, features = ["alloc"] }
 home = { workspace = true }

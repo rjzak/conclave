@@ -640,6 +640,48 @@ pub struct DiscoveredServer {
     pub anonymous_allowed: bool,
 }
 
+/// Look up the Conclave SRV record for `domain`, returning the target host (or
+/// IP) and port. The query name is [`conclave_common::DNS_SRV_RECORD`] followed
+/// by `domain`, resolved using the system's DNS configuration.
+///
+/// # Errors
+///
+/// Returns an error if the names are invalid, if there isn't a SRV record, or the DNS query fails.
+pub async fn lookup_srv_record(domain: &str) -> Result<(String, u16)> {
+    use domain::base::name::{Name, RelativeName};
+    use domain::resolv::StubResolver;
+
+    // `lookup_srv` joins the relative service prefix with the domain itself, so
+    // pass only the prefix here (the const, minus its trailing root dot) — not
+    // the full name, or the domain would be appended twice.
+    let service = RelativeName::<Vec<u8>>::from_chars(
+        conclave_common::DNS_SRV_RECORD
+            .trim_end_matches('.')
+            .chars(),
+    )
+    .map_err(|e| anyhow!("Invalid SRV service label: {e}"))?;
+    let name = Name::<Vec<u8>>::from_chars(domain.chars())
+        .map_err(|e| anyhow!("Invalid domain {domain}: {e}"))?;
+
+    let resolver = StubResolver::new();
+    let found = resolver
+        .lookup_srv(service, name, 0)
+        .await
+        .map_err(|e| anyhow!("SRV lookup for {domain} failed: {e}"))?
+        .ok_or_else(|| anyhow!("The Conclave service is unavailable at {domain}"))?;
+
+    let srv = found
+        .into_srvs()
+        .next()
+        .ok_or_else(|| anyhow!("No SRV entries for {domain}"))?;
+
+    // Strip the trailing root dot for a plain, connectable host name.
+    let host = srv.target().to_string().trim_end_matches('.').to_string();
+    let port = srv.port();
+    ensure!(port > 0, "Invalid port {port} for {domain}");
+    Ok((host, port))
+}
+
 /// Discover local Conclave servers using Multicast DNS
 ///
 /// # Errors
@@ -771,4 +813,13 @@ async fn stop_or_delay(stop: &mut tokio::sync::watch::Receiver<bool>) -> bool {
         _ = stop.changed() => true,
         () = tokio::time::sleep(RECONNECT_DELAY) => false,
     }
+}
+
+#[tokio::test]
+#[ignore = "Don't test in CI"]
+async fn test_srv() {
+    let response = lookup_srv_record("richardzak.md").await.unwrap();
+    println!("Got: {response:?}");
+    assert_eq!(response.1, 1122);
+    assert_eq!(response.0, "conclave.richardzak.md");
 }
