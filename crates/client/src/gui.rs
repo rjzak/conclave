@@ -314,6 +314,87 @@ fn styled_name(text: &str, color: Option<egui::Color32>, idle: bool) -> egui::Ri
     }
 }
 
+/// Decode an avatar PNG into an egui texture, caching it in the context's data
+/// store keyed by content hash so each distinct avatar is decoded and uploaded
+/// only once. Returns `None` if the bytes cannot be decoded.
+fn avatar_texture(ctx: &egui::Context, png: &[u8]) -> Option<egui::TextureHandle> {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    png.hash(&mut hasher);
+    let hash = hasher.finish();
+    let id = egui::Id::new(("avatar_tex", hash));
+
+    if let Some(texture) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return Some(texture);
+    }
+
+    let (rgba, edge) = conclave_client::avatar::decode_rgba(png).ok()?;
+    let image = egui::ColorImage::from_rgba_unmultiplied([edge, edge], &rgba);
+    let texture = ctx.load_texture(
+        format!("avatar_{hash:x}"),
+        image,
+        egui::TextureOptions::LINEAR,
+    );
+    ctx.data_mut(|d| d.insert_temp(id, texture.clone()));
+    Some(texture)
+}
+
+/// Draw a user's avatar at the standard display size. Users without an avatar
+/// (or whose avatar fails to decode) get nothing, so their row keeps its natural
+/// text height rather than being padded to the avatar size.
+fn show_avatar(ui: &mut egui::Ui, avatar: Option<&[u8]>) {
+    let edge = f32::from(u16::try_from(conclave_client::avatar::DISPLAY_SIZE).unwrap_or(32));
+    if let Some(bytes) = avatar
+        && let Some(texture) = avatar_texture(ui.ctx(), bytes)
+    {
+        ui.add(egui::Image::new(&texture).fit_to_exact_size(egui::vec2(edge, edge)));
+    }
+}
+
+/// Grab the current clipboard image and normalise it to a canonical avatar PNG.
+fn load_clipboard_avatar() -> anyhow::Result<Vec<u8>> {
+    let mut clipboard = arboard::Clipboard::new()?;
+    let image = clipboard.get_image()?;
+    let width = u32::try_from(image.width)?;
+    let height = u32::try_from(image.height)?;
+    conclave_client::avatar::normalize_rgba(image.bytes.as_ref(), width, height)
+}
+
+/// Prompt for an image file and normalise it to a canonical avatar PNG. Returns
+/// `Ok(None)` when the user cancels the dialog.
+fn load_file_avatar() -> anyhow::Result<Option<Vec<u8>>> {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("Images", &["png", "jpg", "jpeg"])
+        .pick_file()
+    else {
+        return Ok(None);
+    };
+    let data = std::fs::read(path)?;
+    Ok(Some(conclave_client::avatar::normalize_encoded(&data)?))
+}
+
+/// Persist the avatar to the config off the UI thread, recording any error.
+fn spawn_set_avatar(
+    client: &Arc<Client>,
+    pending: &Arc<AtomicBool>,
+    error: &Arc<RwLock<Option<String>>>,
+    avatar: Option<Vec<u8>>,
+) {
+    let client = client.clone();
+    let pending = pending.clone();
+    let error = error.clone();
+    pending.store(true, Ordering::SeqCst);
+    tokio::spawn(async move {
+        if let Err(e) = client.set_avatar(avatar).await
+            && let Ok(mut err) = error.write()
+        {
+            *err = Some(e.to_string());
+        }
+        pending.store(false, Ordering::SeqCst);
+    });
+}
+
 /// Describe another user's timezone relative to the viewing user's, in whole
 /// hours. Both are the hours-east-of-GMT the two users shared with the server
 /// (the viewer's `ours`, the other user's `theirs`); the server's own timezone
@@ -369,6 +450,7 @@ fn spawn_connect(
     display_name: String,
     auth: Option<UserAuthentication>,
     key: Option<VerifyingKey>,
+    avatar: Option<Vec<u8>>,
 ) {
     connect_pending.store(true, Ordering::SeqCst);
     if let Ok(mut e) = connect_error.write() {
@@ -377,7 +459,7 @@ fn spawn_connect(
 
     tokio::spawn(async move {
         match client
-            .connect(&host, port, share_time, display_name, auth, key)
+            .connect(&host, port, share_time, display_name, auth, key, avatar)
             .await
         {
             Ok(conn) => {
@@ -521,6 +603,22 @@ pub struct ConclaveGUI {
     /// About window close flag, set by its viewport closure
     about_closed: Arc<AtomicBool>,
 
+    /// Show the Settings window
+    show_settings: bool,
+
+    /// Settings window close flag, set by its viewport closure
+    settings_closed: Arc<AtomicBool>,
+
+    /// A settings operation (saving the avatar) is in flight
+    settings_pending: Arc<AtomicBool>,
+
+    /// Any error from the most recent settings operation
+    settings_error: Arc<RwLock<Option<String>>>,
+
+    /// Working copy of the user's avatar (a 512×512 PNG), edited in the Settings
+    /// window and persisted to the config on change.
+    settings_avatar: Arc<RwLock<Option<Vec<u8>>>>,
+
     /// Connected Servers window close flag
     servers_window_closed: Arc<AtomicBool>,
 
@@ -574,6 +672,7 @@ impl ConclaveGUI {
     pub fn new(client: Client, _cc: &eframe::CreationContext<'_>) -> Self {
         let default_display_name = client.default_display_name();
         let default_share_timezone = client.default_share_timezone();
+        let avatar = client.avatar();
         Self {
             client: Arc::new(client),
             show_advertised_servers_list: false,
@@ -603,6 +702,11 @@ impl ConclaveGUI {
             show_servers_window: false,
             show_about: false,
             about_closed: Arc::new(AtomicBool::new(false)),
+            show_settings: false,
+            settings_closed: Arc::new(AtomicBool::new(false)),
+            settings_pending: Arc::new(AtomicBool::new(false)),
+            settings_error: Arc::new(RwLock::new(None)),
+            settings_avatar: Arc::new(RwLock::new(avatar)),
             servers_window_closed: Arc::new(AtomicBool::new(false)),
             open_user_windows: Arc::new(RwLock::new(HashSet::new())),
             open_admin_windows: Arc::new(RwLock::new(HashSet::new())),
@@ -644,6 +748,9 @@ impl eframe::App for ConclaveGUI {
         }
         if self.about_closed.swap(false, Ordering::SeqCst) {
             self.show_about = false;
+        }
+        if self.settings_closed.swap(false, Ordering::SeqCst) {
+            self.show_settings = false;
         }
 
         // Keep the live tracker-server subscription running exactly while the
@@ -753,6 +860,9 @@ impl eframe::App for ConclaveGUI {
         egui::Panel::top("top_panel").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
+                    if ui.button("Settings").clicked() {
+                        self.show_settings = true;
+                    }
                     if ui.button("About").clicked() {
                         self.show_about = true;
                     }
@@ -871,6 +981,155 @@ impl eframe::App for ConclaveGUI {
                             ui.label(format!("Built {}", env!("CONCLAVE_BUILD_DATE")));
                         });
                     });
+                },
+            );
+        }
+
+        // ── Settings viewport ─────────────────────────────────────────────
+        if self.show_settings {
+            let closed = self.settings_closed.clone();
+            let error_arc = self.settings_error.clone();
+            let pending_arc = self.settings_pending.clone();
+            let avatar_arc = self.settings_avatar.clone();
+            let client_arc = self.client.clone();
+
+            ui.ctx().show_viewport_deferred(
+                egui::ViewportId::from_hash_of("settings_window"),
+                egui::ViewportBuilder::default()
+                    .with_title("Settings")
+                    .with_inner_size([380.0, 260.0])
+                    .with_resizable(true),
+                move |ctx, _class| {
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        closed.store(true, Ordering::SeqCst);
+                        ctx.request_repaint_of(egui::ViewportId::ROOT);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    if pending_arc.load(Ordering::SeqCst) {
+                        ctx.request_repaint();
+                    }
+
+                    let current = avatar_arc.read().ok().and_then(|a| a.clone());
+                    let is_pending = pending_arc.load(Ordering::SeqCst);
+                    let mut paste_request = false;
+                    let mut choose_request = false;
+                    let mut remove_request = false;
+
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        ui.heading("Avatar");
+                        ui.label(
+                            egui::RichText::new(
+                                "Shown next to your name to other users. Changes take \
+                                 effect the next time you connect.",
+                            )
+                            .weak(),
+                        );
+                        ui.add_space(8.0);
+
+                        ui.horizontal(|ui| {
+                            // A larger preview of the current avatar.
+                            if let Some(bytes) = &current
+                                && let Some(texture) = avatar_texture(ui.ctx(), bytes)
+                            {
+                                ui.add(
+                                    egui::Image::new(&texture)
+                                        .fit_to_exact_size(egui::vec2(128.0, 128.0)),
+                                );
+                            } else {
+                                ui.add_sized(
+                                    egui::vec2(128.0, 128.0),
+                                    egui::Label::new(egui::RichText::new("No avatar").weak()),
+                                );
+                            }
+
+                            ui.vertical(|ui| {
+                                if ui
+                                    .add_enabled(
+                                        !is_pending,
+                                        egui::Button::new("Paste from clipboard"),
+                                    )
+                                    .clicked()
+                                {
+                                    paste_request = true;
+                                }
+                                if ui
+                                    .add_enabled(!is_pending, egui::Button::new("Choose file…"))
+                                    .clicked()
+                                {
+                                    choose_request = true;
+                                }
+                                if ui
+                                    .add_enabled(
+                                        !is_pending && current.is_some(),
+                                        egui::Button::new("Remove"),
+                                    )
+                                    .clicked()
+                                {
+                                    remove_request = true;
+                                }
+                                if is_pending {
+                                    ui.add(egui::Spinner::new());
+                                }
+                            });
+                        });
+
+                        if let Ok(err) = error_arc.read()
+                            && let Some(msg) = err.as_ref()
+                        {
+                            ui.add_space(6.0);
+                            ui.colored_label(egui::Color32::RED, msg);
+                        }
+                    });
+
+                    // Apply button actions outside the panel closure.
+                    if remove_request {
+                        if let Ok(mut a) = avatar_arc.write() {
+                            *a = None;
+                        }
+                        if let Ok(mut e) = error_arc.write() {
+                            *e = None;
+                        }
+                        spawn_set_avatar(&client_arc, &pending_arc, &error_arc, None);
+                    }
+
+                    if paste_request {
+                        match load_clipboard_avatar() {
+                            Ok(png) => {
+                                if let Ok(mut a) = avatar_arc.write() {
+                                    *a = Some(png.clone());
+                                }
+                                if let Ok(mut e) = error_arc.write() {
+                                    *e = None;
+                                }
+                                spawn_set_avatar(&client_arc, &pending_arc, &error_arc, Some(png));
+                            }
+                            Err(e) => {
+                                if let Ok(mut err) = error_arc.write() {
+                                    *err = Some(format!("Paste failed: {e}"));
+                                }
+                            }
+                        }
+                    }
+
+                    if choose_request {
+                        match load_file_avatar() {
+                            Ok(Some(png)) => {
+                                if let Ok(mut a) = avatar_arc.write() {
+                                    *a = Some(png.clone());
+                                }
+                                if let Ok(mut e) = error_arc.write() {
+                                    *e = None;
+                                }
+                                spawn_set_avatar(&client_arc, &pending_arc, &error_arc, Some(png));
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                if let Ok(mut err) = error_arc.write() {
+                                    *err = Some(format!("Could not load image: {e}"));
+                                }
+                            }
+                        }
+                    }
                 },
             );
         }
@@ -1267,6 +1526,7 @@ impl eframe::App for ConclaveGUI {
                     let user_id = egui::Id::new("bm_form_user");
                     let pass_id = egui::Id::new("bm_form_pass");
                     let share_id = egui::Id::new("bm_form_share");
+                    let avatar_id = egui::Id::new("bm_form_avatar");
                     let edit_id = egui::Id::new("bm_form_edit_index");
 
                     let mut f_name =
@@ -1282,6 +1542,9 @@ impl eframe::App for ConclaveGUI {
                     let mut f_pass =
                         ctx.data(|d| d.get_temp::<String>(pass_id).unwrap_or_default());
                     let mut f_share = ctx.data(|d| d.get_temp::<bool>(share_id).unwrap_or(false));
+                    let mut f_avatar = ctx
+                        .data(|d| d.get_temp::<Option<Vec<u8>>>(avatar_id))
+                        .flatten();
                     let mut edit_index =
                         ctx.data(|d| d.get_temp::<Option<usize>>(edit_id)).flatten();
 
@@ -1445,6 +1708,52 @@ impl eframe::App for ConclaveGUI {
                                 ui.label("Share local time:");
                                 ui.checkbox(&mut f_share, "");
                                 ui.end_row();
+                                ui.label("Avatar:");
+                                ui.vertical(|ui| {
+                                    if let Some(bytes) = &f_avatar
+                                        && let Some(texture) = avatar_texture(ui.ctx(), bytes)
+                                    {
+                                        ui.add(
+                                            egui::Image::new(&texture)
+                                                .fit_to_exact_size(egui::vec2(48.0, 48.0)),
+                                        );
+                                    }
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Paste").clicked() {
+                                            match load_clipboard_avatar() {
+                                                Ok(png) => f_avatar = Some(png),
+                                                Err(e) => {
+                                                    if let Ok(mut err) = error_arc.write() {
+                                                        *err = Some(format!("Paste failed: {e}"));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if ui.button("File…").clicked() {
+                                            match load_file_avatar() {
+                                                Ok(Some(png)) => f_avatar = Some(png),
+                                                Ok(None) => {}
+                                                Err(e) => {
+                                                    if let Ok(mut err) = error_arc.write() {
+                                                        *err = Some(format!(
+                                                            "Could not load image: {e}"
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if f_avatar.is_some() && ui.button("Clear").clicked() {
+                                            f_avatar = None;
+                                        }
+                                    });
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Optional; falls back to your default avatar.",
+                                        )
+                                        .weak(),
+                                    );
+                                });
+                                ui.end_row();
                             });
 
                         ui.add_space(4.0);
@@ -1485,6 +1794,7 @@ impl eframe::App for ConclaveGUI {
                             .map(|a| a.password.clone())
                             .unwrap_or_default();
                         f_share = bookmark.share_time;
+                        f_avatar.clone_from(&bookmark.avatar);
                         edit_index = Some(i);
                     }
 
@@ -1496,6 +1806,7 @@ impl eframe::App for ConclaveGUI {
                         f_user.clear();
                         f_pass.clear();
                         f_share = false;
+                        f_avatar = None;
                         edit_index = None;
                     }
 
@@ -1509,6 +1820,7 @@ impl eframe::App for ConclaveGUI {
                             f_user.clear();
                             f_pass.clear();
                             f_share = false;
+                            f_avatar = None;
                             edit_index = None;
                         }
                         let client = client_arc.clone();
@@ -1539,6 +1851,7 @@ impl eframe::App for ConclaveGUI {
                         let user = std::mem::take(&mut f_user);
                         let pass = std::mem::take(&mut f_pass);
                         let share = f_share;
+                        let avatar = std::mem::take(&mut f_avatar);
                         let index = edit_index;
 
                         // Reset the form back to add mode.
@@ -1612,6 +1925,7 @@ impl eframe::App for ConclaveGUI {
                                 display_name: display,
                                 auth,
                                 share_time: share,
+                                avatar,
                             };
                             let result = if let Some(i) = index {
                                 client.update_bookmark(i, &entry).await
@@ -1635,6 +1949,7 @@ impl eframe::App for ConclaveGUI {
                         d.insert_temp(user_id, f_user);
                         d.insert_temp(pass_id, f_pass);
                         d.insert_temp(share_id, f_share);
+                        d.insert_temp(avatar_id, f_avatar);
                         d.insert_temp(edit_id, edit_index);
                     });
                 },
@@ -1917,6 +2232,9 @@ impl eframe::App for ConclaveGUI {
                             display_name,
                             auth,
                             server.key,
+                            // No per-server avatar here; connect falls back to the
+                            // client's default avatar.
+                            None,
                         );
                         ctx.request_repaint_of(egui::ViewportId::ROOT);
                     }
@@ -2223,13 +2541,17 @@ impl eframe::App for ConclaveGUI {
                                             ui.end_row();
 
                                             for user in &users {
-                                                // Names are tinted their groups'
-                                                // colour, dulled when idle.
-                                                ui.label(styled_name(
-                                                    &user.display_name,
-                                                    base_name_color(user),
-                                                    is_idle(user.idle),
-                                                ));
+                                                // Avatar (if any) then the name,
+                                                // tinted its groups' colour and
+                                                // dulled when idle.
+                                                ui.horizontal(|ui| {
+                                                    show_avatar(ui, user.avatar.as_deref());
+                                                    ui.label(styled_name(
+                                                        &user.display_name,
+                                                        base_name_color(user),
+                                                        is_idle(user.idle),
+                                                    ));
+                                                });
                                                 ui.label(format_uptime(user.connected_since));
                                                 ui.horizontal(|ui| {
                                                     // The Details button toggles the
@@ -2449,14 +2771,19 @@ impl eframe::App for ConclaveGUI {
 
                     let state = conn.chat_room(room).unwrap_or_default();
                     // Name colour and idle state per connected user, so chat
-                    // names can be tinted (and dulled when idle) to match.
-                    let user_styles: HashMap<String, (Option<egui::Color32>, bool)> = conn
-                        .get_connected_users()
-                        .into_iter()
+                    // names can be tinted (and dulled when idle) to match, plus
+                    // each user's avatar keyed by display name.
+                    let roster = conn.get_connected_users();
+                    let user_styles: HashMap<String, (Option<egui::Color32>, bool)> = roster
+                        .iter()
                         .map(|u| {
-                            let style = (base_name_color(&u), is_idle(u.idle));
-                            (u.display_name, style)
+                            let style = (base_name_color(u), is_idle(u.idle));
+                            (u.display_name.clone(), style)
                         })
+                        .collect();
+                    let user_avatars: HashMap<String, Vec<u8>> = roster
+                        .into_iter()
+                        .filter_map(|u| u.avatar.map(|a| (u.display_name, a)))
                         .collect();
 
                     let input_id = egui::Id::new(format!("chat_input:{key_owned}:{room}"));
@@ -2497,7 +2824,10 @@ impl eframe::App for ConclaveGUI {
                                 for user in &state.users {
                                     let (color, idle) =
                                         user_styles.get(user).copied().unwrap_or((None, false));
-                                    ui.label(styled_name(user, color, idle));
+                                    ui.horizontal(|ui| {
+                                        show_avatar(ui, user_avatars.get(user).map(Vec::as_slice));
+                                        ui.label(styled_name(user, color, idle));
+                                    });
                                 }
                             });
                         });
@@ -2519,6 +2849,12 @@ impl eframe::App for ConclaveGUI {
                                             message,
                                         } => {
                                             ui.horizontal_wrapped(|ui| {
+                                                show_avatar(
+                                                    ui,
+                                                    user_avatars
+                                                        .get(display_name)
+                                                        .map(Vec::as_slice),
+                                                );
                                                 ui.label(
                                                     egui::RichText::new(
                                                         time.format("%H:%M:%S").to_string(),
@@ -3188,6 +3524,7 @@ impl eframe::App for ConclaveGUI {
                                                     bookmark.display_name.clone(),
                                                     auth,
                                                     Some(bookmark.server.key),
+                                                    bookmark.avatar.clone(),
                                                 );
                                             }
                                         },

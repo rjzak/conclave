@@ -113,6 +113,7 @@ async fn integration() {
                 "Unnamed".into(),
                 None,
                 None,
+                None,
             )
             .await
             .is_err()
@@ -126,6 +127,7 @@ async fn integration() {
             true,
             "admin".into(),
             Some(("admin".to_string(), password.to_string()).into()),
+            None,
             None,
         )
         .await

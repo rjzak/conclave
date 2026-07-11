@@ -19,8 +19,8 @@ use conclave_common::net::{
 };
 use conclave_common::server::{
     ChatEvent, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser, IDLE_TIMEOUT_MINUTES,
-    ServerError, ServerInformation, ServerMessagesEncrypted, UserAuthentication, UserDetails,
-    unencrypted,
+    MAX_AVATAR_BYTES, ServerError, ServerInformation, ServerMessagesEncrypted, UserAuthentication,
+    UserDetails, unencrypted,
 };
 use conclave_common::tracker::TrackerProtocol::AdvertiseServer;
 use conclave_common::tracker::{Advertise, Tracker, TrackerWithKey};
@@ -1711,9 +1711,23 @@ impl State {
                                             ServerMessagesEncrypted::ServerAuthenticationRequest((
                                                 display_name,
                                                 user_local_time,
+                                                avatar,
                                                 auth,
                                             )),
                                         ) => {
+                                            // Drop oversized avatars rather than
+                                            // relaying abuse to every peer.
+                                            let avatar = avatar.filter(|bytes| {
+                                                if bytes.len() > MAX_AVATAR_BYTES {
+                                                    warn!(
+                                                        "Rejecting {}-byte avatar from {client} (limit {MAX_AVATAR_BYTES})",
+                                                        bytes.len()
+                                                    );
+                                                    false
+                                                } else {
+                                                    true
+                                                }
+                                            });
                                             let (user_id, admin) = if let Some(inner_auth) = auth {
                                                 let uname = inner_auth.username.clone();
                                                 if let Ok((user_id, admin)) =
@@ -1820,6 +1834,7 @@ impl State {
                                                 user_id,
                                                 public_key,
                                                 timezone: user_local_time,
+                                                avatar,
                                             });
                                             let connection = ClientConnection {
                                                 connection_id: id,

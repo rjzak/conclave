@@ -74,6 +74,11 @@ pub struct ClientConfig {
 
     /// Cached keys for servers previously connected to
     pub known_hosts: Vec<KnownHost>,
+
+    /// The user's avatar, stored as a 512×512 PNG. A 32×32 thumbnail is shared
+    /// with servers and shown next to the user's name.
+    #[serde(default, with = "crate::avatar::serde_b64")]
+    pub avatar: Option<Vec<u8>>,
 }
 
 impl Default for ClientConfig {
@@ -86,6 +91,7 @@ impl Default for ClientConfig {
             trackers: Vec::new(),
             bookmarks: Vec::new(),
             known_hosts: Vec::new(),
+            avatar: None,
             signing_key,
             verifying_key,
         }
@@ -171,6 +177,12 @@ pub struct BookmarkEntry {
     /// Share local time (and timezone, which provides location information) with the server.
     #[serde(default)]
     pub share_time: bool,
+
+    /// Avatar to present on this server, stored as a 512×512 PNG. When `None`,
+    /// the client's default avatar (if any) is used instead.
+    #[serde(default, with = "crate::avatar::serde_b64")]
+    #[zeroize(skip)]
+    pub avatar: Option<Vec<u8>>,
 }
 
 /// User's credential for a server
@@ -199,4 +211,47 @@ pub struct KnownHost {
     )]
     #[zeroize(skip)]
     pub key: VerifyingKey,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn avatar_round_trips_through_toml_and_json() {
+        let mut config = ClientConfig::default();
+
+        // `None` must serialise cleanly (TOML has no null) and reload as `None`.
+        let toml_text = toml::to_string_pretty(&config).expect("serialize toml");
+        assert!(!toml_text.contains("avatar"));
+        let loaded: ClientConfig = toml::from_str(&toml_text).expect("parse toml");
+        assert_eq!(loaded.avatar, None);
+
+        // `Some` bytes round-trip unchanged through both formats.
+        config.avatar = Some(vec![0u8, 1, 2, 3, 254, 255]);
+        let toml_text = toml::to_string_pretty(&config).expect("serialize toml");
+        let loaded: ClientConfig = toml::from_str(&toml_text).expect("parse toml");
+        assert_eq!(loaded.avatar, config.avatar);
+
+        let json_text = serde_json::to_string(&config).expect("serialize json");
+        let loaded: ClientConfig = serde_json::from_str(&json_text).expect("parse json");
+        assert_eq!(loaded.avatar, config.avatar);
+
+        // A bookmark's optional avatar round-trips the same way.
+        config.bookmarks.push(BookmarkEntry {
+            server: KnownHost {
+                host: "example.com".into(),
+                port: 1111,
+                key: config.verifying_key,
+            },
+            name: "Example".into(),
+            display_name: "Me".into(),
+            auth: None,
+            share_time: false,
+            avatar: Some(vec![9u8, 8, 7, 6]),
+        });
+        let toml_text = toml::to_string_pretty(&config).expect("serialize toml");
+        let loaded: ClientConfig = toml::from_str(&toml_text).expect("parse toml");
+        assert_eq!(loaded.bookmarks[0].avatar, Some(vec![9u8, 8, 7, 6]));
+    }
 }

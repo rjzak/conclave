@@ -10,6 +10,9 @@
 /// Admin GUI elements
 pub mod adminui;
 
+/// Avatar image handling: normalising, thumbnailing, decoding, and config serde.
+pub mod avatar;
+
 /// Client configuration file data structures and I/O functions.
 pub mod config;
 
@@ -389,6 +392,7 @@ impl Client {
         let login = ServerMessagesEncrypted::ServerAuthenticationRequest((
             display_name.to_string(),
             None,
+            None,
             auth,
         ))
         .to_vec();
@@ -507,11 +511,29 @@ impl Client {
             .unwrap_or_default()
     }
 
+    /// Read the user's stored avatar (a 512×512 PNG) without blocking.
+    #[must_use]
+    pub fn avatar(&self) -> Option<Vec<u8>> {
+        self.config.try_read().ok().and_then(|c| c.avatar.clone())
+    }
+
+    /// Set (or clear, with `None`) the user's avatar and write to the config
+    /// file. The bytes are expected to already be a canonical 512×512 PNG.
+    ///
+    /// # Errors
+    ///
+    /// I/O errors may occur when writing to the config file.
+    pub async fn set_avatar(&self, avatar: Option<Vec<u8>>) -> Result<()> {
+        self.config.write().await.avatar = avatar;
+        self.config.read().await.save(&self.config_file)
+    }
+
     /// Connect to a server
     ///
     /// # Errors
     ///
     /// Networking errors may result
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect(
         &self,
         server: &str,
@@ -520,6 +542,7 @@ impl Client {
         display_name: String,
         auth: Option<UserAuthentication>,
         key: Option<VerifyingKey>,
+        avatar: Option<Vec<u8>>,
     ) -> Result<ConclaveConnection> {
         let key = if let Some(key) = key {
             key
@@ -539,6 +562,19 @@ impl Client {
 
         let config = self.config.read().await;
         let signing_key = config.signing_key.clone();
+        // Derive a small 32×32 thumbnail to share with the server. Prefer the
+        // per-connection avatar (e.g. from a bookmark), falling back to the
+        // client's default; a decode failure just means no avatar is sent.
+        let avatar_thumb = avatar
+            .or_else(|| config.avatar.clone())
+            .as_deref()
+            .and_then(|png| match avatar::thumbnail(png) {
+                Ok(thumb) => Some(thumb),
+                Err(e) => {
+                    warn!("Failed to build avatar thumbnail: {e}");
+                    None
+                }
+            });
 
         info!("Creating encrypted stream to server");
         let mut encrypted_stream =
@@ -556,6 +592,7 @@ impl Client {
         let login = ServerMessagesEncrypted::ServerAuthenticationRequest((
             display_name.clone(),
             own_timezone,
+            avatar_thumb,
             auth,
         ))
         .to_vec();

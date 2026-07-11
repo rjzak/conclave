@@ -248,7 +248,17 @@ pub struct ConnectedUser {
     /// The user's timezone as whole hours relative to GMT (e.g. `-5`, `2`), if
     /// shared. Other users compute the difference against their own.
     pub timezone: Option<i16>,
+
+    /// The user's avatar as a small (32×32) PNG, if they shared one. Rendered
+    /// next to their name in user lists and chat. Kept tiny because this struct
+    /// is rebroadcast on every roster change; a future optimisation could fetch
+    /// avatars on demand by hash instead of embedding them here.
+    pub avatar: Option<Vec<u8>>,
 }
+
+/// Maximum size, in bytes, accepted for a shared avatar. A 32×32 PNG is only a
+/// couple of kilobytes; this leaves generous headroom while rejecting abuse.
+pub const MAX_AVATAR_BYTES: usize = 16 * 1024;
 
 /// Extra, on-demand information about a connected user. The base fields (display
 /// name, connection duration, timezone) are already carried by [`ConnectedUser`];
@@ -278,9 +288,17 @@ pub enum ServerMessagesEncrypted {
     ServerInformationRequest,
 
     /// User tries to authenticate
-    /// Send the display name and the optional timezone offset and authentication message
+    /// Send the display name, the optional timezone offset, an optional avatar
+    /// (a small 32×32 PNG), and the optional authentication message.
     /// Server responds with Server Information if successful
-    ServerAuthenticationRequest((String, Option<i16>, Option<UserAuthentication>)),
+    ServerAuthenticationRequest(
+        (
+            String,
+            Option<i16>,
+            Option<Vec<u8>>,
+            Option<UserAuthentication>,
+        ),
+    ),
 
     /// Ask the server for a list of connected users
     ListConnectedUsersRequest,
