@@ -1271,6 +1271,40 @@ impl State {
         }
     }
 
+    /// Create a new directory, returning an error reply on failure and `None` on
+    /// success. Requires the `Write` permission on the parent directory.
+    async fn file_mkdir(
+        &self,
+        path: &str,
+        user: &ConnectedUser,
+    ) -> Option<ClientMessagesEncrypted> {
+        use conclave_common::files::FilePermission;
+        let root = self.share_directory.clone()?;
+        // Validates the parent exists safely and the name is a non-reserved
+        // single component; the target itself must not yet exist.
+        let target = match files::resolve_target(&root, path) {
+            Ok(target) => target,
+            Err(e) => return Some(file_error(e.to_string())),
+        };
+        let parent = target.parent().unwrap_or(&root).to_path_buf();
+        let groups = self.requester_groups(user).await;
+        let allowed = user.admin
+            || files::has_permission(
+                &root,
+                &parent,
+                &groups,
+                user.user_id.is_none(),
+                FilePermission::Write,
+            );
+        if !allowed {
+            return Some(ClientMessagesEncrypted::Error(ServerError::NotAuthorized));
+        }
+        match std::fs::create_dir(&target) {
+            Ok(()) => None,
+            Err(e) => Some(file_error(e.to_string())),
+        }
+    }
+
     /// (Admin) The current server-wide limits.
     #[inline]
     fn server_limits(&self) -> conclave_common::admin::server::ServerLimits {
@@ -2076,6 +2110,12 @@ impl State {
 
                 Ok(ServerMessagesEncrypted::FileDeleteRequest { path }) => {
                     if let Some(err) = self.file_delete(&path, &user).await {
+                        reply(&write, &addr, &err).await;
+                    }
+                }
+
+                Ok(ServerMessagesEncrypted::FileMkdirRequest { path }) => {
+                    if let Some(err) = self.file_mkdir(&path, &user).await {
                         reply(&write, &addr, &err).await;
                     }
                 }

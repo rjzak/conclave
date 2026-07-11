@@ -927,6 +927,16 @@ impl ConclaveConnection {
             .await
     }
 
+    /// Create a new remote directory (relative to the share root).
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn create_dir(&self, path: String) -> Result<()> {
+        self.send_request(&ServerMessagesEncrypted::FileMkdirRequest { path }.to_vec())
+            .await
+    }
+
     /// The latest file-operation notice (e.g. upload status), if any.
     #[must_use]
     pub fn file_notice(&self) -> Option<String> {

@@ -149,7 +149,8 @@ fn file_upload_panel(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str, pa
             });
 
         if ui
-            .add_enabled(!local.trim().is_empty(), egui::Button::new("Upload"))
+            .add_enabled(!local.trim().is_empty(), egui::Button::new("⬆ Upload"))
+            .on_hover_text("Upload the selected file")
             .clicked()
         {
             match std::fs::read(local.trim()) {
@@ -2818,6 +2819,38 @@ impl eframe::App for ConclaveGUI {
                             let shown = if path.is_empty() { "/" } else { path.as_str() };
                             ui.label(egui::RichText::new(shown).monospace());
                         });
+
+                        // Create a new directory in the current folder (server-
+                        // enforced by the Write permission).
+                        ui.horizontal(|ui| {
+                            let newdir_id = egui::Id::new(format!("newdir:{key_owned}"));
+                            let mut newdir: String =
+                                ui.data(|d| d.get_temp(newdir_id).unwrap_or_default());
+                            ui.add(
+                                egui::TextEdit::singleline(&mut newdir)
+                                    .desired_width(140.0)
+                                    .hint_text("new folder"),
+                            );
+                            if ui
+                                .add_enabled(!newdir.trim().is_empty(), egui::Button::new("📁+"))
+                                .on_hover_text("Create folder")
+                                .clicked()
+                            {
+                                let target = if path.is_empty() {
+                                    newdir.trim().to_string()
+                                } else {
+                                    format!("{path}/{}", newdir.trim())
+                                };
+                                let c = conn.clone();
+                                let refresh = path.clone();
+                                tokio::spawn(async move {
+                                    let _ = c.create_dir(target).await;
+                                    let _ = c.request_file_list(refresh).await;
+                                });
+                                newdir.clear();
+                            }
+                            ui.data_mut(|d| d.insert_temp(newdir_id, newdir));
+                        });
                         ui.separator();
 
                         // Listing (only shown when it matches the current path).
@@ -2846,7 +2879,11 @@ impl eframe::App for ConclaveGUI {
                                                         .weak()
                                                         .small(),
                                                 );
-                                                if ui.small_button("Download").clicked() {
+                                                if ui
+                                                    .small_button("⬇")
+                                                    .on_hover_text("Download")
+                                                    .clicked()
+                                                {
                                                     let c = conn.clone();
                                                     let target = child.clone();
                                                     tokio::spawn(async move {
@@ -2857,7 +2894,11 @@ impl eframe::App for ConclaveGUI {
                                                 // Deletion is server-enforced by the
                                                 // Delete permission; the listing is
                                                 // refreshed afterwards.
-                                                if ui.small_button("🗑").clicked() {
+                                                if ui
+                                                    .small_button("🗑")
+                                                    .on_hover_text("Delete")
+                                                    .clicked()
+                                                {
                                                     let c = conn.clone();
                                                     let target = child.clone();
                                                     let refresh = path.clone();

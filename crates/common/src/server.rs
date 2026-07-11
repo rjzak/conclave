@@ -343,6 +343,13 @@ pub enum ServerMessagesEncrypted {
         path: String,
     },
 
+    /// Create a new directory (relative to the share root). Requires the `Write`
+    /// permission on the parent directory.
+    FileMkdirRequest {
+        /// Path of the directory to create, relative to the share root
+        path: String,
+    },
+
     /// Send a direct message to another connected user, by connection id. The
     /// server relays `payload` verbatim without inspecting it; when `encrypted`
     /// is set it is end-to-end ciphertext the server cannot read.
