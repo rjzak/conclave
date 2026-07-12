@@ -17,6 +17,10 @@ use eframe::{Frame, egui};
 use sha2::{Digest, Sha256};
 use tracing::error;
 
+/// A per-frame snapshot of one active connection: (window key, display
+/// label, still-connected flag, connection handle).
+type ConnSnapshot = (String, String, bool, ConclaveConnection);
+
 fn do_start_discovery(
     servers_arc: Arc<RwLock<HashSet<DiscoveredServer>>>,
     running_arc: Arc<AtomicBool>,
@@ -1031,8 +1035,34 @@ impl ConclaveGUI {
 }
 
 impl eframe::App for ConclaveGUI {
-    #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut Frame) {
+        self.begin_frame(ui);
+        self.top_bar_menu(ui);
+        self.about_window(ui);
+        self.settings_window(ui);
+        self.server_discovery_window(ui);
+        self.tracker_list_window(ui);
+        self.bookmarks_window(ui);
+        self.tracker_servers_window(ui);
+        self.login_window(ui);
+        self.prune_dead_connections();
+        let conn_snapshots = self.snapshot_connections();
+        self.connected_servers_window(ui, &conn_snapshots);
+        self.user_windows(ui, &conn_snapshots);
+        self.chatroom_windows(ui, &conn_snapshots);
+        self.dm_windows(ui, &conn_snapshots);
+        self.file_windows(ui, &conn_snapshots);
+        self.forum_windows(ui, &conn_snapshots);
+        self.admin_windows(ui, &conn_snapshots);
+        self.root_window(ui, &conn_snapshots);
+    }
+}
+
+impl ConclaveGUI {
+    /// Per-frame housekeeping: drain viewport close flags, keep the
+    /// tracker-server subscription in sync, and repaint while async work runs.
+    #[inline]
+    fn begin_frame(&mut self, ui: &mut egui::Ui) {
         // ── Handle viewport close events ──────────────────────────────────
         if self.discovery_viewport_closed.swap(false, Ordering::SeqCst) {
             self.show_advertised_servers_list = false;
@@ -1120,7 +1150,12 @@ impl eframe::App for ConclaveGUI {
         {
             ui.ctx().request_repaint();
         }
+    }
 
+    /// Render the top menu bar.
+    #[inline]
+    #[allow(clippy::too_many_lines)]
+    fn top_bar_menu(&mut self, ui: &mut egui::Ui) {
         // Snapshot of connections for the Servers menu, keyed the same way as
         // the per-server windows so a menu item opens the correct window. If a
         // server has more than one connection, its display name disambiguates.
@@ -1270,7 +1305,11 @@ impl eframe::App for ConclaveGUI {
                 egui::widgets::global_theme_preference_buttons(ui);
             });
         });
+    }
 
+    /// Render the About window when open.
+    #[inline]
+    fn about_window(&mut self, ui: &mut egui::Ui) {
         // ── About window ──────────────────────────────────────────────────
         if self.show_about {
             let closed = self.about_closed.clone();
@@ -1298,7 +1337,12 @@ impl eframe::App for ConclaveGUI {
                 },
             );
         }
+    }
 
+    /// Render the Settings window when open.
+    #[inline]
+    #[allow(clippy::too_many_lines)]
+    fn settings_window(&mut self, ui: &mut egui::Ui) {
         // ── Settings viewport ─────────────────────────────────────────────
         if self.show_settings {
             let closed = self.settings_closed.clone();
@@ -1447,7 +1491,12 @@ impl eframe::App for ConclaveGUI {
                 },
             );
         }
+    }
 
+    /// Render the local server-discovery window when open.
+    #[inline]
+    #[allow(clippy::too_many_lines)]
+    fn server_discovery_window(&mut self, ui: &mut egui::Ui) {
         // ── Server Discovery viewport ─────────────────────────────────────
         if self.show_advertised_servers_list {
             let closed_arc = self.discovery_viewport_closed.clone();
@@ -1560,7 +1609,12 @@ impl eframe::App for ConclaveGUI {
                 },
             );
         }
+    }
 
+    /// Render the tracker-list window when open.
+    #[inline]
+    #[allow(clippy::too_many_lines)]
+    fn tracker_list_window(&mut self, ui: &mut egui::Ui) {
         // ── Tracker List viewport ─────────────────────────────────────────
         if self.show_tracker_list {
             let closed_arc = self.tracker_viewport_closed.clone();
@@ -1806,7 +1860,12 @@ impl eframe::App for ConclaveGUI {
                 },
             );
         }
+    }
 
+    /// Render the bookmarks window when open.
+    #[inline]
+    #[allow(clippy::too_many_lines)]
+    fn bookmarks_window(&mut self, ui: &mut egui::Ui) {
         // ── Bookmarks viewport ────────────────────────────────────────────
         if self.show_bookmarks_window {
             let closed_arc = self.bookmarks_viewport_closed.clone();
@@ -2269,7 +2328,12 @@ impl eframe::App for ConclaveGUI {
                 },
             );
         }
+    }
 
+    /// Render the tracker-advertised-servers window when open.
+    #[inline]
+    #[allow(clippy::too_many_lines)]
+    fn tracker_servers_window(&mut self, ui: &mut egui::Ui) {
         // ── Tracker Servers viewport ──────────────────────────────────────
         if self.show_tracker_servers {
             let closed_arc = self.tracker_servers_viewport_closed.clone();
@@ -2384,7 +2448,12 @@ impl eframe::App for ConclaveGUI {
                 },
             );
         }
+    }
 
+    /// Render the per-server login window when open.
+    #[inline]
+    #[allow(clippy::too_many_lines)]
+    fn login_window(&mut self, ui: &mut egui::Ui) {
         // ── Login window ──────────────────────────────────────────────────
         let pending_info: Option<PendingServer> =
             self.pending_server.read().ok().and_then(|p| p.clone());
@@ -2555,7 +2624,11 @@ impl eframe::App for ConclaveGUI {
                 },
             );
         }
+    }
 
+    /// Drop connections whose listener has ended.
+    #[inline]
+    fn prune_dead_connections(&mut self) {
         // ── Prune dead connections ────────────────────────────────────────
         // A connection whose listener has ended (the server closed it or kicked
         // us) is removed so it no longer appears in the servers list, as if we
@@ -2575,7 +2648,11 @@ impl eframe::App for ConclaveGUI {
                 });
             }
         }
+    }
 
+    /// Snapshot the active connections for this frame's per-server windows.
+    #[inline]
+    fn snapshot_connections(&mut self) -> Vec<ConnSnapshot> {
         // ── Snapshot active connections ───────────────────────────────────
         // (stable key = hash of the server's public key, display name,
         //  still-connected flag, and a clone of the connection).
@@ -2616,8 +2693,6 @@ impl eframe::App for ConclaveGUI {
             })
             .collect();
 
-        let has_connections = !conn_snapshots.is_empty();
-
         // Auto-open a user window once per newly-seen server and surface the
         // Connected Servers window when the first connection appears.
         for (key, _, _, _) in &conn_snapshots {
@@ -2642,6 +2717,13 @@ impl eframe::App for ConclaveGUI {
             }
         }
 
+        conn_snapshots
+    }
+
+    /// Render the Connected Servers overview window when open.
+    #[inline]
+    #[allow(clippy::too_many_lines)]
+    fn connected_servers_window(&mut self, ui: &mut egui::Ui, conn_snapshots: &[ConnSnapshot]) {
         // ── Connected Servers window ──────────────────────────────────────
         if self.show_servers_window {
             let closed_arc = self.servers_window_closed.clone();
@@ -2649,19 +2731,9 @@ impl eframe::App for ConclaveGUI {
             let open_windows = self.open_user_windows.clone();
             let open_admin = self.open_admin_windows.clone();
             let open_files = self.open_file_windows.clone();
-            // (key, name, active, is_admin)
-            let servers: Vec<(String, String, bool, bool, bool)> = conn_snapshots
-                .iter()
-                .map(|(k, n, a, c)| {
-                    (
-                        k.clone(),
-                        n.clone(),
-                        *a,
-                        c.is_admin(),
-                        c.server_info().sharing_enabled,
-                    )
-                })
-                .collect();
+            let open_chats = self.open_chats.clone();
+            let open_forums = self.open_forum_windows.clone();
+            let servers: Vec<ConnSnapshot> = conn_snapshots.to_vec();
 
             ui.ctx().show_viewport_deferred(
                 egui::ViewportId::from_hash_of("connected_servers"),
@@ -2686,62 +2758,88 @@ impl eframe::App for ConclaveGUI {
                             ui.label(egui::RichText::new("Not connected to any server.").weak());
                         }
 
-                        for (key, name, active, is_admin, sharing) in &servers {
+                        for (key, name, active, conn) in &servers {
+                            let info = conn.server_info();
+                            let is_admin = conn.is_admin();
                             ui.group(|ui| {
-                                let label = if *active {
-                                    name.clone()
-                                } else {
-                                    format!("{name} (disconnected)")
-                                };
-                                ui.label(egui::RichText::new(label).strong());
                                 ui.horizontal(|ui| {
-                                    let mut shown =
-                                        open_windows.read().is_ok_and(|o| o.contains(key));
-                                    if ui.checkbox(&mut shown, "Users").changed() {
-                                        if let Ok(mut o) = open_windows.write() {
-                                            if shown {
-                                                o.insert(key.clone());
-                                            } else {
-                                                o.remove(key);
-                                            }
-                                        }
-                                        repaint_root = true;
-                                    }
-                                    // Files are offered when the server shares a
-                                    // directory.
-                                    if *sharing {
-                                        let mut files_shown =
-                                            open_files.read().is_ok_and(|o| o.contains(key));
-                                        if ui.checkbox(&mut files_shown, "Files").changed() {
-                                            if let Ok(mut o) = open_files.write() {
-                                                if files_shown {
-                                                    o.insert(key.clone());
-                                                } else {
-                                                    o.remove(key);
+                                    let label = if *active {
+                                        name.clone()
+                                    } else {
+                                        format!("{name} (disconnected)")
+                                    };
+                                    ui.label(egui::RichText::new(label).strong());
+                                    // A per-server actions menu, on the right: open
+                                    // any feature the server supports, or disconnect.
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.menu_button("Open ⏷", |ui| {
+                                                if ui.button("User list").clicked() {
+                                                    if let Ok(mut o) = open_windows.write() {
+                                                        o.insert(key.clone());
+                                                    }
+                                                    repaint_root = true;
                                                 }
-                                            }
-                                            repaint_root = true;
-                                        }
-                                    }
-                                    // The admin panel is offered only for connections
-                                    // whose authenticated user holds admin rights.
-                                    if *is_admin {
-                                        let mut admin_shown =
-                                            open_admin.read().is_ok_and(|o| o.contains(key));
-                                        if ui.checkbox(&mut admin_shown, "Admin").changed() {
-                                            if let Ok(mut o) = open_admin.write() {
-                                                if admin_shown {
-                                                    o.insert(key.clone());
-                                                } else {
-                                                    o.remove(key);
+                                                // Chat: a submenu of the server's
+                                                // rooms when chat is enabled.
+                                                if info.chat_enabled {
+                                                    let rooms = conn.chatrooms_available();
+                                                    ui.menu_button("Chat", |ui| {
+                                                        if rooms.is_empty() {
+                                                            ui.add_enabled(
+                                                                false,
+                                                                egui::Button::new(
+                                                                    "No chatrooms available",
+                                                                ),
+                                                            );
+                                                        }
+                                                        for room in &rooms {
+                                                            if ui.button(&room.name).clicked() {
+                                                                if let Ok(mut o) =
+                                                                    open_chats.write()
+                                                                {
+                                                                    o.insert((
+                                                                        key.clone(),
+                                                                        room.id,
+                                                                    ));
+                                                                }
+                                                                repaint_root = true;
+                                                            }
+                                                        }
+                                                    });
                                                 }
-                                            }
-                                            repaint_root = true;
-                                        }
-                                    }
-                                    if ui.small_button("Disconnect").clicked() {
-                                        disconnect_key = Some(key.clone());
-                                    }
+                                                if info.sharing_enabled
+                                                    && ui.button("Files").clicked()
+                                                {
+                                                    if let Ok(mut o) = open_files.write() {
+                                                        o.insert(key.clone());
+                                                    }
+                                                    repaint_root = true;
+                                                }
+                                                if info.forums_enabled
+                                                    && ui.button("Forums").clicked()
+                                                {
+                                                    if let Ok(mut o) = open_forums.write() {
+                                                        o.insert(key.clone());
+                                                    }
+                                                    repaint_root = true;
+                                                }
+                                                // The admin panel is offered only for
+                                                // connections holding admin rights.
+                                                if is_admin && ui.button("Admin").clicked() {
+                                                    if let Ok(mut o) = open_admin.write() {
+                                                        o.insert(key.clone());
+                                                    }
+                                                    repaint_root = true;
+                                                }
+                                                ui.separator();
+                                                if ui.button("Disconnect").clicked() {
+                                                    disconnect_key = Some(key.clone());
+                                                }
+                                            });
+                                        },
+                                    );
                                 });
                             });
                         }
@@ -2779,7 +2877,12 @@ impl eframe::App for ConclaveGUI {
                 },
             );
         }
+    }
 
+    /// Render each open per-server user list window.
+    #[inline]
+    #[allow(clippy::too_many_lines)]
+    fn user_windows(&mut self, ui: &mut egui::Ui, conn_snapshots: &[ConnSnapshot]) {
         // ── Per-server user windows ───────────────────────────────────────
         let open_keys: HashSet<String> = self
             .open_user_windows
@@ -2787,7 +2890,7 @@ impl eframe::App for ConclaveGUI {
             .map(|o| o.clone())
             .unwrap_or_default();
 
-        for (key, name, _active, conn) in &conn_snapshots {
+        for (key, name, _active, conn) in conn_snapshots {
             if !open_keys.contains(key) {
                 continue;
             }
@@ -2795,7 +2898,6 @@ impl eframe::App for ConclaveGUI {
             let key_owned = key.clone();
             let title = format!("Users — {name}");
             let close_reqs = self.user_window_close_requests.clone();
-            let open_chats = self.open_chats.clone();
             let open_dms = self.open_dms.clone();
 
             ui.ctx().show_viewport_deferred(
@@ -2818,9 +2920,6 @@ impl eframe::App for ConclaveGUI {
                     let is_admin = conn.is_admin();
                     let details = conn.user_details();
                     let own_name = conn.display_name();
-                    // The server pushes the accessible chatrooms on connect and
-                    // whenever chat config changes, so no request is needed here.
-                    let chatrooms = conn.chatrooms_available();
 
                     // Which user's detail panel is expanded (by connection id).
                     let selected_id = egui::Id::new(format!("user_details_sel:{key_owned}"));
@@ -2831,7 +2930,6 @@ impl eframe::App for ConclaveGUI {
                     let mut details_request: Option<u16> = None;
                     let mut kick_request: Option<u16> = None;
                     let mut clear_selection = false;
-                    let mut open_chat_request: Option<u16> = None;
                     let mut open_dm_request: Option<u16> = None;
 
                     egui::CentralPanel::default().show(ctx, |ui| {
@@ -2940,55 +3038,9 @@ impl eframe::App for ConclaveGUI {
                                 clear_selection = true;
                             }
                         }
-
-                        // ── Chatrooms ─────────────────────────────────────
-                        ui.separator();
-                        ui.heading("Chatrooms");
-                        if !server_info.chat_enabled {
-                            ui.label(
-                                egui::RichText::new("Chat is disabled on this server.").weak(),
-                            );
-                            if is_admin {
-                                ui.label(
-                                    egui::RichText::new("Enable it in the server's Admin window.")
-                                        .weak()
-                                        .small(),
-                                );
-                            }
-                        } else if chatrooms.is_empty() {
-                            ui.label(egui::RichText::new("No chatrooms available.").weak());
-                        } else {
-                            for room in &chatrooms {
-                                ui.horizontal(|ui| {
-                                    ui.label(&room.name);
-                                    let is_open = open_chats
-                                        .read()
-                                        .is_ok_and(|o| o.contains(&(key_owned.clone(), room.id)));
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if is_open {
-                                                ui.label(egui::RichText::new("open").weak());
-                                            } else if ui.small_button("Open").clicked() {
-                                                open_chat_request = Some(room.id);
-                                            }
-                                        },
-                                    );
-                                });
-                            }
-                        }
                     });
 
                     // Perform queued actions outside the panel closure.
-                    if let Some(room) = open_chat_request {
-                        if let Ok(mut open) = open_chats.write() {
-                            open.insert((key_owned.clone(), room));
-                        }
-                        let conn = conn.clone();
-                        tokio::spawn(async move {
-                            let _ = conn.chat_join(room).await;
-                        });
-                    }
                     if let Some(peer) = open_dm_request {
                         if let Ok(mut open) = open_dms.write() {
                             open.insert((key_owned.clone(), peer));
@@ -3020,7 +3072,12 @@ impl eframe::App for ConclaveGUI {
                 },
             );
         }
+    }
 
+    /// Render each open chatroom window.
+    #[inline]
+    #[allow(clippy::too_many_lines)]
+    fn chatroom_windows(&mut self, ui: &mut egui::Ui, conn_snapshots: &[ConnSnapshot]) {
         // ── Chatroom windows ──────────────────────────────────────────────
         // Drain close requests (leaving the room) and drop chats whose server
         // has disconnected.
@@ -3075,12 +3132,23 @@ impl eframe::App for ConclaveGUI {
                     .with_inner_size([640.0, 460.0])
                     .with_resizable(true),
                 move |ctx, _class| {
+                    // Join the room when the window opens and leave when it
+                    // closes (the close-drain spawns chat_leave). The joined flag
+                    // is reset on close so reopening rejoins.
+                    let joined_id = egui::Id::new(format!("chat_joined:{key_owned}:{room}"));
                     if ctx.input(|i| i.viewport().close_requested()) {
                         if let Ok(mut r) = close_reqs.write() {
                             r.push((key_owned.clone(), room));
                         }
+                        ctx.data_mut(|d| d.insert_temp(joined_id, false));
                         ctx.request_repaint_of(egui::ViewportId::ROOT);
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    } else if !ctx.data(|d| d.get_temp::<bool>(joined_id).unwrap_or(false)) {
+                        ctx.data_mut(|d| d.insert_temp(joined_id, true));
+                        let conn = conn.clone();
+                        tokio::spawn(async move {
+                            let _ = conn.chat_join(room).await;
+                        });
                     }
 
                     let state = conn.chat_room(room).unwrap_or_default();
@@ -3201,7 +3269,12 @@ impl eframe::App for ConclaveGUI {
                 },
             );
         }
+    }
 
+    /// Render each open direct-message window.
+    #[inline]
+    #[allow(clippy::too_many_lines)]
+    fn dm_windows(&mut self, ui: &mut egui::Ui, conn_snapshots: &[ConnSnapshot]) {
         // ── Direct-message windows ────────────────────────────────────────
         // Drain close requests and drop windows whose server disconnected.
         {
@@ -3221,7 +3294,7 @@ impl eframe::App for ConclaveGUI {
 
         // Auto-open a window for any peer that just sent a direct message and
         // does not already have one open.
-        for (key, _, _, conn) in &conn_snapshots {
+        for (key, _, _, conn) in conn_snapshots {
             let requests = conn.take_dm_open_requests();
             if requests.is_empty() {
                 continue;
@@ -3370,7 +3443,12 @@ impl eframe::App for ConclaveGUI {
                 },
             );
         }
+    }
 
+    /// Render each open file-browser window.
+    #[inline]
+    #[allow(clippy::too_many_lines)]
+    fn file_windows(&mut self, ui: &mut egui::Ui, conn_snapshots: &[ConnSnapshot]) {
         // ── Per-server file-browser windows ───────────────────────────────
         {
             let live: HashSet<String> = conn_snapshots.iter().map(|(k, ..)| k.clone()).collect();
@@ -3392,7 +3470,7 @@ impl eframe::App for ConclaveGUI {
             .map(|o| o.clone())
             .unwrap_or_default();
 
-        for (key, name, _active, conn) in &conn_snapshots {
+        for (key, name, _active, conn) in conn_snapshots {
             if !file_open_keys.contains(key) {
                 continue;
             }
@@ -3604,7 +3682,12 @@ impl eframe::App for ConclaveGUI {
                 },
             );
         }
+    }
 
+    /// Render each open forum window.
+    #[inline]
+    #[allow(clippy::too_many_lines)]
+    fn forum_windows(&mut self, ui: &mut egui::Ui, conn_snapshots: &[ConnSnapshot]) {
         // ── Per-server forum windows ──────────────────────────────────────
         {
             let live: HashSet<String> = conn_snapshots.iter().map(|(k, ..)| k.clone()).collect();
@@ -3626,7 +3709,7 @@ impl eframe::App for ConclaveGUI {
             .map(|o| o.clone())
             .unwrap_or_default();
 
-        for (key, name, _active, conn) in &conn_snapshots {
+        for (key, name, _active, conn) in conn_snapshots {
             if !forum_open_keys.contains(key) {
                 continue;
             }
@@ -3949,7 +4032,11 @@ impl eframe::App for ConclaveGUI {
                 },
             );
         }
+    }
 
+    /// Render each open administration window.
+    #[inline]
+    fn admin_windows(&mut self, ui: &mut egui::Ui, conn_snapshots: &[ConnSnapshot]) {
         // ── Per-server admin windows (admin connections only) ─────────────
         let admin_open_keys: HashSet<String> = self
             .open_admin_windows
@@ -3957,7 +4044,7 @@ impl eframe::App for ConclaveGUI {
             .map(|o| o.clone())
             .unwrap_or_default();
 
-        for (key, name, _active, conn) in &conn_snapshots {
+        for (key, name, _active, conn) in conn_snapshots {
             if !admin_open_keys.contains(key) || !conn.is_admin() {
                 continue;
             }
@@ -3985,10 +4072,15 @@ impl eframe::App for ConclaveGUI {
                 },
             );
         }
+    }
 
+    /// Render the root connection-launcher panel.
+    #[inline]
+    #[allow(clippy::too_many_lines)]
+    fn root_window(&mut self, ui: &mut egui::Ui, conn_snapshots: &[ConnSnapshot]) {
         // ── Root window: connection launcher ──────────────────────────────
         egui::CentralPanel::default().show(ui, |ui| {
-            if has_connections {
+            if !conn_snapshots.is_empty() {
                 ui.horizontal(|ui| {
                     ui.label(format!("Connected to {} server(s).", conn_snapshots.len()));
                     if ui.small_button("Show Servers").clicked() {
