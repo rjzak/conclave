@@ -11,8 +11,11 @@ mod files;
 
 use conclave_common::URL_PROTOCOL;
 use conclave_common::admin::server::{
-    AdminUser, Chatroom, ClientAdminMessagesEncrypted, CreateGroup, Group,
+    AdminForumTopic, AdminUser, Chatroom, ClientAdminMessagesEncrypted, CreateGroup, Group,
     ServerAdminMessagesEncrypted, is_reserved_red,
+};
+use conclave_common::forum::{
+    ForumPost, ForumSignature, ForumThreadInfo, ForumTopic, NewForumPost, NewForumThread,
 };
 use conclave_common::net::{
     DEFAULT_REKEY_INTERVAL, DefaultEncryptedStream, EncryptedRead, EncryptedWrite, random_keypair,
@@ -164,6 +167,12 @@ pub struct State {
     /// Chatroom membership: room id -> the connection ids currently present.
     chat_members: Arc<RwLock<HashMap<u16, HashSet<u16>>>>,
 
+    /// Whether threaded discussions (forums) are enabled on the server
+    forums_enabled: Arc<AtomicBool>,
+
+    /// Forum thread subscriptions: thread id -> connection ids currently viewing.
+    forum_viewers: Arc<RwLock<HashMap<u32, HashSet<u16>>>>,
+
     /// Whether the server is currently serving requests
     serving: Arc<AtomicBool>,
 
@@ -313,6 +322,8 @@ impl State {
                 allow_anonymous: Arc::new(AtomicBool::new(true)), // Database default
                 chat_enabled: Arc::new(AtomicBool::new(false)),   // Database default
                 chat_members: Arc::new(RwLock::new(HashMap::new())),
+                forums_enabled: Arc::new(AtomicBool::new(false)), // Database default
+                forum_viewers: Arc::new(RwLock::new(HashMap::new())),
                 serving: Arc::new(AtomicBool::new(false)),
                 mdns: mdns.then(|| ServiceDaemon::new().expect("Failed to start Multicast DNS")),
                 share_directory: None,
@@ -358,12 +369,13 @@ impl State {
             trackers,
             allow_anonymous,
             chat_enabled,
+            forums_enabled,
             max_upload_size,
             max_connections,
         ) = {
             let conn = Connection::open(&sqlite_path)?;
             let mut stmt = conn
-                .prepare("SELECT name, description, key, version, advertised_domain, allow_anonymous_clients, chat_enabled, max_upload_size, max_connections FROM SERVER_CONFIG")?;
+                .prepare("SELECT name, description, key, version, advertised_domain, allow_anonymous_clients, chat_enabled, forums_enabled, max_upload_size, max_connections FROM SERVER_CONFIG")?;
             let (
                 name,
                 description,
@@ -372,6 +384,7 @@ impl State {
                 advertised_domain,
                 allow_anonymous,
                 chat_enabled,
+                forums_enabled,
                 max_upload_size,
                 max_connections,
             ) = stmt.query_row([], |row| {
@@ -382,8 +395,9 @@ impl State {
                 let advertised_domain: Option<String> = row.get(4)?;
                 let allow_anonymous: bool = row.get(5)?;
                 let chat_enabled: bool = row.get(6)?;
-                let max_upload_size: Option<u64> = row.get(7)?;
-                let max_connections: Option<u16> = row.get(8)?;
+                let forums_enabled: bool = row.get(7)?;
+                let max_upload_size: Option<u64> = row.get(8)?;
+                let max_connections: Option<u16> = row.get(9)?;
                 Ok((
                     name,
                     description,
@@ -392,6 +406,7 @@ impl State {
                     advertised_domain,
                     allow_anonymous,
                     chat_enabled,
+                    forums_enabled,
                     max_upload_size,
                     max_connections,
                 ))
@@ -452,6 +467,7 @@ impl State {
                 trackers,
                 allow_anonymous,
                 chat_enabled,
+                forums_enabled,
                 max_upload_size,
                 max_connections,
             )
@@ -481,6 +497,8 @@ impl State {
             allow_anonymous: Arc::new(AtomicBool::new(allow_anonymous)),
             chat_enabled: Arc::new(AtomicBool::new(chat_enabled)),
             chat_members: Arc::new(RwLock::new(HashMap::new())),
+            forums_enabled: Arc::new(AtomicBool::new(forums_enabled)),
+            forum_viewers: Arc::new(RwLock::new(HashMap::new())),
             serving: Arc::new(AtomicBool::new(false)),
             mdns: mdns.then(|| ServiceDaemon::new().expect("Failed to start Multicast DNS")),
             share_directory: None,
@@ -1883,6 +1901,16 @@ impl State {
                                                         .await,
                                                 )
                                                 .to_vec();
+                                            // Likewise push the forum topics this
+                                            // user may see, so forums are ready
+                                            // without an extra round-trip.
+                                            let forum_bytes =
+                                                ClientMessagesEncrypted::ForumTopicsResponse(
+                                                    self_clone
+                                                        .forum_topics_for_user(user_id, admin)
+                                                        .await,
+                                                )
+                                                .to_vec();
                                             let send_result = {
                                                 let mut guard = write.write().await;
                                                 let mut result = guard.send(&server_bytes).await;
@@ -1891,6 +1919,9 @@ impl State {
                                                 }
                                                 if result.is_ok() {
                                                     result = guard.send(&chat_bytes).await;
+                                                }
+                                                if result.is_ok() {
+                                                    result = guard.send(&forum_bytes).await;
                                                 }
                                                 result
                                             };
@@ -2070,6 +2101,114 @@ impl State {
                     self.chat_send(user.id, room, message, &user).await;
                 }
 
+                Ok(ServerMessagesEncrypted::ForumTopicsRequest) => {
+                    let topics = self.forum_topics_for_user(user.user_id, user.admin).await;
+                    reply(
+                        &write,
+                        &addr,
+                        &ClientMessagesEncrypted::ForumTopicsResponse(topics),
+                    )
+                    .await;
+                }
+
+                Ok(ServerMessagesEncrypted::ForumThreadsRequest { topic }) => {
+                    if self.can_access_topic(topic, user.user_id, user.admin).await {
+                        let threads = self.forum_threads(topic).await;
+                        reply(
+                            &write,
+                            &addr,
+                            &ClientMessagesEncrypted::ForumThreadsResponse { topic, threads },
+                        )
+                        .await;
+                    }
+                }
+
+                Ok(ServerMessagesEncrypted::ForumThreadOpen { thread }) => {
+                    self.forum_open(user.id, thread, &user).await;
+                }
+
+                Ok(ServerMessagesEncrypted::ForumThreadClose { thread }) => {
+                    self.forum_close(user.id, thread).await;
+                }
+
+                Ok(ServerMessagesEncrypted::ForumNewThread(new)) => {
+                    let topic = new.topic;
+                    if self.can_access_topic(topic, user.user_id, user.admin).await {
+                        match self.create_forum_thread(new, &user).await {
+                            Ok(info) => self.broadcast_forum_thread(topic, info).await,
+                            Err(e) => {
+                                reply(
+                                    &write,
+                                    &addr,
+                                    &ClientMessagesEncrypted::Error(ServerError::ActionFailed(
+                                        e.to_string(),
+                                    )),
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
+
+                Ok(ServerMessagesEncrypted::ForumNewPost(new)) => {
+                    let thread = new.thread;
+                    if self
+                        .can_access_thread(thread, user.user_id, user.admin)
+                        .await
+                    {
+                        match self.create_forum_post(new, &user).await {
+                            Ok(post) => {
+                                self.broadcast_to_thread(
+                                    thread,
+                                    &ClientMessagesEncrypted::ForumPostEvent { post },
+                                )
+                                .await;
+                            }
+                            Err(e) => {
+                                reply(
+                                    &write,
+                                    &addr,
+                                    &ClientMessagesEncrypted::Error(ServerError::ActionFailed(
+                                        e.to_string(),
+                                    )),
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
+
+                Ok(ServerMessagesEncrypted::ForumDeletePost { post }) => {
+                    if user.admin {
+                        match self.delete_forum_post(post).await {
+                            Ok(thread) => {
+                                self.broadcast_to_thread(
+                                    thread,
+                                    &ClientMessagesEncrypted::ForumPostDeleted { thread, post },
+                                )
+                                .await;
+                            }
+                            Err(e) => {
+                                reply(
+                                    &write,
+                                    &addr,
+                                    &ClientMessagesEncrypted::Error(ServerError::ActionFailed(
+                                        e.to_string(),
+                                    )),
+                                )
+                                .await;
+                            }
+                        }
+                    } else {
+                        reply(
+                            &write,
+                            &addr,
+                            &ClientMessagesEncrypted::Error(ServerError::NotAuthorized),
+                        )
+                        .await;
+                    }
+                }
+
                 Ok(ServerMessagesEncrypted::FileListRequest { path }) => {
                     let response = self.file_list(&path, &user).await;
                     reply(&write, &addr, &response).await;
@@ -2187,6 +2326,7 @@ impl State {
             let _ = std::fs::remove_file(&pending.temp_path);
         }
         self.chat_leave_all(user.id, &user.display_name).await;
+        self.forum_leave_all(user.id).await;
         self.connections.write().await.retain(|c| c.addr != addr);
         self.broadcast_user_list().await;
         self.notify_trackers();
@@ -2279,6 +2419,33 @@ impl State {
             ServerAdminMessagesEncrypted::DeleteChatroom(id) => {
                 self.delete_chatroom(id).await.map(|()| ok)
             }
+            ServerAdminMessagesEncrypted::SetForumsEnabled(enabled) => {
+                self.set_forums_enabled(enabled).await.map(|()| ok)
+            }
+            ServerAdminMessagesEncrypted::ListForumTopics => self
+                .admin_list_forum_topics()
+                .await
+                .map(ClientAdminMessagesEncrypted::ForumTopicsResponse),
+            ServerAdminMessagesEncrypted::CreateForumTopic {
+                name,
+                description,
+                groups,
+            } => self
+                .create_forum_topic(name, description, groups)
+                .await
+                .map(|()| ok),
+            ServerAdminMessagesEncrypted::EditForumTopic {
+                id,
+                name,
+                description,
+                groups,
+            } => self
+                .edit_forum_topic(id, name, description, groups)
+                .await
+                .map(|()| ok),
+            ServerAdminMessagesEncrypted::DeleteForumTopic(id) => {
+                self.delete_forum_topic(id).await.map(|()| ok)
+            }
             ServerAdminMessagesEncrypted::GetServerLimits => Ok(
                 ClientAdminMessagesEncrypted::ServerLimitsResponse(self.server_limits()),
             ),
@@ -2323,6 +2490,7 @@ impl State {
             anonymous: self.allow_anonymous.load(Ordering::Relaxed),
             users_connected: u32::try_from(self.connections.read().await.len()).unwrap_or_default(),
             chat_enabled: self.chat_enabled.load(Ordering::Relaxed),
+            forums_enabled: self.forums_enabled.load(Ordering::Relaxed),
             sharing_enabled: self.share_directory.is_some(),
         }
     }
@@ -2759,6 +2927,565 @@ impl State {
         .await;
     }
 
+    // ── Forums ────────────────────────────────────────────────────────────
+
+    /// Whether forums are enabled on the server.
+    #[inline]
+    #[must_use]
+    pub fn forums_enabled(&self) -> bool {
+        self.forums_enabled.load(Ordering::Relaxed)
+    }
+
+    /// (Admin) Enable or disable forums. Disabling clears thread subscriptions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on a database failure.
+    pub async fn set_forums_enabled(&self, enabled: bool) -> Result<()> {
+        self.sqlite
+            .conn(move |conn| {
+                conn.execute("UPDATE SERVER_CONFIG SET forums_enabled = ?1;", [enabled])
+            })
+            .await?;
+        self.forums_enabled.store(enabled, Ordering::Relaxed);
+        if !enabled {
+            self.forum_viewers.write().await.clear();
+        }
+        self.broadcast_server_info().await;
+        self.broadcast_forum_topics().await;
+        Ok(())
+    }
+
+    /// (Admin) All forum topics with their group restrictions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on a database failure.
+    pub async fn admin_list_forum_topics(&self) -> Result<Vec<AdminForumTopic>> {
+        let topics = self
+            .sqlite
+            .conn(move |conn| {
+                let mut stmt =
+                    conn.prepare("SELECT id, name, description FROM FORUM_TOPIC ORDER BY id;")?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, u32>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })?
+                    .collect::<async_sqlite::rusqlite::Result<Vec<(u32, String, String)>>>()?;
+
+                let mut topics = Vec::with_capacity(rows.len());
+                for (id, name, description) in rows {
+                    let mut gstmt = conn.prepare(
+                        "SELECT gid FROM FORUM_TOPIC_GROUP WHERE topic = ?1 ORDER BY gid;",
+                    )?;
+                    let groups = gstmt
+                        .query_map([id], |row| row.get::<_, u32>(0))?
+                        .collect::<async_sqlite::rusqlite::Result<Vec<u32>>>()?;
+                    topics.push(AdminForumTopic {
+                        id,
+                        name,
+                        description,
+                        groups,
+                    });
+                }
+                Ok(topics)
+            })
+            .await?;
+        Ok(topics)
+    }
+
+    /// (Admin) Create a forum topic, restricted to the given group ids (empty
+    /// means open to everyone).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the name is empty or already taken, or on a database
+    /// failure.
+    pub async fn create_forum_topic(
+        &self,
+        name: String,
+        description: String,
+        groups: Vec<u32>,
+    ) -> Result<()> {
+        ensure!(!name.trim().is_empty(), "Topic name cannot be empty");
+        self.sqlite
+            .conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO FORUM_TOPIC(name, description) VALUES(?1, ?2);",
+                    params![name, description],
+                )?;
+                let id = conn.last_insert_rowid();
+                for gid in &groups {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO FORUM_TOPIC_GROUP(topic, gid) VALUES(?1, ?2);",
+                        params![id, gid],
+                    )?;
+                }
+                Ok(())
+            })
+            .await?;
+        self.broadcast_forum_topics().await;
+        Ok(())
+    }
+
+    /// (Admin) Rename a forum topic, update its description, and replace its
+    /// group restrictions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the name is empty, or on a database failure.
+    pub async fn edit_forum_topic(
+        &self,
+        id: u32,
+        name: String,
+        description: String,
+        groups: Vec<u32>,
+    ) -> Result<()> {
+        ensure!(!name.trim().is_empty(), "Topic name cannot be empty");
+        self.sqlite
+            .conn(move |conn| {
+                conn.execute(
+                    "UPDATE FORUM_TOPIC SET name = ?1, description = ?2 WHERE id = ?3;",
+                    params![name, description, id],
+                )?;
+                conn.execute("DELETE FROM FORUM_TOPIC_GROUP WHERE topic = ?1;", [id])?;
+                for gid in &groups {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO FORUM_TOPIC_GROUP(topic, gid) VALUES(?1, ?2);",
+                        params![id, gid],
+                    )?;
+                }
+                Ok(())
+            })
+            .await?;
+        self.broadcast_forum_topics().await;
+        Ok(())
+    }
+
+    /// (Admin) Delete a forum topic and all its threads and posts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on a database failure.
+    pub async fn delete_forum_topic(&self, id: u32) -> Result<()> {
+        self.sqlite
+            .conn(move |conn| {
+                conn.execute(
+                    "DELETE FROM FORUM_POST WHERE thread IN \
+                     (SELECT id FROM FORUM_THREAD WHERE topic = ?1);",
+                    [id],
+                )?;
+                conn.execute("DELETE FROM FORUM_THREAD WHERE topic = ?1;", [id])?;
+                conn.execute("DELETE FROM FORUM_TOPIC_GROUP WHERE topic = ?1;", [id])?;
+                conn.execute("DELETE FROM FORUM_TOPIC WHERE id = ?1;", [id])
+            })
+            .await?;
+        self.broadcast_forum_topics().await;
+        Ok(())
+    }
+
+    /// The forum topics a user may access. Empty when forums are disabled. A
+    /// topic with no group restriction is open to everyone; otherwise the user
+    /// must be an admin or a member of one of the topic's groups.
+    async fn forum_topics_for_user(&self, user_id: Option<u32>, admin: bool) -> Vec<ForumTopic> {
+        if !self.forums_enabled.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+        let uid = user_id.map_or(-1_i64, i64::from);
+        self.sqlite
+            .conn(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT t.id, t.name, t.description FROM FORUM_TOPIC t \
+                     WHERE NOT EXISTS(SELECT 1 FROM FORUM_TOPIC_GROUP tg WHERE tg.topic = t.id) \
+                        OR ?1 \
+                        OR EXISTS(SELECT 1 FROM FORUM_TOPIC_GROUP tg \
+                                  JOIN USERGROUP ug ON ug.gid = tg.gid \
+                                  WHERE tg.topic = t.id AND ug.uid = ?2) \
+                     ORDER BY t.id;",
+                )?;
+                stmt.query_map(params![admin, uid], |row| {
+                    Ok(ForumTopic {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        description: row.get(2)?,
+                    })
+                })?
+                .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()
+            })
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Whether a user may access a specific forum topic.
+    async fn can_access_topic(&self, topic: u32, user_id: Option<u32>, admin: bool) -> bool {
+        if !self.forums_enabled.load(Ordering::Relaxed) {
+            return false;
+        }
+        let uid = user_id.map_or(-1_i64, i64::from);
+        let allowed = self
+            .sqlite
+            .conn(move |conn| {
+                conn.query_row(
+                    "SELECT (NOT EXISTS(SELECT 1 FROM FORUM_TOPIC_GROUP WHERE topic = ?1)) \
+                     OR ?2 \
+                     OR EXISTS(SELECT 1 FROM FORUM_TOPIC_GROUP tg \
+                               JOIN USERGROUP ug ON ug.gid = tg.gid \
+                               WHERE tg.topic = ?1 AND ug.uid = ?3) \
+                     FROM FORUM_TOPIC WHERE id = ?1;",
+                    params![topic, admin, uid],
+                    |row| row.get::<_, bool>(0),
+                )
+                .optional()
+            })
+            .await;
+        matches!(allowed, Ok(Some(true)))
+    }
+
+    /// The topic a thread belongs to, if it exists.
+    async fn topic_of_thread(&self, thread: u32) -> Option<u32> {
+        self.sqlite
+            .conn(move |conn| {
+                conn.query_row(
+                    "SELECT topic FROM FORUM_THREAD WHERE id = ?1;",
+                    [thread],
+                    |row| row.get::<_, u32>(0),
+                )
+                .optional()
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Whether a user may access the thread's topic.
+    async fn can_access_thread(&self, thread: u32, user_id: Option<u32>, admin: bool) -> bool {
+        match self.topic_of_thread(thread).await {
+            Some(topic) => self.can_access_topic(topic, user_id, admin).await,
+            None => false,
+        }
+    }
+
+    /// Send each connected client its own list of accessible forum topics.
+    async fn broadcast_forum_topics(&self) {
+        let targets: Vec<_> = self
+            .connections
+            .read()
+            .await
+            .iter()
+            .map(|c| (c.conn.clone(), c.user.user_id, c.user.admin))
+            .collect();
+        for (writer, user_id, admin) in targets {
+            let topics = self.forum_topics_for_user(user_id, admin).await;
+            let bytes = ClientMessagesEncrypted::ForumTopicsResponse(topics).to_vec();
+            if let Err(e) = writer.write().await.send(&bytes).await {
+                error!("Failed to send forum topics: {e}");
+            }
+        }
+    }
+
+    /// The threads within a topic, most-recently-active first.
+    async fn forum_threads(&self, topic: u32) -> Vec<ForumThreadInfo> {
+        self.sqlite
+            .conn(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT th.id, th.topic, th.subject, th.author_name, th.created_at, \
+                            COALESCE(MAX(p.created_at), th.created_at) AS last_activity, \
+                            COUNT(CASE WHEN p.reply_to IS NOT NULL THEN 1 END) AS reply_count \
+                     FROM FORUM_THREAD th LEFT JOIN FORUM_POST p ON p.thread = th.id \
+                     WHERE th.topic = ?1 GROUP BY th.id ORDER BY last_activity DESC;",
+                )?;
+                stmt.query_map([topic], |row| {
+                    Ok(ForumThreadInfo {
+                        id: row.get(0)?,
+                        topic: row.get(1)?,
+                        subject: row.get(2)?,
+                        author_name: row.get(3)?,
+                        created_at: row.get(4)?,
+                        last_activity: row.get(5)?,
+                        reply_count: row.get(6)?,
+                    })
+                })?
+                .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()
+            })
+            .await
+            .unwrap_or_default()
+    }
+
+    /// A single thread's summary (for pushing after creation).
+    async fn forum_thread_info(&self, thread: u32) -> Option<ForumThreadInfo> {
+        self.sqlite
+            .conn(move |conn| {
+                conn.query_row(
+                    "SELECT th.id, th.topic, th.subject, th.author_name, th.created_at, \
+                            COALESCE(MAX(p.created_at), th.created_at) AS last_activity, \
+                            COUNT(CASE WHEN p.reply_to IS NOT NULL THEN 1 END) AS reply_count \
+                     FROM FORUM_THREAD th LEFT JOIN FORUM_POST p ON p.thread = th.id \
+                     WHERE th.id = ?1 GROUP BY th.id;",
+                    [thread],
+                    |row| {
+                        Ok(ForumThreadInfo {
+                            id: row.get(0)?,
+                            topic: row.get(1)?,
+                            subject: row.get(2)?,
+                            author_name: row.get(3)?,
+                            created_at: row.get(4)?,
+                            last_activity: row.get(5)?,
+                            reply_count: row.get(6)?,
+                        })
+                    },
+                )
+                .optional()
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// All posts within a thread, in creation order.
+    async fn forum_posts(&self, thread: u32) -> Vec<ForumPost> {
+        self.sqlite
+            .conn(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, thread, reply_to, author_user, author_name, body, is_markdown, \
+                            public_key, signature, created_at \
+                     FROM FORUM_POST WHERE thread = ?1 ORDER BY id;",
+                )?;
+                stmt.query_map([thread], row_to_forum_post)?
+                    .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()
+            })
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Create a new thread with its opening post. Returns the thread summary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subject or body is empty, or on a database failure.
+    async fn create_forum_thread(
+        &self,
+        new: NewForumThread,
+        user: &ConnectedUser,
+    ) -> Result<ForumThreadInfo> {
+        ensure!(
+            !new.subject.trim().is_empty(),
+            "Thread subject cannot be empty"
+        );
+        ensure!(!new.body.trim().is_empty(), "Post body cannot be empty");
+
+        let topic = new.topic;
+        let author_user = user.user_id;
+        let author_name = user.display_name.clone();
+        let subject = new.subject;
+        let body = new.body;
+        let markdown = new.markdown;
+        let (public_key, signature) = split_signature(new.signature.as_ref());
+
+        let thread_id = self
+            .sqlite
+            .conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO FORUM_THREAD(topic, subject, author_user, author_name) \
+                     VALUES(?1, ?2, ?3, ?4);",
+                    params![topic, subject, author_user, author_name],
+                )?;
+                let thread_id = conn.last_insert_rowid();
+                conn.execute(
+                    "INSERT INTO FORUM_POST(thread, reply_to, author_user, author_name, body, \
+                                            is_markdown, public_key, signature) \
+                     VALUES(?1, NULL, ?2, ?3, ?4, ?5, ?6, ?7);",
+                    params![
+                        thread_id,
+                        author_user,
+                        author_name,
+                        body,
+                        markdown,
+                        public_key,
+                        signature
+                    ],
+                )?;
+                Ok(thread_id)
+            })
+            .await?;
+
+        let thread_id = u32::try_from(thread_id).unwrap_or_default();
+        self.forum_thread_info(thread_id)
+            .await
+            .ok_or_else(|| anyhow!("Created thread {thread_id} vanished"))
+    }
+
+    /// Create a reply within a thread. Returns the stored post.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the body is empty or on a database failure.
+    async fn create_forum_post(
+        &self,
+        new: NewForumPost,
+        user: &ConnectedUser,
+    ) -> Result<ForumPost> {
+        ensure!(!new.body.trim().is_empty(), "Post body cannot be empty");
+
+        let thread = new.thread;
+        let reply_to = new.reply_to;
+        let author_user = user.user_id;
+        let author_name = user.display_name.clone();
+        let body = new.body;
+        let markdown = new.markdown;
+        let (public_key, signature) = split_signature(new.signature.as_ref());
+
+        let post_id = self
+            .sqlite
+            .conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO FORUM_POST(thread, reply_to, author_user, author_name, body, \
+                                            is_markdown, public_key, signature) \
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);",
+                    params![
+                        thread,
+                        reply_to,
+                        author_user,
+                        author_name,
+                        body,
+                        markdown,
+                        public_key,
+                        signature
+                    ],
+                )?;
+                Ok(conn.last_insert_rowid())
+            })
+            .await?;
+
+        let post_id = u32::try_from(post_id).unwrap_or_default();
+        self.sqlite
+            .conn(move |conn| {
+                conn.query_row(
+                    "SELECT id, thread, reply_to, author_user, author_name, body, is_markdown, \
+                            public_key, signature, created_at FROM FORUM_POST WHERE id = ?1;",
+                    [post_id],
+                    row_to_forum_post,
+                )
+            })
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Delete a post. Promotes any replies to the deleted post's parent so the
+    /// tree stays connected. Returns the thread the post belonged to.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the post does not exist or on a database failure.
+    async fn delete_forum_post(&self, post: u32) -> Result<u32> {
+        self.sqlite
+            .conn(move |conn| {
+                let thread: u32 = conn.query_row(
+                    "SELECT thread FROM FORUM_POST WHERE id = ?1;",
+                    [post],
+                    |r| r.get(0),
+                )?;
+                conn.execute(
+                    "UPDATE FORUM_POST SET reply_to = \
+                        (SELECT reply_to FROM FORUM_POST WHERE id = ?1) WHERE reply_to = ?1;",
+                    [post],
+                )?;
+                conn.execute("DELETE FROM FORUM_POST WHERE id = ?1;", [post])?;
+                Ok(thread)
+            })
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Subscribe a connection to a thread's live posts and send it the current
+    /// posts. Ignored if the user cannot access the thread.
+    async fn forum_open(&self, connection_id: u16, thread: u32, user: &ConnectedUser) {
+        if !self
+            .can_access_thread(thread, user.user_id, user.admin)
+            .await
+        {
+            return;
+        }
+        self.forum_viewers
+            .write()
+            .await
+            .entry(thread)
+            .or_default()
+            .insert(connection_id);
+        let posts = self.forum_posts(thread).await;
+        self.send_to_connection(
+            connection_id,
+            &ClientMessagesEncrypted::ForumThreadResponse { thread, posts },
+        )
+        .await;
+    }
+
+    /// Unsubscribe a connection from a thread's live posts.
+    async fn forum_close(&self, connection_id: u16, thread: u32) {
+        let mut viewers = self.forum_viewers.write().await;
+        if let Some(set) = viewers.get_mut(&thread) {
+            set.remove(&connection_id);
+            if set.is_empty() {
+                viewers.remove(&thread);
+            }
+        }
+    }
+
+    /// Remove a connection from every thread subscription (on disconnect).
+    async fn forum_leave_all(&self, connection_id: u16) {
+        self.forum_viewers.write().await.retain(|_, set| {
+            set.remove(&connection_id);
+            !set.is_empty()
+        });
+    }
+
+    /// Send a message to every connection currently viewing a thread.
+    async fn broadcast_to_thread(&self, thread: u32, message: &ClientMessagesEncrypted) {
+        let ids = self
+            .forum_viewers
+            .read()
+            .await
+            .get(&thread)
+            .cloned()
+            .unwrap_or_default();
+        let bytes = message.to_vec();
+        let writers: Vec<_> = self
+            .connections
+            .read()
+            .await
+            .iter()
+            .filter(|c| ids.contains(&c.connection_id))
+            .map(|c| c.conn.clone())
+            .collect();
+        for writer in writers {
+            if let Err(e) = writer.write().await.send(&bytes).await {
+                error!("Failed to send forum post: {e}");
+            }
+        }
+    }
+
+    /// Push a newly-created thread to everyone who may see its topic.
+    async fn broadcast_forum_thread(&self, topic: u32, thread: ForumThreadInfo) {
+        let targets: Vec<_> = self
+            .connections
+            .read()
+            .await
+            .iter()
+            .map(|c| (c.conn.clone(), c.user.user_id, c.user.admin))
+            .collect();
+        let bytes = ClientMessagesEncrypted::ForumThreadEvent { topic, thread }.to_vec();
+        for (writer, user_id, admin) in targets {
+            if self.can_access_topic(topic, user_id, admin).await
+                && let Err(e) = writer.write().await.send(&bytes).await
+            {
+                error!("Failed to send forum thread event: {e}");
+            }
+        }
+    }
+
     /// Get a list of connected users
     pub async fn connected_users(&self) -> Vec<ConnectedUser> {
         let now = Local::now().to_utc();
@@ -3100,6 +3827,47 @@ async fn reply(
 #[inline]
 fn color_to_db([r, g, b]: [u8; 3]) -> i64 {
     (i64::from(r) << 16) | (i64::from(g) << 8) | i64::from(b)
+}
+
+/// Split an optional forum signature into its stored `(public_key, signature)`
+/// blob columns.
+#[inline]
+fn split_signature(signature: Option<&ForumSignature>) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+    match signature {
+        Some(sig) => (Some(sig.public_key.to_vec()), Some(sig.signature.clone())),
+        None => (None, None),
+    }
+}
+
+/// Build a [`ForumPost`] from a `FORUM_POST` row selected as
+/// `(id, thread, reply_to, author_user, author_name, body, is_markdown, public_key, signature, created_at)`.
+fn row_to_forum_post(
+    row: &async_sqlite::rusqlite::Row<'_>,
+) -> async_sqlite::rusqlite::Result<ForumPost> {
+    let public_key: Option<Vec<u8>> = row.get(7)?;
+    let signature: Option<Vec<u8>> = row.get(8)?;
+    let signature = match (public_key, signature) {
+        (Some(key_bytes), Some(sig)) if key_bytes.len() == 32 => {
+            let mut public_key = [0u8; 32];
+            public_key.copy_from_slice(&key_bytes);
+            Some(ForumSignature {
+                public_key,
+                signature: sig,
+            })
+        }
+        _ => None,
+    };
+    Ok(ForumPost {
+        id: row.get(0)?,
+        thread: row.get(1)?,
+        reply_to: row.get(2)?,
+        author_user: row.get(3)?,
+        author_name: row.get(4)?,
+        body: row.get(5)?,
+        markdown: row.get(6)?,
+        created_at: row.get(9)?,
+        signature,
+    })
 }
 
 /// Unpack a database `0xRRGGBB` integer into RGB bytes.

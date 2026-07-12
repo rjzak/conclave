@@ -2,6 +2,9 @@
 
 use conclave_common::dm;
 use conclave_common::files::{DirAcl, FileEntry, ShareInfo};
+use conclave_common::forum::{
+    ForumPost, ForumSignature, ForumThreadInfo, ForumTopic, NewForumPost, NewForumThread,
+};
 use conclave_common::net::{DefaultEncryptedStream, EncryptedWrite, SigningKey, VerifyingKey};
 use conclave_common::server::{
     ChatEvent, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser, ServerInformation,
@@ -26,8 +29,8 @@ type NamedAcl = (String, DirAcl);
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, Local};
 use conclave_common::admin::server::{
-    AdminUser, Chatroom, ClientAdminMessagesEncrypted, CreateGroup, CreateUser, Group,
-    GroupMembership, ServerAdminMessagesEncrypted, ServerLimits,
+    AdminForumTopic, AdminUser, Chatroom, ClientAdminMessagesEncrypted, CreateGroup, CreateUser,
+    Group, GroupMembership, ServerAdminMessagesEncrypted, ServerLimits,
 };
 use conclave_common::tracker::{Tracker, TrackerWithKey};
 use tokio::sync::RwLock;
@@ -144,6 +147,18 @@ pub struct ConclaveConnection {
     /// Local state of each joined chatroom, keyed by room id.
     pub(crate) chat_rooms: Arc<std::sync::RwLock<HashMap<u16, ChatRoom>>>,
 
+    /// Forum topics this user may access (from the server).
+    pub(crate) forum_topics: Arc<std::sync::RwLock<Vec<ForumTopic>>>,
+
+    /// Latest administrative forum-topic list (populated for admins on request).
+    pub(crate) admin_forum_topics: Arc<std::sync::RwLock<Vec<AdminForumTopic>>>,
+
+    /// Threads within each topic, keyed by topic id.
+    pub(crate) forum_threads: Arc<std::sync::RwLock<HashMap<u32, Vec<ForumThreadInfo>>>>,
+
+    /// Posts within each open thread, keyed by thread id.
+    pub(crate) forum_posts: Arc<std::sync::RwLock<HashMap<u32, Vec<ForumPost>>>>,
+
     /// Most recent shared-directory listing: `(path, entries)`.
     pub(crate) file_listing: Arc<std::sync::RwLock<Option<FileListing>>>,
 
@@ -217,6 +232,10 @@ impl ConclaveConnection {
             chatrooms_available: Arc::new(std::sync::RwLock::new(Vec::new())),
             admin_chatrooms: Arc::new(std::sync::RwLock::new(Vec::new())),
             chat_rooms: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            forum_topics: Arc::new(std::sync::RwLock::new(Vec::new())),
+            admin_forum_topics: Arc::new(std::sync::RwLock::new(Vec::new())),
+            forum_threads: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            forum_posts: Arc::new(std::sync::RwLock::new(HashMap::new())),
             file_listing: Arc::new(std::sync::RwLock::new(None)),
             download: Arc::new(std::sync::RwLock::new(None)),
             file_acl: Arc::new(std::sync::RwLock::new(None)),
@@ -298,6 +317,67 @@ impl ConclaveConnection {
                     }
                     ClientMessagesEncrypted::ChatActivity(event) => {
                         conn_clone.apply_chat_event(event);
+                    }
+                    ClientMessagesEncrypted::ForumTopicsResponse(topics) => {
+                        *conn_clone
+                            .forum_topics
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = topics;
+                    }
+                    ClientMessagesEncrypted::ForumThreadsResponse { topic, threads } => {
+                        conn_clone
+                            .forum_threads
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert(topic, threads);
+                    }
+                    ClientMessagesEncrypted::ForumThreadResponse { thread, posts } => {
+                        conn_clone
+                            .forum_posts
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert(thread, posts);
+                    }
+                    ClientMessagesEncrypted::ForumThreadEvent { topic, thread } => {
+                        let mut map = conn_clone
+                            .forum_threads
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let list = map.entry(topic).or_default();
+                        // Replace any existing entry, then float to the top as the
+                        // most recently active thread.
+                        list.retain(|t| t.id != thread.id);
+                        list.insert(0, thread);
+                    }
+                    ClientMessagesEncrypted::ForumPostEvent { post } => {
+                        let mut map = conn_clone
+                            .forum_posts
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Some(list) = map.get_mut(&post.thread)
+                            && !list.iter().any(|p| p.id == post.id)
+                        {
+                            // The server echoes to the sender too, so guard dupes.
+                            list.push(post);
+                        }
+                    }
+                    ClientMessagesEncrypted::ForumPostDeleted { thread, post } => {
+                        let mut map = conn_clone
+                            .forum_posts
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Some(list) = map.get_mut(&thread) {
+                            // Promote replies to the deleted post's parent, matching
+                            // the server, so the tree stays connected.
+                            let parent =
+                                list.iter().find(|p| p.id == post).and_then(|p| p.reply_to);
+                            for p in list.iter_mut() {
+                                if p.reply_to == Some(post) {
+                                    p.reply_to = parent;
+                                }
+                            }
+                            list.retain(|p| p.id != post);
+                        }
                     }
                     ClientMessagesEncrypted::FileListResponse { path, entries } => {
                         *conn_clone
@@ -386,6 +466,12 @@ impl ConclaveConnection {
                                 .admin_chatrooms
                                 .write()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner) = chatrooms;
+                        }
+                        ClientAdminMessagesEncrypted::ForumTopicsResponse(topics) => {
+                            *conn_clone
+                                .admin_forum_topics
+                                .write()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = topics;
                         }
                         ClientAdminMessagesEncrypted::FileAclResponse { path, acl } => {
                             *conn_clone
@@ -994,6 +1080,258 @@ impl ConclaveConnection {
     pub async fn chat_send(&self, room: u16, message: String) -> Result<()> {
         self.send_request(&ServerMessagesEncrypted::ChatSend { room, message }.to_vec())
             .await
+    }
+
+    // ── Forums ──────────────────────────────────────────────────────────────
+
+    /// Whether the server has forums enabled.
+    #[must_use]
+    pub fn forums_enabled(&self) -> bool {
+        self.server_info().forums_enabled
+    }
+
+    /// The forum topics this user may access, as last reported by the server.
+    #[must_use]
+    pub fn forum_topics(&self) -> Vec<ForumTopic> {
+        self.forum_topics
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The threads last received for a topic (empty until requested).
+    #[must_use]
+    pub fn forum_threads(&self, topic: u32) -> Vec<ForumThreadInfo> {
+        self.forum_threads
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&topic)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The posts for an open thread, or `None` if it has not been opened yet.
+    #[must_use]
+    pub fn forum_posts(&self, thread: u32) -> Option<Vec<ForumPost>> {
+        self.forum_posts
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&thread)
+            .cloned()
+    }
+
+    /// Request the forum topics this user may access.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn request_forum_topics(&self) -> Result<()> {
+        self.send_request(&ServerMessagesEncrypted::ForumTopicsRequest.to_vec())
+            .await
+    }
+
+    /// Request the threads within a topic; the reply lands in [`Self::forum_threads`].
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn request_forum_threads(&self, topic: u32) -> Result<()> {
+        self.send_request(&ServerMessagesEncrypted::ForumThreadsRequest { topic }.to_vec())
+            .await
+    }
+
+    /// Open a thread: subscribe to its posts. The current posts land in
+    /// [`Self::forum_posts`].
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn open_forum_thread(&self, thread: u32) -> Result<()> {
+        self.send_request(&ServerMessagesEncrypted::ForumThreadOpen { thread }.to_vec())
+            .await
+    }
+
+    /// Close a thread: unsubscribe and drop its local posts.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn close_forum_thread(&self, thread: u32) -> Result<()> {
+        self.forum_posts
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&thread);
+        self.send_request(&ServerMessagesEncrypted::ForumThreadClose { thread }.to_vec())
+            .await
+    }
+
+    /// Start a new thread. When `sign` is set, the body is signed with this
+    /// client's identity key.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn new_forum_thread(
+        &self,
+        topic: u32,
+        subject: String,
+        body: String,
+        markdown: bool,
+        sign: bool,
+    ) -> Result<()> {
+        let signature = sign.then(|| ForumSignature::sign(&self.signing_key, &body));
+        self.send_request(
+            &ServerMessagesEncrypted::ForumNewThread(NewForumThread {
+                topic,
+                subject,
+                body,
+                markdown,
+                signature,
+            })
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// Reply within a thread, optionally to a specific post and optionally signed.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn new_forum_post(
+        &self,
+        thread: u32,
+        reply_to: Option<u32>,
+        body: String,
+        markdown: bool,
+        sign: bool,
+    ) -> Result<()> {
+        let signature = sign.then(|| ForumSignature::sign(&self.signing_key, &body));
+        self.send_request(
+            &ServerMessagesEncrypted::ForumNewPost(NewForumPost {
+                thread,
+                reply_to,
+                body,
+                markdown,
+                signature,
+            })
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Delete a forum post by id.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn delete_forum_post(&self, post: u32) -> Result<()> {
+        self.send_request(&ServerMessagesEncrypted::ForumDeletePost { post }.to_vec())
+            .await
+    }
+
+    /// The most recently received administrative forum-topic list.
+    #[must_use]
+    pub fn admin_forum_topics(&self) -> Vec<AdminForumTopic> {
+        self.admin_forum_topics
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// (Admin) Request the forum topics with their group restrictions.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_list_forum_topics(&self) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::ListForumTopics,
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Enable or disable forums on the server.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_set_forums_enabled(&self, enabled: bool) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::SetForumsEnabled(enabled),
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Create a forum topic restricted to the given group ids.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_create_forum_topic(
+        &self,
+        name: String,
+        description: String,
+        groups: Vec<u32>,
+    ) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::CreateForumTopic {
+                    name,
+                    description,
+                    groups,
+                },
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Rename a forum topic, update its description, and replace groups.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_edit_forum_topic(
+        &self,
+        id: u32,
+        name: String,
+        description: String,
+        groups: Vec<u32>,
+    ) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::EditForumTopic {
+                    id,
+                    name,
+                    description,
+                    groups,
+                },
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// (Admin) Delete a forum topic and its threads and posts.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_delete_forum_topic(&self, id: u32) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::DeleteForumTopic(id),
+            )
+            .to_vec(),
+        )
+        .await
     }
 
     /// Whether the authenticated user on this connection is an administrator.

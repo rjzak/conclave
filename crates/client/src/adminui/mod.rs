@@ -6,6 +6,7 @@
 //! new areas can be added without growing a single giant function or file.
 
 mod chat;
+mod forum;
 mod groups;
 mod server;
 mod trackers;
@@ -32,16 +33,20 @@ pub enum AdminTab {
 
     /// Chat enablement and chatrooms.
     Chat,
+
+    /// Forum enablement and topics.
+    Forums,
 }
 
 impl AdminTab {
     /// All tabs in display order.
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Server,
         Self::Users,
         Self::Groups,
         Self::Trackers,
         Self::Chat,
+        Self::Forums,
     ];
 
     /// The tab's label for the tab bar.
@@ -52,6 +57,7 @@ impl AdminTab {
             Self::Groups => "Groups",
             Self::Trackers => "Trackers",
             Self::Chat => "Chat",
+            Self::Forums => "Forums",
         }
     }
 }
@@ -65,6 +71,7 @@ fn refresh_all(conn: &ConclaveConnection) {
         let _ = conn.admin_list_groups().await;
         let _ = conn.admin_list_trackers().await;
         let _ = conn.admin_list_chatrooms().await;
+        let _ = conn.admin_list_forum_topics().await;
         let _ = conn.admin_get_share_info().await;
         let _ = conn.admin_get_server_limits().await;
     });
@@ -111,6 +118,7 @@ pub fn admin_ui(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str) {
             AdminTab::Groups => groups::ui(ui, conn, key),
             AdminTab::Trackers => trackers::ui(ui, conn, key),
             AdminTab::Chat => chat::ui(ui, conn, key),
+            AdminTab::Forums => forum::ui(ui, conn, key),
         }
 
         ui.separator();

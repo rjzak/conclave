@@ -85,6 +85,37 @@ pub enum ServerAdminMessagesEncrypted {
     /// Delete a chatroom by id.
     DeleteChatroom(u16),
 
+    /// Enable or disable threaded discussions (forums) on the server.
+    SetForumsEnabled(bool),
+
+    /// Request the list of forum topics and their group restrictions.
+    ListForumTopics,
+
+    /// Create a forum topic, optionally restricted to the given group ids.
+    CreateForumTopic {
+        /// Topic name (must be unique)
+        name: String,
+        /// Topic description
+        description: String,
+        /// Group ids the topic is restricted to; empty means open to everyone.
+        groups: Vec<u32>,
+    },
+
+    /// Rename a forum topic, update its description, and replace its groups.
+    EditForumTopic {
+        /// Topic id
+        id: u32,
+        /// New topic name
+        name: String,
+        /// New topic description
+        description: String,
+        /// Group ids the topic is restricted to; empty means open to everyone.
+        groups: Vec<u32>,
+    },
+
+    /// Delete a forum topic by id (removes its threads and posts).
+    DeleteForumTopic(u32),
+
     /// Request the server-wide limits (max upload size, max connections).
     GetServerLimits,
 
@@ -126,6 +157,9 @@ pub enum ClientAdminMessagesEncrypted {
     /// The chatrooms and their group restrictions.
     ChatroomsResponse(Vec<Chatroom>),
 
+    /// The forum topics and their group restrictions.
+    ForumTopicsResponse(Vec<AdminForumTopic>),
+
     /// The server-wide limits (max upload size, max connections).
     ServerLimitsResponse(ServerLimits),
 
@@ -165,6 +199,22 @@ pub struct Chatroom {
     pub name: String,
 
     /// Group ids the room is restricted to; empty means open to everyone.
+    pub groups: Vec<u32>,
+}
+
+/// A forum topic as seen by an administrator, including its group restrictions.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AdminForumTopic {
+    /// Database id of the topic
+    pub id: u32,
+
+    /// Topic name
+    pub name: String,
+
+    /// Topic description
+    pub description: String,
+
+    /// Group ids the topic is restricted to; empty means open to everyone.
     pub groups: Vec<u32>,
 }
 

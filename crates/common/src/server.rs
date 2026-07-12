@@ -2,6 +2,7 @@
 
 use crate::admin::server::{ClientAdminMessagesEncrypted, ServerAdminMessagesEncrypted};
 use crate::files::FileEntry;
+use crate::forum::{ForumPost, ForumThreadInfo, ForumTopic, NewForumPost, NewForumThread};
 
 use chrono::{DateTime, Duration, Utc};
 pub use ed25519_dalek::VerifyingKey;
@@ -108,6 +109,7 @@ pub mod unencrypted {
 /// Server's information response, also used by the client to keep track
 /// of servers
 #[derive(Debug, Clone, Hash, Deserialize, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ServerInformation {
     /// Name of the server
     pub name: String,
@@ -132,6 +134,9 @@ pub struct ServerInformation {
 
     /// Whether chat is enabled on the server
     pub chat_enabled: bool,
+
+    /// Whether threaded discussions (forums) are enabled on the server
+    pub forums_enabled: bool,
 
     /// Whether the server exposes a shared file directory
     pub sharing_enabled: bool,
@@ -323,6 +328,39 @@ pub enum ServerMessagesEncrypted {
         message: String,
     },
 
+    /// Ask the server for the forum topics this user may access.
+    ForumTopicsRequest,
+
+    /// Ask the server for the threads within a forum topic.
+    ForumThreadsRequest {
+        /// Topic id
+        topic: u32,
+    },
+
+    /// Open a thread: subscribe to its new posts and receive the current ones.
+    ForumThreadOpen {
+        /// Thread id
+        thread: u32,
+    },
+
+    /// Close a thread: stop receiving its posts.
+    ForumThreadClose {
+        /// Thread id
+        thread: u32,
+    },
+
+    /// Start a new thread within a topic.
+    ForumNewThread(NewForumThread),
+
+    /// Reply within a thread.
+    ForumNewPost(NewForumPost),
+
+    /// Delete a forum post by id (administrators only).
+    ForumDeletePost {
+        /// Post id
+        post: u32,
+    },
+
     /// List a shared directory. `path` is relative to the share root, using `/`
     /// separators; an empty string is the root.
     FileListRequest {
@@ -461,6 +499,47 @@ pub enum ClientMessagesEncrypted {
 
     /// Live activity within a chatroom the user is a member of.
     ChatActivity(ChatEvent),
+
+    /// The forum topics this user may access (empty if forums are disabled).
+    ForumTopicsResponse(Vec<ForumTopic>),
+
+    /// The threads within a forum topic.
+    ForumThreadsResponse {
+        /// Topic id
+        topic: u32,
+        /// Threads in the topic, newest activity first
+        threads: Vec<ForumThreadInfo>,
+    },
+
+    /// The posts within a thread the user opened.
+    ForumThreadResponse {
+        /// Thread id
+        thread: u32,
+        /// Posts in the thread, in creation order
+        posts: Vec<ForumPost>,
+    },
+
+    /// A new thread was created in a topic the user may see.
+    ForumThreadEvent {
+        /// Topic id
+        topic: u32,
+        /// The new thread
+        thread: ForumThreadInfo,
+    },
+
+    /// A new post arrived in a thread the user has open.
+    ForumPostEvent {
+        /// The new post
+        post: ForumPost,
+    },
+
+    /// A post was deleted from a thread the user has open.
+    ForumPostDeleted {
+        /// Thread the post belonged to
+        thread: u32,
+        /// Deleted post id
+        post: u32,
+    },
 
     /// A shared-directory listing.
     FileListResponse {

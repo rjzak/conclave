@@ -3,6 +3,7 @@
 use conclave_client::config::{BookmarkEntry, KnownHost, UserAuth};
 use conclave_client::conn::{ChatLine, ConclaveConnection};
 use conclave_client::{Client, DiscoveredServer, discover_servers};
+use conclave_common::forum::ForumPost;
 use conclave_common::server::{
     ChatroomInfo, ConnectedUser, IDLE_TIMEOUT_MINUTES, UserAuthentication, VerifyingKey,
 };
@@ -485,6 +486,297 @@ fn spawn_connect(
     });
 }
 
+/// An action requested while rendering the forum post tree, applied after the
+/// tree is drawn (so the borrow of the post list has ended).
+enum ForumAction {
+    /// Reply to the given post id.
+    Reply(u32),
+    /// Delete the given post id (administrators only).
+    Delete(u32),
+}
+
+/// One inline span of minimal markdown.
+enum MdSpan {
+    /// Styled text run.
+    Styled {
+        /// The text.
+        text: String,
+        /// Rendered bold.
+        bold: bool,
+        /// Rendered italic.
+        italic: bool,
+        /// Rendered as inline code (monospace).
+        code: bool,
+    },
+    /// A `[label](url)` hyperlink.
+    Link {
+        /// Visible label.
+        label: String,
+        /// Target URL.
+        url: String,
+    },
+}
+
+/// Index of the next `needle` in `chars` at or after `from`, if any.
+fn find_char(chars: &[char], from: usize, needle: char) -> Option<usize> {
+    (from..chars.len()).find(|&i| chars[i] == needle)
+}
+
+/// Index of the first of two consecutive `needle`s at or after `from`, if any.
+fn find_double(chars: &[char], from: usize, needle: char) -> Option<usize> {
+    (from..chars.len().saturating_sub(1)).find(|&i| chars[i] == needle && chars[i + 1] == needle)
+}
+
+/// Parse a single line of text into minimal-markdown inline spans: `**bold**`,
+/// `*italic*`/`_italic_`, `` `code` ``, and `[label](url)` links. Anything not
+/// recognised is left as plain text.
+fn parse_inline(text: &str) -> Vec<MdSpan> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut spans = Vec::new();
+    let mut buf = String::new();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let c = chars[i];
+
+        // `code`
+        if c == '`'
+            && let Some(end) = find_char(&chars, i + 1, '`')
+        {
+            push_plain(&mut spans, &mut buf);
+            spans.push(MdSpan::Styled {
+                text: chars[i + 1..end].iter().collect(),
+                bold: false,
+                italic: false,
+                code: true,
+            });
+            i = end + 1;
+            continue;
+        }
+
+        // **bold**
+        if c == '*'
+            && i + 1 < chars.len()
+            && chars[i + 1] == '*'
+            && let Some(end) = find_double(&chars, i + 2, '*')
+        {
+            push_plain(&mut spans, &mut buf);
+            spans.push(MdSpan::Styled {
+                text: chars[i + 2..end].iter().collect(),
+                bold: true,
+                italic: false,
+                code: false,
+            });
+            i = end + 2;
+            continue;
+        }
+
+        // *italic* or _italic_
+        if (c == '*' || c == '_')
+            && let Some(end) = find_char(&chars, i + 1, c)
+            && end > i + 1
+        {
+            push_plain(&mut spans, &mut buf);
+            spans.push(MdSpan::Styled {
+                text: chars[i + 1..end].iter().collect(),
+                bold: false,
+                italic: true,
+                code: false,
+            });
+            i = end + 1;
+            continue;
+        }
+
+        // [label](url)
+        if c == '['
+            && let Some(close) = find_char(&chars, i + 1, ']')
+            && close + 1 < chars.len()
+            && chars[close + 1] == '('
+            && let Some(paren) = find_char(&chars, close + 2, ')')
+        {
+            push_plain(&mut spans, &mut buf);
+            spans.push(MdSpan::Link {
+                label: chars[i + 1..close].iter().collect(),
+                url: chars[close + 2..paren].iter().collect(),
+            });
+            i = paren + 1;
+            continue;
+        }
+
+        buf.push(c);
+        i += 1;
+    }
+
+    push_plain(&mut spans, &mut buf);
+    spans
+}
+
+/// Flush any buffered plain text into a span.
+fn push_plain(spans: &mut Vec<MdSpan>, buf: &mut String) {
+    if !buf.is_empty() {
+        spans.push(MdSpan::Styled {
+            text: std::mem::take(buf),
+            bold: false,
+            italic: false,
+            code: false,
+        });
+    }
+}
+
+/// Render one line's inline spans within a wrapping horizontal layout.
+fn render_inline_line(ui: &mut egui::Ui, line: &str) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for span in parse_inline(line) {
+            match span {
+                MdSpan::Styled {
+                    text,
+                    bold,
+                    italic,
+                    code,
+                } => {
+                    let mut rich = egui::RichText::new(text);
+                    if bold {
+                        rich = rich.strong();
+                    }
+                    if italic {
+                        rich = rich.italics();
+                    }
+                    if code {
+                        rich = rich
+                            .monospace()
+                            .background_color(ui.visuals().extreme_bg_color);
+                    }
+                    ui.label(rich);
+                }
+                MdSpan::Link { label, url } => {
+                    ui.hyperlink_to(label, url);
+                }
+            }
+        }
+    });
+}
+
+/// Render text with the minimal markdown subset: `#`/`##`/`###` headings,
+/// `-`/`*` bullets, blank-line spacing, and inline styling. Embedded content
+/// (images, HTML) is intentionally not supported.
+fn render_markdown(ui: &mut egui::Ui, text: &str) {
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("### ") {
+            ui.label(egui::RichText::new(rest).strong().size(14.0));
+        } else if let Some(rest) = line.strip_prefix("## ") {
+            ui.label(egui::RichText::new(rest).strong().size(16.0));
+        } else if let Some(rest) = line.strip_prefix("# ") {
+            ui.label(egui::RichText::new(rest).strong().size(18.0));
+        } else if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("  •  ");
+                render_inline_line(ui, rest);
+            });
+        } else if line.trim().is_empty() {
+            ui.add_space(4.0);
+        } else {
+            render_inline_line(ui, line);
+        }
+    }
+}
+
+/// Render a post's body, as markdown when the author chose it, otherwise plain.
+fn render_post_body(ui: &mut egui::Ui, post: &ForumPost) {
+    if post.markdown {
+        render_markdown(ui, &post.body);
+    } else {
+        ui.label(&post.body);
+    }
+}
+
+/// Recursively render the replies to `parent` within a thread, indenting each
+/// level. Requested actions are collected into `actions` and applied by the
+/// caller.
+fn render_forum_posts(
+    ui: &mut egui::Ui,
+    key: &str,
+    posts: &[ForumPost],
+    parent: Option<u32>,
+    depth: usize,
+    is_admin: bool,
+    actions: &mut Vec<ForumAction>,
+) {
+    for post in posts.iter().filter(|p| p.reply_to == parent) {
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(&post.author_name).strong());
+                ui.label(
+                    egui::RichText::new(post.created_at.format("%Y-%m-%d %H:%M").to_string())
+                        .weak()
+                        .monospace(),
+                );
+                if let Some(signature) = &post.signature {
+                    let valid = signature.verify(&post.body);
+                    let (glyph, color) = if valid {
+                        ("🔒 signed", egui::Color32::from_rgb(0x2e, 0xa0, 0x43))
+                    } else {
+                        ("⚠ bad signature", egui::Color32::from_rgb(0xd0, 0x45, 0x37))
+                    };
+                    let sig_id = egui::Id::new(("forum_sig", key, post.id));
+                    let mut shown = ui.data(|d| d.get_temp::<bool>(sig_id)).unwrap_or(false);
+                    if ui
+                        .selectable_label(shown, egui::RichText::new(glyph).color(color).small())
+                        .clicked()
+                    {
+                        shown = !shown;
+                        ui.data_mut(|d| d.insert_temp(sig_id, shown));
+                    }
+                }
+            });
+
+            // Expanded signature details.
+            if let Some(signature) = &post.signature {
+                let sig_id = egui::Id::new(("forum_sig", key, post.id));
+                if ui.data(|d| d.get_temp::<bool>(sig_id)).unwrap_or(false) {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "public key: {}",
+                            hex::encode(signature.public_key)
+                        ))
+                        .monospace()
+                        .size(10.0),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "signature: {}",
+                            hex::encode(&signature.signature)
+                        ))
+                        .monospace()
+                        .size(10.0),
+                    );
+                }
+            }
+
+            render_post_body(ui, post);
+
+            ui.horizontal(|ui| {
+                if ui.small_button("Reply").clicked() {
+                    actions.push(ForumAction::Reply(post.id));
+                }
+                if is_admin && ui.small_button("🗑 Delete").clicked() {
+                    actions.push(ForumAction::Delete(post.id));
+                }
+            });
+        });
+
+        // Replies to this post, indented one level (bounded to keep very deep
+        // threads readable).
+        if depth < 16 {
+            ui.indent(("forum_indent", key, post.id), |ui| {
+                render_forum_posts(ui, key, posts, Some(post.id), depth + 1, is_admin, actions);
+            });
+        } else {
+            render_forum_posts(ui, key, posts, Some(post.id), depth + 1, is_admin, actions);
+        }
+    }
+}
+
 /// A server chosen by the user, awaiting login credentials.
 #[derive(Clone, Debug)]
 struct PendingServer {
@@ -497,6 +789,7 @@ struct PendingServer {
 }
 
 /// A per-server entry for the Servers menu, snapshotted each frame.
+#[allow(clippy::struct_excessive_bools)]
 struct MenuServer {
     /// Composite window key (`{server_key}:{local_id}`), matching the windows.
     key: String,
@@ -509,6 +802,8 @@ struct MenuServer {
     is_admin: bool,
     /// Whether chat is enabled on the server.
     chat_enabled: bool,
+    /// Whether forums are enabled on the server.
+    forums_enabled: bool,
     /// Chatrooms this user may access on the server.
     rooms: Vec<ChatroomInfo>,
 }
@@ -655,6 +950,12 @@ pub struct ConclaveGUI {
     /// File-window close requests emitted by viewport closures
     file_window_close_requests: Arc<RwLock<Vec<String>>>,
 
+    /// Open forum windows, keyed by server key
+    open_forum_windows: Arc<RwLock<HashSet<String>>>,
+
+    /// Forum-window close requests emitted by viewport closures
+    forum_window_close_requests: Arc<RwLock<Vec<String>>>,
+
     /// Show the bookmarks management window
     show_bookmarks_window: bool,
 
@@ -717,6 +1018,8 @@ impl ConclaveGUI {
             dm_window_close_requests: Arc::new(RwLock::new(Vec::new())),
             open_file_windows: Arc::new(RwLock::new(HashSet::new())),
             file_window_close_requests: Arc::new(RwLock::new(Vec::new())),
+            open_forum_windows: Arc::new(RwLock::new(HashSet::new())),
+            forum_window_close_requests: Arc::new(RwLock::new(Vec::new())),
             seen_servers: HashSet::new(),
             user_window_close_requests: Arc::new(RwLock::new(Vec::new())),
             show_bookmarks_window: false,
@@ -850,6 +1153,7 @@ impl eframe::App for ConclaveGUI {
                         sharing: info.sharing_enabled,
                         is_admin: conn.is_admin(),
                         chat_enabled: info.chat_enabled,
+                        forums_enabled: info.forums_enabled,
                         rooms: conn.chatrooms_available(),
                     }
                 })
@@ -902,6 +1206,16 @@ impl eframe::App for ConclaveGUI {
                                 });
                             } else {
                                 ui.add_enabled(false, egui::Button::new("Chat"));
+                            }
+                            // Forums: greyed out when disabled on the server.
+                            if server.forums_enabled {
+                                if ui.button("Forums").clicked()
+                                    && let Ok(mut open) = self.open_forum_windows.write()
+                                {
+                                    open.insert(server.key.clone());
+                                }
+                            } else {
+                                ui.add_enabled(false, egui::Button::new("Forums"));
                             }
                             if server.sharing
                                 && ui.button("Files").clicked()
@@ -3287,6 +3601,351 @@ impl eframe::App for ConclaveGUI {
                     }
                     ctx.data_mut(|d| d.insert_temp(path_id, path));
                     ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                },
+            );
+        }
+
+        // ── Per-server forum windows ──────────────────────────────────────
+        {
+            let live: HashSet<String> = conn_snapshots.iter().map(|(k, ..)| k.clone()).collect();
+            let closed: Vec<String> = self
+                .forum_window_close_requests
+                .write()
+                .map(|mut r| r.drain(..).collect())
+                .unwrap_or_default();
+            if let Ok(mut open) = self.open_forum_windows.write() {
+                for key in &closed {
+                    open.remove(key);
+                }
+                open.retain(|k| live.contains(k));
+            }
+        }
+        let forum_open_keys: HashSet<String> = self
+            .open_forum_windows
+            .read()
+            .map(|o| o.clone())
+            .unwrap_or_default();
+
+        for (key, name, _active, conn) in &conn_snapshots {
+            if !forum_open_keys.contains(key) {
+                continue;
+            }
+            let conn = conn.clone();
+            let key_owned = key.clone();
+            let title = format!("Forums — {name}");
+            let close_reqs = self.forum_window_close_requests.clone();
+
+            ui.ctx().show_viewport_deferred(
+                egui::ViewportId::from_hash_of(format!("server_forums:{key}")),
+                egui::ViewportBuilder::default()
+                    .with_title(title)
+                    .with_inner_size([560.0, 500.0])
+                    .with_resizable(true),
+                move |ctx, _class| {
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        if let Ok(mut r) = close_reqs.write() {
+                            r.push(key_owned.clone());
+                        }
+                        ctx.request_repaint_of(egui::ViewportId::ROOT);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+
+                    let topic_id = egui::Id::new(format!("forum_topic:{key_owned}"));
+                    let thread_id = egui::Id::new(format!("forum_thread:{key_owned}"));
+                    let opened_id = egui::Id::new(format!("forum_opened:{key_owned}"));
+                    let treq_id = egui::Id::new(format!("forum_treq:{key_owned}"));
+                    let nt_subject_id = egui::Id::new(format!("forum_nt_subject:{key_owned}"));
+                    let nt_body_id = egui::Id::new(format!("forum_nt_body:{key_owned}"));
+                    let nt_md_id = egui::Id::new(format!("forum_nt_md:{key_owned}"));
+                    let nt_sign_id = egui::Id::new(format!("forum_nt_sign:{key_owned}"));
+                    let reply_to_id = egui::Id::new(format!("forum_reply_to:{key_owned}"));
+                    let reply_body_id = egui::Id::new(format!("forum_reply_body:{key_owned}"));
+                    let reply_md_id = egui::Id::new(format!("forum_reply_md:{key_owned}"));
+                    let reply_sign_id = egui::Id::new(format!("forum_reply_sign:{key_owned}"));
+
+                    let mut sel_topic: Option<u32> = ctx.data(|d| d.get_temp(topic_id)).flatten();
+                    let mut sel_thread: Option<u32> = ctx.data(|d| d.get_temp(thread_id)).flatten();
+                    let mut nt_subject: String =
+                        ctx.data(|d| d.get_temp(nt_subject_id).unwrap_or_default());
+                    let mut nt_body: String =
+                        ctx.data(|d| d.get_temp(nt_body_id).unwrap_or_default());
+                    let mut nt_md: bool = ctx.data(|d| d.get_temp(nt_md_id).unwrap_or(false));
+                    let mut nt_sign: bool = ctx.data(|d| d.get_temp(nt_sign_id).unwrap_or(false));
+                    let mut reply_to: Option<u32> = ctx.data(|d| d.get_temp(reply_to_id)).flatten();
+                    let mut reply_body: String =
+                        ctx.data(|d| d.get_temp(reply_body_id).unwrap_or_default());
+                    let mut reply_md: bool = ctx.data(|d| d.get_temp(reply_md_id).unwrap_or(false));
+                    let mut reply_sign: bool =
+                        ctx.data(|d| d.get_temp(reply_sign_id).unwrap_or(false));
+
+                    let is_admin = conn.is_admin();
+                    let topics = conn.forum_topics();
+
+                    let mut open_topic: Option<Option<u32>> = None;
+                    let mut open_thread: Option<Option<u32>> = None;
+                    let mut post_actions: Vec<ForumAction> = Vec::new();
+                    let mut create_thread = false;
+                    let mut send_reply = false;
+
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        // Breadcrumb navigation.
+                        ui.horizontal(|ui| {
+                            if ui.selectable_label(sel_topic.is_none(), "Topics").clicked() {
+                                open_topic = Some(None);
+                                open_thread = Some(None);
+                            }
+                            if let Some(tid) = sel_topic {
+                                let tname = topics
+                                    .iter()
+                                    .find(|t| t.id == tid)
+                                    .map_or_else(|| format!("Topic {tid}"), |t| t.name.clone());
+                                ui.label("›");
+                                if ui.selectable_label(sel_thread.is_none(), tname).clicked() {
+                                    open_thread = Some(None);
+                                }
+                                if let Some(th) = sel_thread {
+                                    let subject = conn
+                                        .forum_threads(tid)
+                                        .into_iter()
+                                        .find(|t| t.id == th)
+                                        .map_or_else(|| format!("Thread {th}"), |t| t.subject);
+                                    ui.label("›");
+                                    ui.label(egui::RichText::new(subject).strong());
+                                }
+                            }
+                        });
+                        ui.separator();
+
+                        match (sel_topic, sel_thread) {
+                            // Topic list.
+                            (None, _) => {
+                                if topics.is_empty() {
+                                    ui.label(egui::RichText::new("No topics available.").weak());
+                                }
+                                egui::ScrollArea::vertical().show(ui, |ui| {
+                                    for topic in &topics {
+                                        ui.horizontal(|ui| {
+                                            if ui.button(&topic.name).clicked() {
+                                                open_topic = Some(Some(topic.id));
+                                            }
+                                            if !topic.description.is_empty() {
+                                                ui.label(
+                                                    egui::RichText::new(&topic.description).weak(),
+                                                );
+                                            }
+                                        });
+                                    }
+                                });
+                            }
+                            // Thread list + new-thread form.
+                            (Some(topic), None) => {
+                                let threads = conn.forum_threads(topic);
+                                egui::ScrollArea::vertical()
+                                    .max_height(260.0)
+                                    .show(ui, |ui| {
+                                        if threads.is_empty() {
+                                            ui.label(egui::RichText::new("No threads yet.").weak());
+                                        }
+                                        for th in &threads {
+                                            ui.horizontal(|ui| {
+                                                if ui.button(&th.subject).clicked() {
+                                                    open_thread = Some(Some(th.id));
+                                                }
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "by {} · {} repl{} · {}",
+                                                        th.author_name,
+                                                        th.reply_count,
+                                                        if th.reply_count == 1 {
+                                                            "y"
+                                                        } else {
+                                                            "ies"
+                                                        },
+                                                        th.last_activity.format("%Y-%m-%d %H:%M")
+                                                    ))
+                                                    .weak()
+                                                    .small(),
+                                                );
+                                            });
+                                        }
+                                    });
+                                ui.separator();
+                                ui.label(egui::RichText::new("New thread").strong());
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut nt_subject)
+                                        .hint_text("Subject")
+                                        .desired_width(f32::INFINITY),
+                                );
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut nt_body)
+                                        .hint_text("Body")
+                                        .desired_rows(3)
+                                        .desired_width(f32::INFINITY),
+                                );
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut nt_md, "Markdown");
+                                    ui.checkbox(&mut nt_sign, "Sign");
+                                    let can =
+                                        !nt_subject.trim().is_empty() && !nt_body.trim().is_empty();
+                                    if ui.add_enabled(can, egui::Button::new("Create")).clicked() {
+                                        create_thread = true;
+                                    }
+                                });
+                            }
+                            // Thread view: posts + reply composer.
+                            (Some(_topic), Some(thread)) => {
+                                egui::ScrollArea::vertical()
+                                    .max_height(320.0)
+                                    .show(ui, |ui| match conn.forum_posts(thread) {
+                                        Some(posts) if !posts.is_empty() => {
+                                            render_forum_posts(
+                                                ui,
+                                                &key_owned,
+                                                &posts,
+                                                None,
+                                                0,
+                                                is_admin,
+                                                &mut post_actions,
+                                            );
+                                        }
+                                        Some(_) => {
+                                            ui.label(egui::RichText::new("No posts.").weak());
+                                        }
+                                        None => {
+                                            ui.horizontal(|ui| {
+                                                ui.add(egui::Spinner::new());
+                                                ui.label("Loading…");
+                                            });
+                                        }
+                                    });
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    let label = match reply_to {
+                                        Some(id) => format!("Replying to post #{id}"),
+                                        None => "Reply to thread".to_string(),
+                                    };
+                                    ui.label(egui::RichText::new(label).small());
+                                    if reply_to.is_some() && ui.small_button("clear").clicked() {
+                                        reply_to = None;
+                                    }
+                                });
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut reply_body)
+                                        .hint_text("Reply")
+                                        .desired_rows(2)
+                                        .desired_width(f32::INFINITY),
+                                );
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut reply_md, "Markdown");
+                                    ui.checkbox(&mut reply_sign, "Sign");
+                                    if ui
+                                        .add_enabled(
+                                            !reply_body.trim().is_empty(),
+                                            egui::Button::new("Send"),
+                                        )
+                                        .clicked()
+                                    {
+                                        send_reply = true;
+                                    }
+                                });
+                            }
+                        }
+                    });
+
+                    // Apply navigation.
+                    if let Some(v) = open_topic {
+                        sel_topic = v;
+                        sel_thread = None;
+                    }
+                    if let Some(v) = open_thread {
+                        sel_thread = v;
+                    }
+
+                    // Apply post actions (reply target / delete).
+                    for action in post_actions {
+                        match action {
+                            ForumAction::Reply(pid) => reply_to = Some(pid),
+                            ForumAction::Delete(pid) => {
+                                let c = conn.clone();
+                                tokio::spawn(async move {
+                                    let _ = c.delete_forum_post(pid).await;
+                                });
+                            }
+                        }
+                    }
+
+                    // Keep the thread subscription in sync with the selection.
+                    let current_open: Option<u32> = ctx.data(|d| d.get_temp(opened_id)).flatten();
+                    if current_open != sel_thread {
+                        if let Some(old) = current_open {
+                            let c = conn.clone();
+                            tokio::spawn(async move {
+                                let _ = c.close_forum_thread(old).await;
+                            });
+                        }
+                        if let Some(new) = sel_thread {
+                            let c = conn.clone();
+                            tokio::spawn(async move {
+                                let _ = c.open_forum_thread(new).await;
+                            });
+                        }
+                        ctx.data_mut(|d| d.insert_temp(opened_id, sel_thread));
+                    }
+
+                    // Fetch a topic's thread list the first time it is viewed.
+                    if let Some(topic) = sel_topic
+                        && sel_thread.is_none()
+                    {
+                        let requested: Option<u32> = ctx.data(|d| d.get_temp(treq_id)).flatten();
+                        if requested != Some(topic) {
+                            ctx.data_mut(|d| d.insert_temp(treq_id, Some(topic)));
+                            let c = conn.clone();
+                            tokio::spawn(async move {
+                                let _ = c.request_forum_threads(topic).await;
+                            });
+                        }
+                    }
+
+                    if create_thread && let Some(topic) = sel_topic {
+                        let subject = std::mem::take(&mut nt_subject);
+                        let body = std::mem::take(&mut nt_body);
+                        let (md, sign) = (nt_md, nt_sign);
+                        let c = conn.clone();
+                        tokio::spawn(async move {
+                            let _ = c.new_forum_thread(topic, subject, body, md, sign).await;
+                        });
+                    }
+
+                    if send_reply && let Some(thread) = sel_thread {
+                        let body = std::mem::take(&mut reply_body);
+                        let (md, sign) = (reply_md, reply_sign);
+                        // A "reply to thread" (no explicit target) attaches under
+                        // the opening post so the tree stays rooted.
+                        let parent = reply_to.or_else(|| {
+                            conn.forum_posts(thread).and_then(|posts| {
+                                posts.iter().find(|p| p.reply_to.is_none()).map(|p| p.id)
+                            })
+                        });
+                        reply_to = None;
+                        let c = conn.clone();
+                        tokio::spawn(async move {
+                            let _ = c.new_forum_post(thread, parent, body, md, sign).await;
+                        });
+                    }
+
+                    ctx.data_mut(|d| {
+                        d.insert_temp(topic_id, sel_topic);
+                        d.insert_temp(thread_id, sel_thread);
+                        d.insert_temp(nt_subject_id, nt_subject);
+                        d.insert_temp(nt_body_id, nt_body);
+                        d.insert_temp(nt_md_id, nt_md);
+                        d.insert_temp(nt_sign_id, nt_sign);
+                        d.insert_temp(reply_to_id, reply_to);
+                        d.insert_temp(reply_body_id, reply_body);
+                        d.insert_temp(reply_md_id, reply_md);
+                        d.insert_temp(reply_sign_id, reply_sign);
+                    });
+                    ctx.request_repaint_after(std::time::Duration::from_millis(250));
                 },
             );
         }
