@@ -12,7 +12,8 @@ CREATE TABLE SERVER_CONFIG (
     chat_enabled boolean DEFAULT TRUE NOT NULL,
     forums_enabled boolean DEFAULT TRUE NOT NULL,
     max_upload_size integer, -- NULL means uploads are uncapped
-    max_connections integer -- NULL means unlimited concurrent connections
+    max_connections integer, -- NULL means unlimited concurrent connections
+    banner blob -- optional banner image (PNG, exactly 512x128), or NULL
 );
 
 CREATE TABLE TRACKER (

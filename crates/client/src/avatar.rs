@@ -19,6 +19,13 @@ pub const AVATAR_SIZE: u32 = 512;
 /// Edge length, in pixels, used when displaying avatars in lists and chat.
 pub const DISPLAY_SIZE: u32 = 32;
 
+/// Fixed width, in pixels, of a server banner. Every banner is cropped to this
+/// exact size so the presentation is consistent across servers.
+pub const BANNER_WIDTH: u32 = 512;
+
+/// Fixed height, in pixels, of a server banner.
+pub const BANNER_HEIGHT: u32 = 128;
+
 /// Normalise raw RGBA pixels (for example from the clipboard) into a square
 /// [`AVATAR_SIZE`]×[`AVATAR_SIZE`] PNG suitable for storing in the config.
 ///
@@ -72,9 +79,85 @@ pub fn decode_rgba(png: &[u8]) -> Result<(Vec<u8>, usize)> {
     Ok((image.into_raw(), edge))
 }
 
+/// Decode a PNG into raw RGBA pixels plus its width and height, for non-square
+/// images such as banners.
+///
+/// # Errors
+///
+/// Returns an error if the bytes cannot be decoded as an image.
+pub fn decode_rgba_dims(png: &[u8]) -> Result<(Vec<u8>, usize, usize)> {
+    let image = image::load_from_memory(png)?.into_rgba8();
+    let width = image.width() as usize;
+    let height = image.height() as usize;
+    Ok((image.into_raw(), width, height))
+}
+
+/// Normalise raw RGBA pixels (e.g. from the clipboard) into a banner PNG of
+/// exactly [`BANNER_WIDTH`]×[`BANNER_HEIGHT`] (scaled to cover, centre-cropped).
+///
+/// # Errors
+///
+/// Returns an error if the pixel buffer does not match `width`×`height`×4, or if
+/// PNG encoding fails.
+pub fn normalize_banner_rgba(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+    let buffer = image::RgbaImage::from_raw(width, height, rgba.to_vec())
+        .context("clipboard image dimensions do not match its pixel data")?;
+    encode_png(&resize_banner(&DynamicImage::ImageRgba8(buffer)))
+}
+
+/// Normalise an encoded image file (PNG, JPEG, …) into a banner PNG of exactly
+/// [`BANNER_WIDTH`]×[`BANNER_HEIGHT`].
+///
+/// # Errors
+///
+/// Returns an error if the format cannot be guessed, the image cannot be
+/// decoded, or PNG encoding fails.
+pub fn normalize_banner_encoded(data: &[u8]) -> Result<Vec<u8>> {
+    let image = ImageReader::new(Cursor::new(data))
+        .with_guessed_format()?
+        .decode()?;
+    encode_png(&resize_banner(&image))
+}
+
+/// Grab the current clipboard image and normalise it to a banner PNG.
+///
+/// # Errors
+///
+/// Returns an error if the clipboard has no image, or normalisation fails.
+pub fn load_clipboard_banner() -> Result<Vec<u8>> {
+    let mut clipboard = arboard::Clipboard::new()?;
+    let image = clipboard.get_image()?;
+    let width = u32::try_from(image.width)?;
+    let height = u32::try_from(image.height)?;
+    normalize_banner_rgba(image.bytes.as_ref(), width, height)
+}
+
+/// Prompt for an image file and normalise it to a banner PNG. Returns `Ok(None)`
+/// when the user cancels the dialog.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or normalised.
+pub fn load_file_banner() -> Result<Option<Vec<u8>>> {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("Images", &["png", "jpg", "jpeg"])
+        .pick_file()
+    else {
+        return Ok(None);
+    };
+    let data = std::fs::read(path)?;
+    Ok(Some(normalize_banner_encoded(&data)?))
+}
+
 /// Resize an image to a centred, cropped `size`×`size` square.
 fn resize_square(image: &DynamicImage, size: u32) -> DynamicImage {
     image.resize_to_fill(size, size, FilterType::Lanczos3)
+}
+
+/// Resize an image to exactly [`BANNER_WIDTH`]×[`BANNER_HEIGHT`], scaling to
+/// cover and centre-cropping so the aspect ratio is preserved (no distortion).
+fn resize_banner(image: &DynamicImage) -> DynamicImage {
+    image.resize_to_fill(BANNER_WIDTH, BANNER_HEIGHT, FilterType::Lanczos3)
 }
 
 /// Encode an image as PNG bytes.

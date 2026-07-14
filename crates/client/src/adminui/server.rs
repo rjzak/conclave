@@ -76,10 +76,111 @@ pub fn ui(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str) {
     // ── Editable server limits ────────────────────────────────────────────
     limits_editor(ui, conn, key);
 
+    // ── Server banner ─────────────────────────────────────────────────────
+    banner_editor(ui, conn, key);
+
     ui.data_mut(|d| {
         d.insert_temp(name_id, server_name);
         d.insert_temp(desc_id, server_desc);
     });
+}
+
+/// The banner section: paste, choose, or remove the server's banner image,
+/// which clients display on their main window while this server is active.
+#[inline]
+fn banner_editor(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str) {
+    ui.separator();
+    ui.label(egui::RichText::new("Banner").strong());
+    ui.label(
+        egui::RichText::new(
+            "Shown on users' main window while this server is active. Cropped to \
+             a fixed 512×128 banner.",
+        )
+        .weak()
+        .small(),
+    );
+
+    let error_id = egui::Id::new(format!("admin_banner_err:{key}"));
+    let mut error: Option<String> = ui
+        .data(|d| d.get_temp::<Option<String>>(error_id))
+        .flatten();
+
+    let current = conn.server_banner();
+    ui.horizontal(|ui| {
+        if let Some(bytes) = &current {
+            if let Some(texture) = banner_texture(ui, bytes) {
+                let size = texture.size_vec2();
+                let scale = (384.0_f32 / size.x).min(1.0);
+                ui.add(egui::Image::new(&texture).fit_to_exact_size(size * scale));
+            }
+        } else {
+            ui.label(egui::RichText::new("No banner set.").weak());
+        }
+    });
+
+    ui.horizontal(|ui| {
+        if ui.button("Paste from clipboard").clicked() {
+            match crate::avatar::load_clipboard_banner() {
+                Ok(png) => {
+                    spawn_set_banner(conn, Some(png));
+                    error = None;
+                }
+                Err(e) => error = Some(format!("Paste failed: {e}")),
+            }
+        }
+        if ui.button("Choose file…").clicked() {
+            match crate::avatar::load_file_banner() {
+                Ok(Some(png)) => {
+                    spawn_set_banner(conn, Some(png));
+                    error = None;
+                }
+                Ok(None) => {}
+                Err(e) => error = Some(format!("Could not load image: {e}")),
+            }
+        }
+        if current.is_some() && ui.button("Remove").clicked() {
+            spawn_set_banner(conn, None);
+            error = None;
+        }
+    });
+
+    if let Some(msg) = &error {
+        ui.colored_label(egui::Color32::RED, msg);
+    }
+    ui.data_mut(|d| d.insert_temp(error_id, error));
+}
+
+/// Persist a banner change off the UI thread.
+fn spawn_set_banner(conn: &ConclaveConnection, banner: Option<Vec<u8>>) {
+    let conn = conn.clone();
+    tokio::spawn(async move {
+        let _ = conn.admin_set_server_banner(banner).await;
+    });
+}
+
+/// Decode a banner PNG into a cached egui texture for the admin preview.
+#[inline]
+fn banner_texture(ui: &egui::Ui, png: &[u8]) -> Option<egui::TextureHandle> {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    png.hash(&mut hasher);
+    let hash = hasher.finish();
+    let id = egui::Id::new(("admin_banner_tex", hash));
+
+    if let Some(texture) = ui.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return Some(texture);
+    }
+
+    let (rgba, width, height) = crate::avatar::decode_rgba_dims(png).ok()?;
+    let image = egui::ColorImage::from_rgba_unmultiplied([width, height], &rgba);
+    let texture = ui.ctx().load_texture(
+        format!("admin_banner_{hash:x}"),
+        image,
+        egui::TextureOptions::LINEAR,
+    );
+    ui.data_mut(|d| d.insert_temp(id, texture.clone()));
+    Some(texture)
 }
 
 /// The editable "Limits" section: set, change, or remove the maximum upload

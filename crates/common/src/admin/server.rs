@@ -116,6 +116,10 @@ pub enum ServerAdminMessagesEncrypted {
     /// Delete a forum topic by id (removes its threads and posts).
     DeleteForumTopic(u32),
 
+    /// Set (or clear, with `None`) the server's banner image. The bytes are a
+    /// PNG already normalised to exactly 512×128 pixels.
+    SetServerBanner(Option<Vec<u8>>),
+
     /// Request the server-wide limits (max upload size, max connections).
     GetServerLimits,
 

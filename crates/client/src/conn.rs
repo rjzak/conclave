@@ -159,6 +159,9 @@ pub struct ConclaveConnection {
     /// Posts within each open thread, keyed by thread id.
     pub(crate) forum_posts: Arc<std::sync::RwLock<HashMap<u32, Vec<ForumPost>>>>,
 
+    /// The server's banner image (a PNG), if it has one set.
+    pub(crate) server_banner: Arc<std::sync::RwLock<Option<Vec<u8>>>>,
+
     /// Most recent shared-directory listing: `(path, entries)`.
     pub(crate) file_listing: Arc<std::sync::RwLock<Option<FileListing>>>,
 
@@ -236,6 +239,7 @@ impl ConclaveConnection {
             admin_forum_topics: Arc::new(std::sync::RwLock::new(Vec::new())),
             forum_threads: Arc::new(std::sync::RwLock::new(HashMap::new())),
             forum_posts: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            server_banner: Arc::new(std::sync::RwLock::new(None)),
             file_listing: Arc::new(std::sync::RwLock::new(None)),
             download: Arc::new(std::sync::RwLock::new(None)),
             file_acl: Arc::new(std::sync::RwLock::new(None)),
@@ -323,6 +327,12 @@ impl ConclaveConnection {
                             .forum_topics
                             .write()
                             .unwrap_or_else(std::sync::PoisonError::into_inner) = topics;
+                    }
+                    ClientMessagesEncrypted::ServerBannerResponse(banner) => {
+                        *conn_clone
+                            .server_banner
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = banner;
                     }
                     ClientMessagesEncrypted::ForumThreadsResponse { topic, threads } => {
                         conn_clone
@@ -1328,6 +1338,32 @@ impl ConclaveConnection {
         self.send_request(
             &ServerMessagesEncrypted::AdministrativeRequest(
                 ServerAdminMessagesEncrypted::DeleteForumTopic(id),
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// The server's banner image (a PNG), as last reported by the server.
+    #[inline]
+    #[must_use]
+    pub fn server_banner(&self) -> Option<Vec<u8>> {
+        self.server_banner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// (Admin) Set or clear the server's banner image.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    #[inline]
+    pub async fn admin_set_server_banner(&self, banner: Option<Vec<u8>>) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::SetServerBanner(banner),
             )
             .to_vec(),
         )

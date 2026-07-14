@@ -22,8 +22,8 @@ use conclave_common::net::{
 };
 use conclave_common::server::{
     ChatEvent, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser, IDLE_TIMEOUT_MINUTES,
-    MAX_AVATAR_BYTES, ServerError, ServerInformation, ServerMessagesEncrypted, UserAuthentication,
-    UserDetails, unencrypted,
+    MAX_AVATAR_BYTES, MAX_BANNER_BYTES, ServerError, ServerInformation, ServerMessagesEncrypted,
+    UserAuthentication, UserDetails, unencrypted,
 };
 use conclave_common::tracker::TrackerProtocol::AdvertiseServer;
 use conclave_common::tracker::{Advertise, Tracker, TrackerWithKey};
@@ -172,6 +172,9 @@ pub struct State {
 
     /// Forum thread subscriptions: thread id -> connection ids currently viewing.
     forum_viewers: Arc<RwLock<HashMap<u32, HashSet<u16>>>>,
+
+    /// Optional server banner image (a 512×128 PNG), shown by clients.
+    banner: Arc<RwLock<Option<Vec<u8>>>>,
 
     /// Whether the server is currently serving requests
     serving: Arc<AtomicBool>,
@@ -324,6 +327,7 @@ impl State {
                 chat_members: Arc::new(RwLock::new(HashMap::new())),
                 forums_enabled: Arc::new(AtomicBool::new(false)), // Database default
                 forum_viewers: Arc::new(RwLock::new(HashMap::new())),
+                banner: Arc::new(RwLock::new(None)),
                 serving: Arc::new(AtomicBool::new(false)),
                 mdns: mdns.then(|| ServiceDaemon::new().expect("Failed to start Multicast DNS")),
                 share_directory: None,
@@ -372,10 +376,11 @@ impl State {
             forums_enabled,
             max_upload_size,
             max_connections,
+            banner,
         ) = {
             let conn = Connection::open(&sqlite_path)?;
             let mut stmt = conn
-                .prepare("SELECT name, description, key, version, advertised_domain, allow_anonymous_clients, chat_enabled, forums_enabled, max_upload_size, max_connections FROM SERVER_CONFIG")?;
+                .prepare("SELECT name, description, key, version, advertised_domain, allow_anonymous_clients, chat_enabled, forums_enabled, max_upload_size, max_connections, banner FROM SERVER_CONFIG")?;
             let (
                 name,
                 description,
@@ -387,6 +392,7 @@ impl State {
                 forums_enabled,
                 max_upload_size,
                 max_connections,
+                banner,
             ) = stmt.query_row([], |row| {
                 let name: String = row.get(0)?;
                 let description: String = row.get(1)?;
@@ -398,6 +404,7 @@ impl State {
                 let forums_enabled: bool = row.get(7)?;
                 let max_upload_size: Option<u64> = row.get(8)?;
                 let max_connections: Option<u16> = row.get(9)?;
+                let banner: Option<Vec<u8>> = row.get(10)?;
                 Ok((
                     name,
                     description,
@@ -409,6 +416,7 @@ impl State {
                     forums_enabled,
                     max_upload_size,
                     max_connections,
+                    banner,
                 ))
             })?;
 
@@ -470,6 +478,7 @@ impl State {
                 forums_enabled,
                 max_upload_size,
                 max_connections,
+                banner,
             )
         };
 
@@ -499,6 +508,7 @@ impl State {
             chat_members: Arc::new(RwLock::new(HashMap::new())),
             forums_enabled: Arc::new(AtomicBool::new(forums_enabled)),
             forum_viewers: Arc::new(RwLock::new(HashMap::new())),
+            banner: Arc::new(RwLock::new(banner)),
             serving: Arc::new(AtomicBool::new(false)),
             mdns: mdns.then(|| ServiceDaemon::new().expect("Failed to start Multicast DNS")),
             share_directory: None,
@@ -1911,6 +1921,10 @@ impl State {
                                                         .await,
                                                 )
                                                 .to_vec();
+                                            // Push the server banner so the client
+                                            // can show it once this server is active.
+                                            let banner_bytes =
+                                                self_clone.banner_response().await.to_vec();
                                             let send_result = {
                                                 let mut guard = write.write().await;
                                                 let mut result = guard.send(&server_bytes).await;
@@ -1922,6 +1936,9 @@ impl State {
                                                 }
                                                 if result.is_ok() {
                                                     result = guard.send(&forum_bytes).await;
+                                                }
+                                                if result.is_ok() {
+                                                    result = guard.send(&banner_bytes).await;
                                                 }
                                                 result
                                             };
@@ -2445,6 +2462,9 @@ impl State {
                 .map(|()| ok),
             ServerAdminMessagesEncrypted::DeleteForumTopic(id) => {
                 self.delete_forum_topic(id).await.map(|()| ok)
+            }
+            ServerAdminMessagesEncrypted::SetServerBanner(banner) => {
+                self.set_server_banner(banner).await.map(|()| ok)
             }
             ServerAdminMessagesEncrypted::GetServerLimits => Ok(
                 ClientAdminMessagesEncrypted::ServerLimitsResponse(self.server_limits()),
@@ -3484,6 +3504,47 @@ impl State {
                 error!("Failed to send forum thread event: {e}");
             }
         }
+    }
+
+    // ── Banner ──────────────────────────────────────────────────────────────
+
+    /// The server's current banner image (a PNG), if one is set.
+    #[inline]
+    pub async fn banner(&self) -> Option<Vec<u8>> {
+        self.banner.read().await.clone()
+    }
+
+    /// The current banner push message.
+    #[inline]
+    async fn banner_response(&self) -> ClientMessagesEncrypted {
+        ClientMessagesEncrypted::ServerBannerResponse(self.banner().await)
+    }
+
+    /// (Admin) Set or clear the server banner, then push it to every connected
+    /// client. Banners larger than [`MAX_BANNER_BYTES`] are rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the banner exceeds the size cap, or on a database
+    /// failure.
+    #[inline]
+    pub async fn set_server_banner(&self, banner: Option<Vec<u8>>) -> Result<()> {
+        if let Some(bytes) = &banner {
+            ensure!(
+                bytes.len() <= MAX_BANNER_BYTES,
+                "Banner is too large ({} bytes; limit {MAX_BANNER_BYTES})",
+                bytes.len()
+            );
+        }
+        let stored = banner.clone();
+        self.sqlite
+            .conn(move |conn| {
+                conn.execute("UPDATE SERVER_CONFIG SET banner = ?1;", params![stored])
+            })
+            .await?;
+        *self.banner.write().await = banner;
+        self.broadcast(&self.banner_response().await).await;
+        Ok(())
     }
 
     /// Get a list of connected users

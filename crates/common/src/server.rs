@@ -265,6 +265,10 @@ pub struct ConnectedUser {
 /// couple of kilobytes; this leaves generous headroom while rejecting abuse.
 pub const MAX_AVATAR_BYTES: usize = 16 * 1024;
 
+/// Maximum size, in bytes, accepted for a server banner. Banners are capped at
+/// 512×128 pixels; this byte limit bounds even a photographic PNG.
+pub const MAX_BANNER_BYTES: usize = 512 * 128;
+
 /// Extra, on-demand information about a connected user. The base fields (display
 /// name, connection duration, timezone) are already carried by [`ConnectedUser`];
 /// this holds what requires a lookup or elevated privileges.
@@ -540,6 +544,10 @@ pub enum ClientMessagesEncrypted {
         /// Deleted post id
         post: u32,
     },
+
+    /// The server's banner image (a 512×128 PNG), or `None` if unset. Pushed on
+    /// connect and whenever an administrator changes it.
+    ServerBannerResponse(Option<Vec<u8>>),
 
     /// A shared-directory listing.
     FileListResponse {

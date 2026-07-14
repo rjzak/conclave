@@ -345,15 +345,90 @@ fn avatar_texture(ctx: &egui::Context, png: &[u8]) -> Option<egui::TextureHandle
     Some(texture)
 }
 
+/// Decode a banner PNG into an egui texture, caching it by content hash (like
+/// [`avatar_texture`] but for non-square images).
+fn banner_texture(ctx: &egui::Context, png: &[u8]) -> Option<egui::TextureHandle> {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    png.hash(&mut hasher);
+    let hash = hasher.finish();
+    let id = egui::Id::new(("banner_tex", hash));
+
+    if let Some(texture) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return Some(texture);
+    }
+
+    let (rgba, width, height) = conclave_client::avatar::decode_rgba_dims(png).ok()?;
+    let image = egui::ColorImage::from_rgba_unmultiplied([width, height], &rgba);
+    let texture = ctx.load_texture(
+        format!("banner_{hash:x}"),
+        image,
+        egui::TextureOptions::LINEAR,
+    );
+    ctx.data_mut(|d| d.insert_temp(id, texture.clone()));
+    Some(texture)
+}
+
+/// Draw the active server's banner across the top of the main window. Banners
+/// are a fixed 512×128 (4:1) image, shown filling the window width at that ratio
+/// — so it is never distorted and is consistent across servers. With no banner,
+/// a plain "Conclave" placeholder is shown instead.
+fn render_banner(ui: &mut egui::Ui, banner: Option<&[u8]>) {
+    if let Some(bytes) = banner
+        && let Some(texture) = banner_texture(ui.ctx(), bytes)
+    {
+        // Height follows the banner's fixed aspect ratio, so filling the width
+        // scales it proportionally (no distortion).
+        let aspect =
+            f32::from(u16::try_from(conclave_client::avatar::BANNER_HEIGHT).unwrap_or(128))
+                / f32::from(u16::try_from(conclave_client::avatar::BANNER_WIDTH).unwrap_or(512));
+        let width = ui.available_width();
+        ui.vertical_centered(|ui| {
+            ui.add(egui::Image::new(&texture).fit_to_exact_size(egui::vec2(width, width * aspect)));
+        });
+    } else {
+        ui.vertical_centered(|ui| {
+            ui.add_space(12.0);
+            ui.label(egui::RichText::new("Conclave").size(48.0).weak());
+            ui.add_space(12.0);
+        });
+    }
+}
+
+/// Record `key` as the active server when its viewport currently has focus, so
+/// the root window can show that server's banner.
+fn note_active_server(active: &RwLock<Option<String>>, ctx: &egui::Context, key: &str) {
+    if ctx.input(|i| i.viewport().focused) != Some(true) {
+        return;
+    }
+    let already = active.read().is_ok_and(|a| a.as_deref() == Some(key));
+    if !already && let Ok(mut a) = active.write() {
+        *a = Some(key.to_string());
+    }
+}
+
 /// Draw a user's avatar at the standard display size. Users without an avatar
 /// (or whose avatar fails to decode) get nothing, so their row keeps its natural
-/// text height rather than being padded to the avatar size.
-fn show_avatar(ui: &mut egui::Ui, avatar: Option<&[u8]>) {
+/// text height rather than being padded to the avatar size. Idle users' avatars
+/// are dimmed to match their dulled name.
+fn show_avatar(ui: &mut egui::Ui, avatar: Option<&[u8]>, idle: bool) {
     let edge = f32::from(u16::try_from(conclave_client::avatar::DISPLAY_SIZE).unwrap_or(32));
     if let Some(bytes) = avatar
         && let Some(texture) = avatar_texture(ui.ctx(), bytes)
     {
-        ui.add(egui::Image::new(&texture).fit_to_exact_size(egui::vec2(edge, edge)));
+        // A grey tint multiplies the image toward darkness, dimming it the way
+        // `dull` dims a name.
+        let tint = if idle {
+            egui::Color32::from_gray(128)
+        } else {
+            egui::Color32::WHITE
+        };
+        ui.add(
+            egui::Image::new(&texture)
+                .fit_to_exact_size(egui::vec2(edge, edge))
+                .tint(tint),
+        );
     }
 }
 
@@ -960,6 +1035,10 @@ pub struct ConclaveGUI {
     /// Forum-window close requests emitted by viewport closures
     forum_window_close_requests: Arc<RwLock<Vec<String>>>,
 
+    /// Server key of the most recently focused per-server window, whose banner
+    /// the root window displays. `None` shows the default placeholder.
+    active_server: Arc<RwLock<Option<String>>>,
+
     /// Show the bookmarks management window
     show_bookmarks_window: bool,
 
@@ -1023,6 +1102,7 @@ impl ConclaveGUI {
             open_file_windows: Arc::new(RwLock::new(HashSet::new())),
             file_window_close_requests: Arc::new(RwLock::new(Vec::new())),
             open_forum_windows: Arc::new(RwLock::new(HashSet::new())),
+            active_server: Arc::new(RwLock::new(None)),
             forum_window_close_requests: Arc::new(RwLock::new(Vec::new())),
             seen_servers: HashSet::new(),
             user_window_close_requests: Arc::new(RwLock::new(Vec::new())),
@@ -2899,6 +2979,7 @@ impl ConclaveGUI {
             let title = format!("Users — {name}");
             let close_reqs = self.user_window_close_requests.clone();
             let open_dms = self.open_dms.clone();
+            let active_server = self.active_server.clone();
 
             ui.ctx().show_viewport_deferred(
                 egui::ViewportId::from_hash_of(format!("server_users:{key}")),
@@ -2907,6 +2988,7 @@ impl ConclaveGUI {
                     .with_inner_size([420.0, 360.0])
                     .with_resizable(true),
                 move |ctx, _class| {
+                    note_active_server(&active_server, ctx, &key_owned);
                     if ctx.input(|i| i.viewport().close_requested()) {
                         if let Ok(mut r) = close_reqs.write() {
                             r.push(key_owned.clone());
@@ -2957,7 +3039,11 @@ impl ConclaveGUI {
                                                 // tinted its groups' colour and
                                                 // dulled when idle.
                                                 ui.horizontal(|ui| {
-                                                    show_avatar(ui, user.avatar.as_deref());
+                                                    show_avatar(
+                                                        ui,
+                                                        user.avatar.as_deref(),
+                                                        is_idle(user.idle),
+                                                    );
                                                     ui.label(styled_name(
                                                         &user.display_name,
                                                         base_name_color(user),
@@ -3124,6 +3210,7 @@ impl ConclaveGUI {
                 .map_or_else(|| format!("Room {room}"), |r| r.name);
             let title = format!("{room_name} — {server_name}");
             let close_reqs = self.chat_window_close_requests.clone();
+            let active_server = self.active_server.clone();
 
             ui.ctx().show_viewport_deferred(
                 egui::ViewportId::from_hash_of(format!("chat:{key}:{room}")),
@@ -3132,6 +3219,7 @@ impl ConclaveGUI {
                     .with_inner_size([640.0, 460.0])
                     .with_resizable(true),
                 move |ctx, _class| {
+                    note_active_server(&active_server, ctx, &key_owned);
                     // Join the room when the window opens and leave when it
                     // closes (the close-drain spawns chat_leave). The joined flag
                     // is reset on close so reopening rejoins.
@@ -3207,7 +3295,11 @@ impl ConclaveGUI {
                                     let (color, idle) =
                                         user_styles.get(user).copied().unwrap_or((None, false));
                                     ui.horizontal(|ui| {
-                                        show_avatar(ui, user_avatars.get(user).map(Vec::as_slice));
+                                        show_avatar(
+                                            ui,
+                                            user_avatars.get(user).map(Vec::as_slice),
+                                            idle,
+                                        );
                                         ui.label(styled_name(user, color, idle));
                                     });
                                 }
@@ -3231,11 +3323,15 @@ impl ConclaveGUI {
                                             message,
                                         } => {
                                             ui.horizontal_wrapped(|ui| {
+                                                let idle = user_styles
+                                                    .get(display_name)
+                                                    .is_some_and(|(_, idle)| *idle);
                                                 show_avatar(
                                                     ui,
                                                     user_avatars
                                                         .get(display_name)
                                                         .map(Vec::as_slice),
+                                                    idle,
                                                 );
                                                 ui.label(
                                                     egui::RichText::new(
@@ -3335,6 +3431,7 @@ impl ConclaveGUI {
             let fingerprint = conn.peer_key_fingerprint(peer);
             let title = format!("DM {peer_name} — {server_name}");
             let close_reqs = self.dm_window_close_requests.clone();
+            let active_server = self.active_server.clone();
 
             // The window is identified by server name plus both display names,
             // as requested.
@@ -3345,6 +3442,7 @@ impl ConclaveGUI {
                     .with_inner_size([460.0, 420.0])
                     .with_resizable(true),
                 move |ctx, _class| {
+                    note_active_server(&active_server, ctx, &key_owned);
                     if ctx.input(|i| i.viewport().close_requested()) {
                         if let Ok(mut r) = close_reqs.write() {
                             r.push((key_owned.clone(), peer));
@@ -3478,6 +3576,7 @@ impl ConclaveGUI {
             let key_owned = key.clone();
             let title = format!("Files — {name}");
             let close_reqs = self.file_window_close_requests.clone();
+            let active_server = self.active_server.clone();
 
             ui.ctx().show_viewport_deferred(
                 egui::ViewportId::from_hash_of(format!("server_files:{key}")),
@@ -3486,6 +3585,7 @@ impl ConclaveGUI {
                     .with_inner_size([460.0, 420.0])
                     .with_resizable(true),
                 move |ctx, _class| {
+                    note_active_server(&active_server, ctx, &key_owned);
                     if ctx.input(|i| i.viewport().close_requested()) {
                         if let Ok(mut r) = close_reqs.write() {
                             r.push(key_owned.clone());
@@ -3717,6 +3817,7 @@ impl ConclaveGUI {
             let key_owned = key.clone();
             let title = format!("Forums — {name}");
             let close_reqs = self.forum_window_close_requests.clone();
+            let active_server = self.active_server.clone();
 
             ui.ctx().show_viewport_deferred(
                 egui::ViewportId::from_hash_of(format!("server_forums:{key}")),
@@ -3725,6 +3826,7 @@ impl ConclaveGUI {
                     .with_inner_size([560.0, 500.0])
                     .with_resizable(true),
                 move |ctx, _class| {
+                    note_active_server(&active_server, ctx, &key_owned);
                     if ctx.input(|i| i.viewport().close_requested()) {
                         if let Ok(mut r) = close_reqs.write() {
                             r.push(key_owned.clone());
@@ -4052,6 +4154,7 @@ impl ConclaveGUI {
             let key_owned = key.clone();
             let title = format!("Admin — {name}");
             let close_reqs = self.admin_window_close_requests.clone();
+            let active_server = self.active_server.clone();
 
             ui.ctx().show_viewport_deferred(
                 egui::ViewportId::from_hash_of(format!("server_admin:{key}")),
@@ -4060,6 +4163,7 @@ impl ConclaveGUI {
                     .with_inner_size([500.0, 400.0])
                     .with_resizable(true),
                 move |ctx, _class| {
+                    note_active_server(&active_server, ctx, &key_owned);
                     if ctx.input(|i| i.viewport().close_requested()) {
                         if let Ok(mut r) = close_reqs.write() {
                             r.push(key_owned.clone());
@@ -4079,7 +4183,17 @@ impl ConclaveGUI {
     #[allow(clippy::too_many_lines)]
     fn root_window(&mut self, ui: &mut egui::Ui, conn_snapshots: &[ConnSnapshot]) {
         // ── Root window: connection launcher ──────────────────────────────
+        // The active server's banner (or a placeholder) tops the main window.
+        let active_key = self.active_server.read().ok().and_then(|a| a.clone());
+        let active_banner = active_key.as_ref().and_then(|key| {
+            conn_snapshots
+                .iter()
+                .find(|(k, ..)| k == key)
+                .and_then(|(.., conn)| conn.server_banner())
+        });
         egui::CentralPanel::default().show(ui, |ui| {
+            render_banner(ui, active_banner.as_deref());
+            ui.separator();
             if !conn_snapshots.is_empty() {
                 ui.horizontal(|ui| {
                     ui.label(format!("Connected to {} server(s).", conn_snapshots.len()));
