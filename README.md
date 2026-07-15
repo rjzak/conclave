@@ -27,12 +27,10 @@ This is a work-in-progress effort to make a modern version of [Carracho](https:/
 
 ### User Features
 
-* A user may connect to the server: directory, via local discovery, or via finding it from a tracker.
-* Administration is a work-in-progress.
-
-### Not Yet Implemented
-
-* Chat
+* A user may connect to the server: directly, via bookmark, via local discovery, via tracker, or via a DNS SRV record.
+* Administration via the client
+* Group chats
+* Direct messages (end-to-end encrypted)
 * File sharing
 * Message boards
 
