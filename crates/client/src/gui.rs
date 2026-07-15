@@ -1290,6 +1290,52 @@ impl ConclaveGUI {
                         ui.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
+                ui.menu_button("Connect", |ui| {
+                    if ui.button("Discover Local Servers").clicked() {
+                        self.show_advertised_servers_list = true;
+                        do_start_discovery(
+                            self.discovered_servers.clone(),
+                            self.discovery_running.clone(),
+                            self.discovery_error.clone(),
+                        );
+                    }
+                    if ui.button("Find via Trackers").clicked() {
+                        self.show_tracker_servers = true;
+                    }
+                    if ui.button("Direct Connect").clicked() {
+                        self.show_direct_connect = !self.show_direct_connect;
+                    }
+                    ui.separator();
+                    // Bookmarks as a submenu: clicking one connects to it.
+                    ui.menu_button("Bookmarks", |ui| {
+                        let bookmarks = self.client.bookmarks();
+                        if bookmarks.is_empty() {
+                            ui.add_enabled(false, egui::Button::new("No bookmarks"));
+                        }
+                        for bookmark in bookmarks {
+                            if ui.button(&bookmark.name).clicked() {
+                                let auth = bookmark.auth.as_ref().map(|a| UserAuthentication {
+                                    username: a.username.clone(),
+                                    password: a.password.clone(),
+                                });
+                                spawn_connect(
+                                    self.client.clone(),
+                                    self.active_connections.clone(),
+                                    self.connect_pending.clone(),
+                                    self.connect_error.clone(),
+                                    None,
+                                    bookmark.server.host.clone(),
+                                    bookmark.server.port,
+                                    bookmark.share_time,
+                                    bookmark.display_name.clone(),
+                                    auth,
+                                    Some(bookmark.server.key),
+                                    bookmark.avatar.clone(),
+                                );
+                            }
+                        }
+                    });
+                });
                 ui.menu_button("Servers", |ui| {
                     if menu_servers.is_empty() {
                         ui.add_enabled(false, egui::Button::new("Not connected to any server"));
@@ -4205,34 +4251,10 @@ impl ConclaveGUI {
             }
 
             {
-                // ── Connect options ───────────────────────────────────────
+                // The main window is a launcher: it shows connection status and,
+                // when opened from the Connect menu, the Direct Connect form. All
+                // ways to connect live in the Connect menu.
                 ui.vertical_centered(|ui| {
-                    ui.add_space(24.0);
-                    ui.heading("Connect to a Conclave Server");
-                    ui.add_space(16.0);
-
-                    ui.horizontal(|ui| {
-                        if ui.button("Discover Local Servers").clicked() {
-                            self.show_advertised_servers_list = true;
-                            do_start_discovery(
-                                self.discovered_servers.clone(),
-                                self.discovery_running.clone(),
-                                self.discovery_error.clone(),
-                            );
-                        }
-
-                        if ui.button("Find via Trackers").clicked() {
-                            // Opening the window starts a live subscription that
-                            // keeps the listing updated (see the reconcile logic
-                            // at the top of `update`).
-                            self.show_tracker_servers = true;
-                        }
-
-                        if ui.button("Direct Connect").clicked() {
-                            self.show_direct_connect = !self.show_direct_connect;
-                        }
-                    });
-
                     // ── Connection status (bookmark or in-flight connect) ─────
                     let bm_is_pending = self.connect_pending.load(Ordering::SeqCst);
                     let bm_error: Option<String> =
@@ -4340,77 +4362,12 @@ impl ConclaveGUI {
                         });
                     }
 
-                    // ── Bookmarks ─────────────────────────────────────────────
-                    let bookmarks = self.client.bookmarks();
-                    if !bookmarks.is_empty() {
-                        ui.add_space(16.0);
-                        ui.separator();
-                        ui.add_space(4.0);
-                        ui.label(egui::RichText::new("Bookmarks").strong());
-                        ui.add_space(4.0);
-
-                        for bookmark in bookmarks {
-                            ui.group(|ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new(&bookmark.name).strong());
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "{}:{}",
-                                            bookmark.server.host, bookmark.server.port
-                                        ))
-                                        .monospace()
-                                        .weak(),
-                                    );
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if ui
-                                                .add_enabled(
-                                                    !bm_is_pending,
-                                                    egui::Button::new("Connect"),
-                                                )
-                                                .clicked()
-                                            {
-                                                let auth = bookmark.auth.as_ref().map(|a| {
-                                                    UserAuthentication {
-                                                        username: a.username.clone(),
-                                                        password: a.password.clone(),
-                                                    }
-                                                });
-                                                spawn_connect(
-                                                    self.client.clone(),
-                                                    self.active_connections.clone(),
-                                                    self.connect_pending.clone(),
-                                                    self.connect_error.clone(),
-                                                    None,
-                                                    bookmark.server.host.clone(),
-                                                    bookmark.server.port,
-                                                    bookmark.share_time,
-                                                    bookmark.display_name.clone(),
-                                                    auth,
-                                                    Some(bookmark.server.key),
-                                                    bookmark.avatar.clone(),
-                                                );
-                                            }
-                                        },
-                                    );
-                                });
-                                if !bookmark.display_name.is_empty() {
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "as {}",
-                                            bookmark.display_name
-                                        ))
-                                        .weak(),
-                                    );
-                                }
-                            });
-                        }
-                    } else if !self.show_direct_connect {
+                    // When nothing else is on screen, point to the Connect menu.
+                    if !self.show_direct_connect && conn_snapshots.is_empty() {
                         ui.add_space(24.0);
                         ui.label(
                             egui::RichText::new(
-                                "Use the buttons above to find and connect to a server.",
+                                "Use the Connect menu to find and connect to a server.",
                             )
                             .weak(),
                         );
