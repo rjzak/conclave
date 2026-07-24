@@ -23,12 +23,12 @@ use crate::config::{BookmarkEntry, ClientConfig};
 use crate::conn::ConclaveConnection;
 use conclave_common::net::{DefaultEncryptedStream, EncryptedStream};
 use conclave_common::server::{
-    ClientMessagesEncrypted, ServerInformation, ServerMessagesEncrypted, UserAuthentication,
-    VerifyingKey, unencrypted,
+    AuthRequest, ClientMessagesEncrypted, ServerInformation, ServerMessagesEncrypted,
+    UserAuthentication, VerifyingKey, unencrypted,
 };
 use conclave_common::tracker::{Advertise, Tracker, TrackerProtocol, TrackerWithKey};
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
@@ -389,12 +389,16 @@ impl Client {
         let mut encrypted_stream: DefaultEncryptedStream =
             EncryptedStream::connect(stream, &key, None).await?;
 
-        let login = ServerMessagesEncrypted::ServerAuthenticationRequest((
-            display_name.to_string(),
-            None,
-            None,
+        let login = ServerMessagesEncrypted::ServerAuthenticationRequest(AuthRequest {
+            display_name: display_name.to_string(),
+            timezone: None,
+            avatar: None,
+            // A transient info fetch does not register a durable roster entry, so
+            // no profile or links are shared here.
+            profile: String::new(),
+            urls: BTreeMap::new(),
             auth,
-        ))
+        })
         .to_vec();
         encrypted_stream.send(&login).await?;
 
@@ -528,6 +532,40 @@ impl Client {
         self.config.read().await.save(&self.config_file)
     }
 
+    /// Read the user's default profile text without blocking.
+    #[must_use]
+    pub fn profile(&self) -> String {
+        self.config
+            .try_read()
+            .map(|c| c.profile.clone())
+            .unwrap_or_default()
+    }
+
+    /// Read the user's default shared links (description → URL) without blocking.
+    #[must_use]
+    pub fn urls(&self) -> BTreeMap<String, String> {
+        self.config
+            .try_read()
+            .map(|c| c.urls.clone())
+            .unwrap_or_default()
+    }
+
+    /// Set the user's default profile text and shared links, then write the
+    /// config file. These seed new bookmarks and are used whenever a connection
+    /// does not carry a per-server override.
+    ///
+    /// # Errors
+    ///
+    /// I/O errors may occur when writing to the config file.
+    pub async fn set_profile(&self, profile: String, urls: BTreeMap<String, String>) -> Result<()> {
+        {
+            let mut config = self.config.write().await;
+            config.profile = profile;
+            config.urls = urls;
+        }
+        self.config.read().await.save(&self.config_file)
+    }
+
     /// Connect to a server
     ///
     /// # Errors
@@ -543,6 +581,8 @@ impl Client {
         auth: Option<UserAuthentication>,
         key: Option<VerifyingKey>,
         avatar: Option<Vec<u8>>,
+        profile: String,
+        urls: BTreeMap<String, String>,
     ) -> Result<ConclaveConnection> {
         let key = if let Some(key) = key {
             key
@@ -576,6 +616,19 @@ impl Client {
                 }
             });
 
+        // Share the per-server profile and links when set, otherwise fall back
+        // to the client's global defaults.
+        let profile = if profile.is_empty() {
+            config.profile.clone()
+        } else {
+            profile
+        };
+        let urls = if urls.is_empty() {
+            config.urls.clone()
+        } else {
+            urls
+        };
+
         info!("Creating encrypted stream to server");
         let mut encrypted_stream =
             EncryptedStream::connect(stream, &key, Some(&signing_key)).await?;
@@ -589,12 +642,14 @@ impl Client {
             let hours = (seconds + if seconds >= 0 { 1800 } else { -1800 }) / 3600;
             i16::try_from(hours).unwrap_or(0)
         });
-        let login = ServerMessagesEncrypted::ServerAuthenticationRequest((
-            display_name.clone(),
-            own_timezone,
-            avatar_thumb,
+        let login = ServerMessagesEncrypted::ServerAuthenticationRequest(AuthRequest {
+            display_name: display_name.clone(),
+            timezone: own_timezone,
+            avatar: avatar_thumb,
+            profile,
+            urls,
             auth,
-        ))
+        })
         .to_vec();
         encrypted_stream.send(&login).await?;
 

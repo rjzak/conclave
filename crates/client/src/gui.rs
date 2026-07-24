@@ -9,7 +9,7 @@ use conclave_common::server::{
 };
 use conclave_common::tracker::{Advertise, Tracker, TrackerWithKey};
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -512,6 +512,83 @@ fn parse_server_url(url: &str) -> Option<(String, u16)> {
     Some((host, port))
 }
 
+/// Flatten a description → URL map into an ordered list of pairs for editing.
+/// Editing keys in place is impossible with a map, so the GUI works on a `Vec`
+/// and converts back on save with [`pairs_to_map`].
+fn map_to_pairs(map: &BTreeMap<String, String>) -> Vec<(String, String)> {
+    map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+}
+
+/// Collapse edited pairs back into a map, dropping entries whose description is
+/// blank (a partially-filled or just-added row).
+fn pairs_to_map(pairs: &[(String, String)]) -> BTreeMap<String, String> {
+    pairs
+        .iter()
+        .filter(|(desc, _)| !desc.trim().is_empty())
+        .map(|(desc, url)| (desc.trim().to_string(), url.trim().to_string()))
+        .collect()
+}
+
+/// Render an editor for a list of description/URL pairs. Rows can be edited,
+/// removed, or appended; the caller persists the result. Returns `true` if any
+/// row changed this frame (edit, add, or delete).
+fn urls_editor(ui: &mut egui::Ui, id_salt: &str, pairs: &mut Vec<(String, String)>) -> bool {
+    let mut changed = false;
+    let mut remove: Option<usize> = None;
+    for (i, (desc, url)) in pairs.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            changed |= ui
+                .add(
+                    egui::TextEdit::singleline(desc)
+                        .id_salt(format!("{id_salt}_desc_{i}"))
+                        .hint_text("Description")
+                        .desired_width(120.0),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::TextEdit::singleline(url)
+                        .id_salt(format!("{id_salt}_url_{i}"))
+                        .hint_text("https://…")
+                        .desired_width(220.0),
+                )
+                .changed();
+            if ui.small_button("🗑").on_hover_text("Remove link").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        pairs.remove(i);
+        changed = true;
+    }
+    if ui.button("➕ Add link").clicked() {
+        pairs.push((String::new(), String::new()));
+        changed = true;
+    }
+    changed
+}
+
+/// Render a read-only view of another user's profile text and links, used in the
+/// user-details panel. Links are shown as clickable hyperlinks.
+fn profile_view(ui: &mut egui::Ui, profile: &str, urls: &BTreeMap<String, String>) {
+    if !profile.trim().is_empty() {
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Profile").strong());
+        ui.label(profile);
+    }
+    if !urls.is_empty() {
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Links").strong());
+        for (desc, url) in urls {
+            ui.horizontal(|ui| {
+                ui.label(format!("{desc}:"));
+                ui.hyperlink(url);
+            });
+        }
+    }
+}
+
 /// Connect to a server in the background. On success the connection is registered
 /// in `active_connections`; roster and server-info updates then arrive as pushes
 /// from the server rather than by polling. When `clear_on_success` is provided,
@@ -531,6 +608,8 @@ fn spawn_connect(
     auth: Option<UserAuthentication>,
     key: Option<VerifyingKey>,
     avatar: Option<Vec<u8>>,
+    profile: String,
+    urls: BTreeMap<String, String>,
 ) {
     connect_pending.store(true, Ordering::SeqCst);
     if let Ok(mut e) = connect_error.write() {
@@ -539,7 +618,17 @@ fn spawn_connect(
 
     tokio::spawn(async move {
         match client
-            .connect(&host, port, share_time, display_name, auth, key, avatar)
+            .connect(
+                &host,
+                port,
+                share_time,
+                display_name,
+                auth,
+                key,
+                avatar,
+                profile,
+                urls,
+            )
             .await
         {
             Ok(conn) => {
@@ -1331,6 +1420,8 @@ impl ConclaveGUI {
                                     auth,
                                     Some(bookmark.server.key),
                                     bookmark.avatar.clone(),
+                                    bookmark.profile.clone(),
+                                    bookmark.urls.clone(),
                                 );
                             }
                         }
@@ -1481,7 +1572,7 @@ impl ConclaveGUI {
                 egui::ViewportId::from_hash_of("settings_window"),
                 egui::ViewportBuilder::default()
                     .with_title("Settings")
-                    .with_inner_size([380.0, 260.0])
+                    .with_inner_size([420.0, 560.0])
                     .with_resizable(true),
                 move |ctx, _class| {
                     if ctx.input(|i| i.viewport().close_requested()) {
@@ -1498,6 +1589,18 @@ impl ConclaveGUI {
                     let mut paste_request = false;
                     let mut choose_request = false;
                     let mut remove_request = false;
+
+                    // Profile text and links live in egui temp data, seeded from
+                    // the saved config the first time the window is drawn.
+                    let profile_id = egui::Id::new("settings_profile_text");
+                    let urls_id = egui::Id::new("settings_url_pairs");
+                    let mut profile_text: String = ctx
+                        .data(|d| d.get_temp::<String>(profile_id))
+                        .unwrap_or_else(|| client_arc.profile());
+                    let mut url_pairs: Vec<(String, String)> = ctx
+                        .data(|d| d.get_temp::<Vec<(String, String)>>(urls_id))
+                        .unwrap_or_else(|| map_to_pairs(&client_arc.urls()));
+                    let mut save_profile_request = false;
 
                     egui::CentralPanel::default().show(ctx, |ui| {
                         ui.heading("Avatar");
@@ -1557,6 +1660,37 @@ impl ConclaveGUI {
                             });
                         });
 
+                        ui.add_space(12.0);
+                        ui.separator();
+                        ui.heading("Profile");
+                        ui.label(
+                            egui::RichText::new(
+                                "A short description and links shown to other users when they \
+                                 view your details. Used as the default for new bookmarks; \
+                                 changes take effect the next time you connect.",
+                            )
+                            .weak(),
+                        );
+                        ui.add_space(6.0);
+                        ui.add(
+                            egui::TextEdit::multiline(&mut profile_text)
+                                .hint_text("About me…")
+                                .desired_rows(3)
+                                .desired_width(f32::INFINITY),
+                        );
+
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("Links (description → URL)").strong());
+                        urls_editor(ui, "settings_urls", &mut url_pairs);
+
+                        ui.add_space(8.0);
+                        if ui
+                            .add_enabled(!is_pending, egui::Button::new("Save profile"))
+                            .clicked()
+                        {
+                            save_profile_request = true;
+                        }
+
                         if let Ok(err) = error_arc.read()
                             && let Some(msg) = err.as_ref()
                         {
@@ -1614,6 +1748,25 @@ impl ConclaveGUI {
                             }
                         }
                     }
+
+                    if save_profile_request {
+                        let client = client_arc.clone();
+                        let err_arc = error_arc.clone();
+                        let profile = profile_text.clone();
+                        let urls = pairs_to_map(&url_pairs);
+                        tokio::spawn(async move {
+                            let result = client.set_profile(profile, urls).await;
+                            if let Ok(mut err) = err_arc.write() {
+                                *err = result.err().map(|e| e.to_string());
+                            }
+                        });
+                    }
+
+                    // Persist the working profile/link state across frames.
+                    ctx.data_mut(|d| {
+                        d.insert_temp(profile_id, profile_text);
+                        d.insert_temp(urls_id, url_pairs);
+                    });
                 },
             );
         }
@@ -2026,6 +2179,8 @@ impl ConclaveGUI {
                     let pass_id = egui::Id::new("bm_form_pass");
                     let share_id = egui::Id::new("bm_form_share");
                     let avatar_id = egui::Id::new("bm_form_avatar");
+                    let profile_field_id = egui::Id::new("bm_form_profile");
+                    let urls_field_id = egui::Id::new("bm_form_urls");
                     let edit_id = egui::Id::new("bm_form_edit_index");
 
                     let mut f_name =
@@ -2044,6 +2199,12 @@ impl ConclaveGUI {
                     let mut f_avatar = ctx
                         .data(|d| d.get_temp::<Option<Vec<u8>>>(avatar_id))
                         .flatten();
+                    let mut f_profile =
+                        ctx.data(|d| d.get_temp::<String>(profile_field_id).unwrap_or_default());
+                    let mut f_urls = ctx.data(|d| {
+                        d.get_temp::<Vec<(String, String)>>(urls_field_id)
+                            .unwrap_or_default()
+                    });
                     let mut edit_index =
                         ctx.data(|d| d.get_temp::<Option<usize>>(edit_id)).flatten();
 
@@ -2207,6 +2368,27 @@ impl ConclaveGUI {
                                 ui.label("Share local time:");
                                 ui.checkbox(&mut f_share, "");
                                 ui.end_row();
+                                ui.label("Profile:");
+                                ui.vertical(|ui| {
+                                    ui.add(
+                                        egui::TextEdit::multiline(&mut f_profile)
+                                            .hint_text("Optional; falls back to your default.")
+                                            .desired_rows(2)
+                                            .desired_width(220.0),
+                                    );
+                                });
+                                ui.end_row();
+                                ui.label("Links:");
+                                ui.vertical(|ui| {
+                                    urls_editor(ui, "bm_urls", &mut f_urls);
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Optional; falls back to your default links.",
+                                        )
+                                        .weak(),
+                                    );
+                                });
+                                ui.end_row();
                                 ui.label("Avatar:");
                                 ui.vertical(|ui| {
                                     if let Some(bytes) = &f_avatar
@@ -2294,6 +2476,8 @@ impl ConclaveGUI {
                             .unwrap_or_default();
                         f_share = bookmark.share_time;
                         f_avatar.clone_from(&bookmark.avatar);
+                        f_profile.clone_from(&bookmark.profile);
+                        f_urls = map_to_pairs(&bookmark.urls);
                         edit_index = Some(i);
                     }
 
@@ -2306,6 +2490,8 @@ impl ConclaveGUI {
                         f_pass.clear();
                         f_share = false;
                         f_avatar = None;
+                        f_profile.clear();
+                        f_urls.clear();
                         edit_index = None;
                     }
 
@@ -2320,6 +2506,8 @@ impl ConclaveGUI {
                             f_pass.clear();
                             f_share = false;
                             f_avatar = None;
+                            f_profile.clear();
+                            f_urls.clear();
                             edit_index = None;
                         }
                         let client = client_arc.clone();
@@ -2351,6 +2539,8 @@ impl ConclaveGUI {
                         let pass = std::mem::take(&mut f_pass);
                         let share = f_share;
                         let avatar = std::mem::take(&mut f_avatar);
+                        let profile = std::mem::take(&mut f_profile);
+                        let urls = pairs_to_map(&std::mem::take(&mut f_urls));
                         let index = edit_index;
 
                         // Reset the form back to add mode.
@@ -2422,6 +2612,8 @@ impl ConclaveGUI {
                                 server: KnownHost { host, port, key },
                                 name,
                                 display_name: display,
+                                profile,
+                                urls,
                                 auth,
                                 share_time: share,
                                 avatar,
@@ -2449,6 +2641,8 @@ impl ConclaveGUI {
                         d.insert_temp(pass_id, f_pass);
                         d.insert_temp(share_id, f_share);
                         d.insert_temp(avatar_id, f_avatar);
+                        d.insert_temp(profile_field_id, f_profile);
+                        d.insert_temp(urls_field_id, f_urls);
                         d.insert_temp(edit_id, edit_index);
                     });
                 },
@@ -2744,6 +2938,10 @@ impl ConclaveGUI {
                             // No per-server avatar here; connect falls back to the
                             // client's default avatar.
                             None,
+                            // Likewise no per-server profile override; connect
+                            // falls back to the client's default profile/links.
+                            String::new(),
+                            BTreeMap::new(),
                         );
                         ctx.request_repaint_of(egui::ViewportId::ROOT);
                     }
@@ -3157,6 +3355,8 @@ impl ConclaveGUI {
                                         if let Some(ip) = &d.ip {
                                             ui.label(format!("IP: {ip}"));
                                         }
+                                        // The user's shared profile and links.
+                                        profile_view(ui, &d.profile, &d.urls);
                                         if is_admin && ui.button("Kick").clicked() {
                                             kick_request = Some(sel);
                                         }

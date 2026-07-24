@@ -4,6 +4,7 @@ use conclave_common::net::{SigningKey, random_keypair};
 use conclave_common::server::VerifyingKey;
 use conclave_common::tracker::TrackerWithKey;
 
+use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -52,6 +53,14 @@ pub struct ClientConfig {
     /// Whether to share the local timezone with the server
     pub default_share_timezone: bool,
 
+    /// User's profile
+    #[serde(default)]
+    pub profile: String,
+
+    /// User's social links. Name:URL
+    #[serde(default)]
+    pub urls: BTreeMap<String, String>,
+
     /// Signing (private) key
     #[serde(
         serialize_with = "conclave_common::serde::serialize_dalek_private_key",
@@ -88,6 +97,8 @@ impl Default for ClientConfig {
         Self {
             default_display_name: "Unnamed User".to_string(),
             default_share_timezone: true,
+            profile: String::new(),
+            urls: BTreeMap::new(),
             trackers: Vec::new(),
             bookmarks: Vec::new(),
             known_hosts: Vec::new(),
@@ -170,6 +181,15 @@ pub struct BookmarkEntry {
     /// User's display name
     pub display_name: String,
 
+    /// User's profile
+    #[serde(default)]
+    pub profile: String,
+
+    /// User's social links. Name: URL
+    #[serde(default)]
+    #[zeroize(skip)]
+    pub urls: BTreeMap<String, String>,
+
     /// User's username
     #[serde(default)]
     pub auth: Option<UserAuth>,
@@ -246,6 +266,8 @@ mod tests {
             },
             name: "Example".into(),
             display_name: "Me".into(),
+            profile: String::new(),
+            urls: BTreeMap::new(),
             auth: None,
             share_time: false,
             avatar: Some(vec![9u8, 8, 7, 6]),

@@ -4,6 +4,8 @@ use crate::admin::server::{ClientAdminMessagesEncrypted, ServerAdminMessagesEncr
 use crate::files::FileEntry;
 use crate::forum::{ForumPost, ForumThreadInfo, ForumTopic, NewForumPost, NewForumThread};
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Duration, Utc};
 pub use ed25519_dalek::VerifyingKey;
 use semver::Version;
@@ -286,6 +288,38 @@ pub struct UserDetails {
 
     /// The user's IP address. Only populated for administrators.
     pub ip: Option<String>,
+
+    /// The user's free-form profile text (a short bio or "about me"). Visible to
+    /// any connected user. Empty if the user has not set one.
+    pub profile: String,
+
+    /// The user's shared links as a description → URL map (e.g. social media).
+    /// Visible to any connected user. Empty if the user shared none.
+    pub urls: BTreeMap<String, String>,
+}
+
+/// What a client sends when authenticating: how it wishes to appear to peers,
+/// along with optional login credentials. On success the server replies with
+/// [`ServerInformation`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AuthRequest {
+    /// Display name to show to other users.
+    pub display_name: String,
+
+    /// Timezone as whole hours relative to GMT, if the user chose to share it.
+    pub timezone: Option<i16>,
+
+    /// A small (32×32) PNG avatar, if the user shared one.
+    pub avatar: Option<Vec<u8>>,
+
+    /// Free-form profile text (a short bio), served to peers on demand.
+    pub profile: String,
+
+    /// Shared links as a description → URL map, served to peers on demand.
+    pub urls: BTreeMap<String, String>,
+
+    /// Login credentials; `None` for an anonymous guest.
+    pub auth: Option<UserAuthentication>,
 }
 
 /// Client to Server messages for encrypted connections
@@ -296,18 +330,9 @@ pub enum ServerMessagesEncrypted {
     /// Ask the server for information about itself
     ServerInformationRequest,
 
-    /// User tries to authenticate
-    /// Send the display name, the optional timezone offset, an optional avatar
-    /// (a small 32×32 PNG), and the optional authentication message.
-    /// Server responds with Server Information if successful
-    ServerAuthenticationRequest(
-        (
-            String,
-            Option<i16>,
-            Option<Vec<u8>>,
-            Option<UserAuthentication>,
-        ),
-    ),
+    /// User tries to authenticate, describing how they wish to appear (see
+    /// [`AuthRequest`]). The server responds with Server Information on success.
+    ServerAuthenticationRequest(AuthRequest),
 
     /// Ask the server for a list of connected users
     ListConnectedUsersRequest,

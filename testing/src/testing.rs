@@ -114,6 +114,8 @@ async fn integration() {
                 None,
                 None,
                 None,
+                String::new(),
+                std::collections::BTreeMap::new(),
             )
             .await
             .is_err()
@@ -129,6 +131,8 @@ async fn integration() {
             Some(("admin".to_string(), password.to_string()).into()),
             None,
             None,
+            String::new(),
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();

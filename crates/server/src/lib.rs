@@ -21,14 +21,14 @@ use conclave_common::net::{
     DEFAULT_REKEY_INTERVAL, DefaultEncryptedStream, EncryptedRead, EncryptedWrite, random_keypair,
 };
 use conclave_common::server::{
-    ChatEvent, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser, IDLE_TIMEOUT_MINUTES,
-    MAX_AVATAR_BYTES, MAX_BANNER_BYTES, ServerError, ServerInformation, ServerMessagesEncrypted,
-    UserAuthentication, UserDetails, unencrypted,
+    AuthRequest, ChatEvent, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser,
+    IDLE_TIMEOUT_MINUTES, MAX_AVATAR_BYTES, MAX_BANNER_BYTES, ServerError, ServerInformation,
+    ServerMessagesEncrypted, UserAuthentication, UserDetails, unencrypted,
 };
 use conclave_common::tracker::TrackerProtocol::AdvertiseServer;
 use conclave_common::tracker::{Advertise, Tracker, TrackerWithKey};
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, AtomicU32, AtomicU64, Ordering};
@@ -84,6 +84,15 @@ struct ClientConnection {
     /// Fired to kick this connection: the per-client task stops reading and the
     /// connection is torn down.
     cancel: Arc<Notify>,
+
+    /// The user's free-form profile text, served to peers on demand via
+    /// [`UserDetails`]. Kept off [`ConnectedUser`] so it is not rebroadcast on
+    /// every roster change.
+    profile: String,
+
+    /// The user's shared links (description → URL), served to peers on demand
+    /// via [`UserDetails`].
+    urls: BTreeMap<String, String>,
 }
 
 impl Clone for ClientConnection {
@@ -96,6 +105,8 @@ impl Clone for ClientConnection {
             connected_at: self.connected_at,
             last_active: self.last_active.clone(),
             cancel: self.cancel.clone(),
+            profile: self.profile.clone(),
+            urls: self.urls.clone(),
         }
     }
 }
@@ -1736,12 +1747,16 @@ impl State {
                                 match stream.recv().await {
                                     Ok(bytes) => match ServerMessagesEncrypted::from_bytes(&bytes) {
                                         Ok(
-                                            ServerMessagesEncrypted::ServerAuthenticationRequest((
-                                                display_name,
-                                                user_local_time,
-                                                avatar,
-                                                auth,
-                                            )),
+                                            ServerMessagesEncrypted::ServerAuthenticationRequest(
+                                                AuthRequest {
+                                                    display_name,
+                                                    timezone: user_local_time,
+                                                    avatar,
+                                                    profile,
+                                                    urls,
+                                                    auth,
+                                                },
+                                            ),
                                         ) => {
                                             // Drop oversized avatars rather than
                                             // relaying abuse to every peer.
@@ -1872,6 +1887,8 @@ impl State {
                                                 connected_at: now,
                                                 last_active: last_active.clone(),
                                                 cancel: cancel.clone(),
+                                                profile,
+                                                urls,
                                             };
                                             if let Some(uid) = user_id {
                                                 info!(
@@ -3579,12 +3596,17 @@ impl State {
     /// `requester_admin` flag decides whether the privileged fields (login name
     /// and IP address) are included.
     async fn user_details(&self, connection_id: u16, requester_admin: bool) -> Option<UserDetails> {
-        let (user_id, ip) = {
+        let (user_id, ip, profile, urls) = {
             let connections = self.connections.read().await;
             let conn = connections
                 .iter()
                 .find(|c| c.connection_id == connection_id)?;
-            (conn.user.user_id, conn.addr.ip())
+            (
+                conn.user.user_id,
+                conn.addr.ip(),
+                conn.profile.clone(),
+                conn.urls.clone(),
+            )
         };
 
         // Group membership is visible to any connected user.
@@ -3608,6 +3630,8 @@ impl State {
             groups,
             username,
             ip,
+            profile,
+            urls,
         })
     }
 
