@@ -21,6 +21,18 @@ use tracing::error;
 /// label, still-connected flag, connection handle).
 type ConnSnapshot = (String, String, bool, ConclaveConnection);
 
+/// Logical (point) size of the main launcher window, and its intended aspect
+/// ratio. The window is fixed and non-resizable; on the first frame
+/// [`ConclaveGUI::fit_main_window`] scales this down to fit the monitor while
+/// preserving the aspect ratio, so it stays proportional on small displays or
+/// where the scale factor is mis-reported (e.g. KDE under X11, where the fixed
+/// logical size could otherwise render as a huge window).
+pub const MAIN_WINDOW_SIZE: [f32; 2] = [460.0, 200.0];
+
+/// The main window is never allowed to occupy more than this fraction of the
+/// monitor in either dimension.
+const MAIN_WINDOW_MAX_SCREEN_FRACTION: f32 = 0.9;
+
 fn do_start_discovery(
     servers_arc: Arc<RwLock<HashSet<DiscoveredServer>>>,
     running_arc: Arc<AtomicBool>,
@@ -1139,6 +1151,10 @@ pub struct ConclaveGUI {
 
     /// A bookmark add/edit is in progress (fetching the server key)
     bookmarks_op_pending: Arc<AtomicBool>,
+
+    /// Whether the main window has been fitted to the monitor yet. The fit runs
+    /// once, on the first frame the monitor size is known.
+    window_fitted: bool,
 }
 
 impl ConclaveGUI {
@@ -1199,12 +1215,14 @@ impl ConclaveGUI {
             bookmarks_viewport_closed: Arc::new(AtomicBool::new(false)),
             bookmarks_error: Arc::new(RwLock::new(None)),
             bookmarks_op_pending: Arc::new(AtomicBool::new(false)),
+            window_fitted: false,
         }
     }
 }
 
 impl eframe::App for ConclaveGUI {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut Frame) {
+        self.fit_main_window(ui.ctx());
         self.begin_frame(ui);
         self.top_bar_menu(ui);
         self.about_window(ui);
@@ -1228,6 +1246,43 @@ impl eframe::App for ConclaveGUI {
 }
 
 impl ConclaveGUI {
+    /// Fix the main window to a size that fits the monitor while keeping its
+    /// aspect ratio, then lock it so it stays fixed. Runs once, on the first
+    /// frame the monitor size is reported.
+    ///
+    /// [`MAIN_WINDOW_SIZE`] is an absolute logical size that looks right on a
+    /// well-behaved display, but the reported scale factor is unreliable on some
+    /// platforms (notably KDE under X11), which can turn that logical size into a
+    /// window far larger than the screen. Scaling both dimensions by a single
+    /// factor keeps the window proportional and always on-screen.
+    fn fit_main_window(&mut self, ctx: &egui::Context) {
+        if self.window_fitted {
+            return;
+        }
+        // The monitor size is not always known on the very first frame; keep
+        // repainting until it is, then apply the fit exactly once.
+        let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) else {
+            ctx.request_repaint();
+            return;
+        };
+        if monitor.x < 1.0 || monitor.y < 1.0 {
+            ctx.request_repaint();
+            return;
+        }
+
+        let base = egui::Vec2::from(MAIN_WINDOW_SIZE);
+        let max = monitor * MAIN_WINDOW_MAX_SCREEN_FRACTION;
+        // A single scale factor for both axes preserves the aspect ratio; never
+        // scale up past the intended size.
+        let scale = (max.x / base.x).min(max.y / base.y).min(1.0);
+        let size = base * scale;
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(size));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(size));
+        self.window_fitted = true;
+    }
+
     /// Per-frame housekeeping: drain viewport close flags, keep the
     /// tracker-server subscription in sync, and repaint while async work runs.
     #[inline]
@@ -3454,7 +3509,14 @@ impl ConclaveGUI {
                 .into_iter()
                 .find(|r| r.id == room)
                 .map_or_else(|| format!("Room {room}"), |r| r.name);
-            let title = format!("{room_name} — {server_name}");
+            // Fold the current topic (and who set it) into the window title.
+            let title = match conn.chat_room(room).and_then(|s| s.topic) {
+                Some(t) => format!(
+                    "{room_name}: {} (set by {}) — {server_name}",
+                    t.text, t.set_by
+                ),
+                None => format!("{room_name} — {server_name}"),
+            };
             let close_reqs = self.chat_window_close_requests.clone();
             let active_server = self.active_server.clone();
 
@@ -3505,6 +3567,56 @@ impl ConclaveGUI {
                     let input_id = egui::Id::new(format!("chat_input:{key_owned}:{room}"));
                     let mut input: String = ctx.data(|d| d.get_temp(input_id).unwrap_or_default());
                     let mut send = false;
+
+                    let topic_input_id =
+                        egui::Id::new(format!("chat_topic_input:{key_owned}:{room}"));
+                    let mut topic_input: String =
+                        ctx.data(|d| d.get_temp(topic_input_id).unwrap_or_default());
+                    // `None` = no change this frame; `Some(text)` sets the topic
+                    // (an empty string clears it).
+                    let mut set_topic: Option<String> = None;
+
+                    // Top: the room topic and an editor to change it. Any member
+                    // may set it; the topic (and who set it) is shown here and in
+                    // the window title.
+                    egui::Panel::top(format!("chat_topic:{key_owned}:{room}")).show(ctx, |ui| {
+                        ui.add_space(4.0);
+                        match &state.topic {
+                            Some(t) => {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(egui::RichText::new("📌").strong());
+                                    ui.label(egui::RichText::new(&t.text).strong());
+                                    ui.label(
+                                        egui::RichText::new(format!("— set by {}", t.set_by))
+                                            .weak(),
+                                    );
+                                });
+                            }
+                            None => {
+                                ui.label(egui::RichText::new("No topic set").weak());
+                            }
+                        }
+                        ui.horizontal(|ui| {
+                            let response = ui.add(
+                                egui::TextEdit::singleline(&mut topic_input)
+                                    .desired_width(ui.available_width() - 130.0)
+                                    .hint_text("Set room topic"),
+                            );
+                            let entered = response.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            if (ui.button("Set topic").clicked() || entered)
+                                && !topic_input.trim().is_empty()
+                            {
+                                set_topic = Some(std::mem::take(&mut topic_input));
+                            }
+                            // Clearing sends an empty topic, which the server
+                            // interprets as removing it.
+                            if state.topic.is_some() && ui.button("Clear").clicked() {
+                                set_topic = Some(String::new());
+                            }
+                        });
+                        ui.add_space(4.0);
+                    });
 
                     // Bottom: message composer.
                     egui::Panel::bottom(format!("chat_compose:{key_owned}:{room}")).show(
@@ -3605,7 +3717,16 @@ impl ConclaveGUI {
                             let _ = conn.chat_send(room, message).await;
                         });
                     }
-                    ctx.data_mut(|d| d.insert_temp(input_id, input));
+                    if let Some(topic) = set_topic {
+                        let conn = conn.clone();
+                        tokio::spawn(async move {
+                            let _ = conn.chat_set_topic(room, topic).await;
+                        });
+                    }
+                    ctx.data_mut(|d| {
+                        d.insert_temp(input_id, input);
+                        d.insert_temp(topic_input_id, topic_input);
+                    });
                     // Messages arrive asynchronously; repaint so they show promptly.
                     ctx.request_repaint_after(std::time::Duration::from_millis(150));
                 },

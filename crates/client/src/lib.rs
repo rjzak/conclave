@@ -659,7 +659,6 @@ impl Client {
 
         match server_info {
             ClientMessagesEncrypted::ServerInformationResponse(server_info) => {
-                eprintln!("Received server information");
                 if server_info.version > *VERSION {
                     warn!(
                         "Server version {} is newer than client version {}",

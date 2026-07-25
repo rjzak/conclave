@@ -154,6 +154,17 @@ pub struct ChatroomInfo {
     pub name: String,
 }
 
+/// A chatroom's current topic and who set it. Held only in server memory: it
+/// survives the last member leaving but is lost when the server restarts.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ChatTopic {
+    /// The topic text.
+    pub text: String,
+
+    /// Display name of the user who set the topic.
+    pub set_by: String,
+}
+
 /// Activity within a chatroom, pushed to its members. History is not preserved,
 /// so these are only delivered live to members present at the time.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -184,6 +195,16 @@ pub enum ChatEvent {
         message: String,
         /// When the server received the message (UTC)
         at: DateTime<Utc>,
+    },
+
+    /// A user set (or, with empty text, cleared) the room's topic.
+    Topic {
+        /// Chatroom id
+        room: u16,
+        /// Display name of the user who changed the topic
+        display_name: String,
+        /// The new topic text; empty if the topic was cleared
+        topic: String,
     },
 }
 
@@ -357,6 +378,15 @@ pub enum ServerMessagesEncrypted {
         message: String,
     },
 
+    /// Set (or, with empty text, clear) a chatroom's topic. The sender must be a
+    /// member of the room.
+    ChatSetTopic {
+        /// Chatroom id
+        room: u16,
+        /// New topic text; empty clears the topic
+        topic: String,
+    },
+
     /// Ask the server for the forum topics this user may access.
     ForumTopicsRequest,
 
@@ -517,13 +547,15 @@ pub enum ClientMessagesEncrypted {
     /// The chatrooms this user may access (or empty if chat is disabled).
     ChatRoomsResponse(Vec<ChatroomInfo>),
 
-    /// Sent to a user who joined a chatroom: the room id and the display names of
-    /// the members currently present.
+    /// Sent to a user who joined a chatroom: the room id, the display names of
+    /// the members currently present, and the room's current topic (if any).
     ChatJoined {
         /// Chatroom id
         room: u16,
         /// Display names of the members currently in the room
         users: Vec<String>,
+        /// The room's current topic, or `None` if unset
+        topic: Option<ChatTopic>,
     },
 
     /// Live activity within a chatroom the user is a member of.

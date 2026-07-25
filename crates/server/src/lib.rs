@@ -21,7 +21,7 @@ use conclave_common::net::{
     DEFAULT_REKEY_INTERVAL, DefaultEncryptedStream, EncryptedRead, EncryptedWrite, random_keypair,
 };
 use conclave_common::server::{
-    AuthRequest, ChatEvent, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser,
+    AuthRequest, ChatEvent, ChatTopic, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser,
     IDLE_TIMEOUT_MINUTES, MAX_AVATAR_BYTES, MAX_BANNER_BYTES, ServerError, ServerInformation,
     ServerMessagesEncrypted, UserAuthentication, UserDetails, unencrypted,
 };
@@ -177,6 +177,10 @@ pub struct State {
 
     /// Chatroom membership: room id -> the connection ids currently present.
     chat_members: Arc<RwLock<HashMap<u16, HashSet<u16>>>>,
+
+    /// Chatroom topics: room id -> the current topic and who set it. Held only
+    /// in memory, so it survives the last member leaving but not a restart.
+    chat_topics: Arc<RwLock<HashMap<u16, ChatTopic>>>,
 
     /// Whether threaded discussions (forums) are enabled on the server
     forums_enabled: Arc<AtomicBool>,
@@ -336,6 +340,7 @@ impl State {
                 allow_anonymous: Arc::new(AtomicBool::new(true)), // Database default
                 chat_enabled: Arc::new(AtomicBool::new(false)),   // Database default
                 chat_members: Arc::new(RwLock::new(HashMap::new())),
+                chat_topics: Arc::new(RwLock::new(HashMap::new())),
                 forums_enabled: Arc::new(AtomicBool::new(false)), // Database default
                 forum_viewers: Arc::new(RwLock::new(HashMap::new())),
                 banner: Arc::new(RwLock::new(None)),
@@ -517,6 +522,7 @@ impl State {
             allow_anonymous: Arc::new(AtomicBool::new(allow_anonymous)),
             chat_enabled: Arc::new(AtomicBool::new(chat_enabled)),
             chat_members: Arc::new(RwLock::new(HashMap::new())),
+            chat_topics: Arc::new(RwLock::new(HashMap::new())),
             forums_enabled: Arc::new(AtomicBool::new(forums_enabled)),
             forum_viewers: Arc::new(RwLock::new(HashMap::new())),
             banner: Arc::new(RwLock::new(banner)),
@@ -2135,6 +2141,10 @@ impl State {
                     self.chat_send(user.id, room, message, &user).await;
                 }
 
+                Ok(ServerMessagesEncrypted::ChatSetTopic { room, topic }) => {
+                    self.chat_set_topic(user.id, room, topic, &user).await;
+                }
+
                 Ok(ServerMessagesEncrypted::ForumTopicsRequest) => {
                     let topics = self.forum_topics_for_user(user.user_id, user.admin).await;
                     reply(
@@ -2600,6 +2610,7 @@ impl State {
         self.chat_enabled.store(enabled, Ordering::Relaxed);
         if !enabled {
             self.chat_members.write().await.clear();
+            self.chat_topics.write().await.clear();
         }
         // Tell clients chat is on/off and refresh their accessible-room lists.
         self.broadcast_server_info().await;
@@ -2706,6 +2717,7 @@ impl State {
             })
             .await?;
         self.chat_members.write().await.remove(&id);
+        self.chat_topics.write().await.remove(&id);
         self.broadcast_chatrooms().await;
         Ok(())
     }
@@ -2863,9 +2875,10 @@ impl State {
             .insert(connection_id);
 
         let users = self.room_member_names(room).await;
+        let topic = self.chat_topics.read().await.get(&room).cloned();
         self.send_to_connection(
             connection_id,
-            &ClientMessagesEncrypted::ChatJoined { room, users },
+            &ClientMessagesEncrypted::ChatJoined { room, users, topic },
         )
         .await;
         self.broadcast_to_room(
@@ -2958,6 +2971,54 @@ impl State {
                 display_name: user.display_name.clone(),
                 message,
                 at: Utc::now(),
+            }),
+            None,
+        )
+        .await;
+    }
+
+    /// Set (or, with empty text, clear) a room's topic and tell the members.
+    /// Ignored if the sender isn't a member of the room. The topic is kept in
+    /// memory only: it survives the room emptying but is lost on restart.
+    async fn chat_set_topic(
+        &self,
+        connection_id: u16,
+        room: u16,
+        topic: String,
+        user: &ConnectedUser,
+    ) {
+        let is_member = self
+            .chat_members
+            .read()
+            .await
+            .get(&room)
+            .is_some_and(|set| set.contains(&connection_id));
+        if !is_member {
+            return;
+        }
+
+        let topic = topic.trim().to_string();
+        {
+            let mut topics = self.chat_topics.write().await;
+            if topic.is_empty() {
+                topics.remove(&room);
+            } else {
+                topics.insert(
+                    room,
+                    ChatTopic {
+                        text: topic.clone(),
+                        set_by: user.display_name.clone(),
+                    },
+                );
+            }
+        }
+
+        self.broadcast_to_room(
+            room,
+            &ClientMessagesEncrypted::ChatActivity(ChatEvent::Topic {
+                room,
+                display_name: user.display_name.clone(),
+                topic,
             }),
             None,
         )

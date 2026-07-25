@@ -41,11 +41,14 @@ async fn main() -> eframe::Result {
         eprintln!("WGPU Features: {wgpu:?}");
     }
 
+    // Fixed, non-resizable main window. The absolute size below is a starting
+    // point; on the first frame the GUI clamps it to the monitor (preserving the
+    // aspect ratio) so it stays proportional across platforms and DPI settings.
+    // See `gui::MAIN_WINDOW_SIZE` and `ConclaveGUI::fit_main_window`.
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([4000.0, 200.0])
-            .with_min_inner_size([4000.0, 200.0])
-            .with_max_inner_size([400.0, 200.0]),
+            .with_inner_size(gui::MAIN_WINDOW_SIZE)
+            .with_resizable(false),
         ..Default::default()
     };
     eframe::run_native(

@@ -7,7 +7,7 @@ use conclave_common::forum::{
 };
 use conclave_common::net::{DefaultEncryptedStream, EncryptedWrite, SigningKey, VerifyingKey};
 use conclave_common::server::{
-    ChatEvent, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser, ServerInformation,
+    ChatEvent, ChatTopic, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser, ServerInformation,
     ServerMessagesEncrypted, UserDetails,
 };
 use std::collections::HashMap;
@@ -99,6 +99,9 @@ pub struct ChatRoom {
 
     /// The conversation so far this session.
     pub lines: Vec<ChatLine>,
+
+    /// The room's current topic and who set it, or `None` if unset.
+    pub topic: Option<ChatTopic>,
 }
 
 /// Connection information
@@ -312,12 +315,14 @@ impl ConclaveConnection {
                             .write()
                             .unwrap_or_else(std::sync::PoisonError::into_inner) = rooms;
                     }
-                    ClientMessagesEncrypted::ChatJoined { room, users } => {
+                    ClientMessagesEncrypted::ChatJoined { room, users, topic } => {
                         let mut rooms = conn_clone
                             .chat_rooms
                             .write()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        rooms.entry(room).or_default().users = users;
+                        let entry = rooms.entry(room).or_default();
+                        entry.users = users;
+                        entry.topic = topic;
                     }
                     ClientMessagesEncrypted::ChatActivity(event) => {
                         conn_clone.apply_chat_event(event);
@@ -644,6 +649,24 @@ impl ConclaveConnection {
                         display_name,
                         message,
                     });
+            }
+            ChatEvent::Topic {
+                room,
+                display_name,
+                topic,
+            } => {
+                let entry = rooms.entry(room).or_default();
+                let line = if topic.trim().is_empty() {
+                    entry.topic = None;
+                    format!("{display_name} cleared the topic")
+                } else {
+                    entry.topic = Some(ChatTopic {
+                        text: topic.clone(),
+                        set_by: display_name.clone(),
+                    });
+                    format!("{display_name} set the topic to: {topic}")
+                };
+                entry.lines.push(ChatLine::System(line));
             }
         }
     }
@@ -1089,6 +1112,16 @@ impl ConclaveConnection {
     /// Network errors are possible.
     pub async fn chat_send(&self, room: u16, message: String) -> Result<()> {
         self.send_request(&ServerMessagesEncrypted::ChatSend { room, message }.to_vec())
+            .await
+    }
+
+    /// Set (or, with empty text, clear) a chatroom's topic.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn chat_set_topic(&self, room: u16, topic: String) -> Result<()> {
+        self.send_request(&ServerMessagesEncrypted::ChatSetTopic { room, topic }.to_vec())
             .await
     }
 
