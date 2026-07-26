@@ -1,0 +1,262 @@
+name: Release
+on:
+  push:
+    tags:
+      - "v*"
+    branches:
+      - main
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+
+permissions:
+  attestations: write
+  contents: read
+  id-token: write
+
+jobs:
+  linux:
+    #if: startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - runner: ubuntu-latest
+            target: x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 #v1
+      - name: Setup Rust toolchain
+        run: rustup update
+      - name: Install cargo audit & auditable
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+        with:
+          tool: cargo-audit,cargo-auditable
+      - name: Build w/ GUI
+        run: |
+          cargo auditable build --workspace --release --features=gui
+          mv target/release/conclave-tracker target/release/conclave-tracker-gui-linux-${{ matrix.platform.target }}
+          mv target/release/conclave-server target/release/conclave-server-gui-linux-${{ matrix.platform.target }}
+          mv target/release/conclave-client target/release/conclave-client-linux-${{ matrix.platform.target }}
+      - name: Upload tracker
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-tracker-gui-linux-${{ matrix.platform.target }}
+          path: target/release/conclave-tracker-gui-linux-${{ matrix.platform.target }}
+          if-no-files-found: error
+          retention-days: 5
+      - name: Upload server
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-server-gui-linux-${{ matrix.platform.target }}
+          path: target/release/conclave-server-gui-linux-${{ matrix.platform.target }}
+          if-no-files-found: error
+          retention-days: 5
+      - name: Upload client
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-client-linux-${{ matrix.platform.target }}
+          path: target/release/conclave-client-linux-${{ matrix.platform.target }}
+          if-no-files-found: error
+          retention-days: 5
+      - name: Build sans GUI
+        run: |
+          cargo auditable build --workspace --release
+          mv target/release/conclave-tracker target/release/conclave-tracker-linux-${{ matrix.platform.target }}
+          mv target/release/conclave-server target/release/conclave-server-linux-${{ matrix.platform.target }}
+      - name: Upload tracker
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-tracker-linux-${{ matrix.platform.target }}
+          path: target/release/conclave-tracker-linux-${{ matrix.platform.target }}
+          if-no-files-found: error
+          retention-days: 5
+      - name: Upload server
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-server-linux-${{ matrix.platform.target }}
+          path: target/release/conclave-server-linux-${{ matrix.platform.target }}
+          if-no-files-found: error
+          retention-days: 5
+
+  macos:
+    #if: startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'
+    runs-on: macos-14
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+          disable-sudo: true
+      - name: Update Rust
+        run: rustup update
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install cargo audit & auditable
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+        with:
+          tool: cargo-audit,cargo-auditable
+      - name: Build w/ GUI
+        run: |
+          cargo auditable build --workspace --release --features=gui
+          mv target/release/conclave-tracker target/release/conclave-tracker-darwin-gui-arm64
+          mv target/release/conclave-server target/release/conclave-server-darwin-gui-arm64
+          mv target/release/conclave-client target/release/conclave-client-darwin-arm64
+      - name: Upload tracker
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-tracker-darwin-gui-arm64
+          path: target/release/conclave-tracker-darwin-gui-arm64
+          if-no-files-found: error
+          retention-days: 5
+      - name: Upload server
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-server-darwin-gui-arm64
+          path: target/release/conclave-server-darwin-gui-arm64
+          if-no-files-found: error
+          retention-days: 5
+      - name: Upload client
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-client-darwin-arm64
+          path: target/release/conclave-client-darwin-arm64
+          if-no-files-found: error
+          retention-days: 5
+      - name: Build sans GUI
+        run: |
+          cargo auditable build --workspace --release
+          mv target/release/conclave-tracker target/release/conclave-tracker-darwin-arm64
+          mv target/release/conclave-server target/release/conclave-server-darwin-arm64
+      - name: Upload tracker
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-tracker-darwin-arm64
+          path: target/release/conclave-tracker-darwin-arm64
+          if-no-files-found: error
+          retention-days: 5
+      - name: Upload server
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-server-darwin-arm64
+          path: target/release/conclave-server-darwin-arm64
+          if-no-files-found: error
+          retention-days: 5
+
+  windows:
+    #if: startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - runner: windows-latest
+            target: amd64
+          - runner: windows-11-arm
+            target: arm64
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+          disable-sudo: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@d0e72ca3bfdc51937a4f81431ccbed269ef9f2a2 # stable
+      - name: Install cargo audit & auditable
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+        with:
+          tool: cargo-audit,cargo-auditable
+      - name: Build w/ GUI
+        run: |
+          cargo auditable build --workspace --release --features=gui
+          copy target/release/conclave-tracker.exe target/release/conclave-tracker-gui-${{ matrix.platform.target }}.exe
+          copy target/release/conclave-server.exe target/release/conclave-server-gui-${{ matrix.platform.target }}.exe
+          copy target/release/conclave-client.exe target/release/conclave-client-${{ matrix.platform.target }}.exe
+      - name: Upload conclave-tracker-gui-${{ matrix.platform.target }}.exe
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-tracker-gui-${{ matrix.platform.target }}.exe
+          path: target/release/conclave-tracker-gui-${{ matrix.platform.target }}.exe
+          if-no-files-found: error
+          retention-days: 5
+      - name: Upload conclave-server-gui-${{ matrix.platform.target }}.exe
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-server-gui-${{ matrix.platform.target }}.exe
+          path: target/release/conclave-server-gui-${{ matrix.platform.target }}.exe
+          if-no-files-found: error
+          retention-days: 5
+      - name: Upload conclave-client-${{ matrix.platform.target }}.exe
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-client-${{ matrix.platform.target }}.exe
+          path: target/release/conclave-client-${{ matrix.platform.target }}.exe
+          if-no-files-found: error
+          retention-days: 5
+      - name: Build sans GUI
+        run: |
+          cargo auditable build --workspace --release
+          copy target/release/conclave-tracker.exe target/release/conclave-tracker-${{ matrix.platform.target }}.exe
+          copy target/release/conclave-server.exe target/release/conclave-server-${{ matrix.platform.target }}.exe
+      - name: Upload conclave-tracker-${{ matrix.platform.target }}.exe
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-tracker-${{ matrix.platform.target }}.exe
+          path: target/release/conclave-tracker-${{ matrix.platform.target }}.exe
+          if-no-files-found: error
+          retention-days: 5
+      - name: Upload conclave-server-${{ matrix.platform.target }}.exe
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-server-${{ matrix.platform.target }}.exe
+          path: target/release/conclave-server-${{ matrix.platform.target }}.exe
+          if-no-files-found: error
+          retention-days: 5
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'
+    name: GitHub Release
+    needs: [ windows, macos, linux ]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+      attestations: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+          allowed-endpoints: >
+            api.github.com:443
+            api.snapcraft.io:443
+            azure.archive.ubuntu.com:80
+            cdn.fwupd.org:443
+            esm.ubuntu.com:443
+            github.com:443
+            motd.ubuntu.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            uploads.github.com:443
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          draft: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            conclave*
+      - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            conclave*
