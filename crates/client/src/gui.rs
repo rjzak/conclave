@@ -3572,49 +3572,71 @@ impl ConclaveGUI {
                         egui::Id::new(format!("chat_topic_input:{key_owned}:{room}"));
                     let mut topic_input: String =
                         ctx.data(|d| d.get_temp(topic_input_id).unwrap_or_default());
+                    // Whether the inline topic editor is open for this room.
+                    let editing_topic_id =
+                        egui::Id::new(format!("chat_topic_editing:{key_owned}:{room}"));
+                    let mut editing_topic: bool =
+                        ctx.data(|d| d.get_temp(editing_topic_id).unwrap_or(false));
                     // `None` = no change this frame; `Some(text)` sets the topic
                     // (an empty string clears it).
                     let mut set_topic: Option<String> = None;
 
-                    // Top: the room topic and an editor to change it. Any member
-                    // may set it; the topic (and who set it) is shown here and in
-                    // the window title.
+                    // Top: the room topic. A pencil button opens an inline editor
+                    // (input + Update + Clear); any member may set it. The topic
+                    // and who set it also appear in the window title.
                     egui::Panel::top(format!("chat_topic:{key_owned}:{room}")).show(ctx, |ui| {
                         ui.add_space(4.0);
-                        match &state.topic {
-                            Some(t) => {
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(egui::RichText::new("📌").strong());
-                                    ui.label(egui::RichText::new(&t.text).strong());
-                                    ui.label(
-                                        egui::RichText::new(format!("— set by {}", t.set_by))
-                                            .weak(),
-                                    );
-                                });
-                            }
-                            None => {
-                                ui.label(egui::RichText::new("No topic set").weak());
-                            }
+                        if editing_topic {
+                            ui.horizontal(|ui| {
+                                let response = ui.add(
+                                    egui::TextEdit::singleline(&mut topic_input)
+                                        .desired_width(ui.available_width() - 180.0)
+                                        .hint_text("Room topic"),
+                                );
+                                let entered = response.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                if (ui.button("Update").clicked() || entered)
+                                    && !topic_input.trim().is_empty()
+                                {
+                                    set_topic = Some(std::mem::take(&mut topic_input));
+                                    editing_topic = false;
+                                }
+                                // Clearing sends an empty topic, which the server
+                                // interprets as removing it.
+                                if ui.button("Clear").clicked() {
+                                    set_topic = Some(String::new());
+                                    topic_input.clear();
+                                    editing_topic = false;
+                                }
+                                if ui.button("✖").on_hover_text("Cancel").clicked() {
+                                    editing_topic = false;
+                                }
+                            });
+                        } else {
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button("✏").on_hover_text("Edit topic").clicked() {
+                                    // Seed the editor with the current topic text.
+                                    topic_input = state
+                                        .topic
+                                        .as_ref()
+                                        .map(|t| t.text.clone())
+                                        .unwrap_or_default();
+                                    editing_topic = true;
+                                }
+                                match &state.topic {
+                                    Some(t) => {
+                                        ui.label(egui::RichText::new(&t.text).strong());
+                                        ui.label(
+                                            egui::RichText::new(format!("— set by {}", t.set_by))
+                                                .weak(),
+                                        );
+                                    }
+                                    None => {
+                                        ui.label(egui::RichText::new("No topic set").weak());
+                                    }
+                                }
+                            });
                         }
-                        ui.horizontal(|ui| {
-                            let response = ui.add(
-                                egui::TextEdit::singleline(&mut topic_input)
-                                    .desired_width(ui.available_width() - 130.0)
-                                    .hint_text("Set room topic"),
-                            );
-                            let entered = response.lost_focus()
-                                && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                            if (ui.button("Set topic").clicked() || entered)
-                                && !topic_input.trim().is_empty()
-                            {
-                                set_topic = Some(std::mem::take(&mut topic_input));
-                            }
-                            // Clearing sends an empty topic, which the server
-                            // interprets as removing it.
-                            if state.topic.is_some() && ui.button("Clear").clicked() {
-                                set_topic = Some(String::new());
-                            }
-                        });
                         ui.add_space(4.0);
                     });
 
@@ -3726,6 +3748,7 @@ impl ConclaveGUI {
                     ctx.data_mut(|d| {
                         d.insert_temp(input_id, input);
                         d.insert_temp(topic_input_id, topic_input);
+                        d.insert_temp(editing_topic_id, editing_topic);
                     });
                     // Messages arrive asynchronously; repaint so they show promptly.
                     ctx.request_repaint_after(std::time::Duration::from_millis(150));

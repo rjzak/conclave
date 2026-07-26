@@ -655,16 +655,18 @@ impl ConclaveConnection {
                 display_name,
                 topic,
             } => {
+                // Stamp the local time so the log shows when the topic changed.
+                let time = Local::now().format("%H:%M:%S");
                 let entry = rooms.entry(room).or_default();
                 let line = if topic.trim().is_empty() {
                     entry.topic = None;
-                    format!("{display_name} cleared the topic")
+                    format!("{time} {display_name} cleared the topic")
                 } else {
                     entry.topic = Some(ChatTopic {
                         text: topic.clone(),
                         set_by: display_name.clone(),
                     });
-                    format!("{display_name} set the topic to: {topic}")
+                    format!("{time} {display_name} set the topic to: {topic}")
                 };
                 entry.lines.push(ChatLine::System(line));
             }
