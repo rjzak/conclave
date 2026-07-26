@@ -865,7 +865,7 @@ dependencies = [
 
 [[package]]
 name = "conclave-client"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -895,7 +895,7 @@ dependencies = [
 
 [[package]]
 name = "conclave-common"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -919,7 +919,7 @@ dependencies = [
 
 [[package]]
 name = "conclave-server"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -949,7 +949,7 @@ dependencies = [
 
 [[package]]
 name = "conclave-testing"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "conclave-client",
  "conclave-common",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "conclave-tracker"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "chrono",
