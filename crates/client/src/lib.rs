@@ -792,7 +792,15 @@ pub fn discover_servers() -> Result<Vec<DiscoveredServer>> {
     let mut counter = 0;
     while let Ok(event) = receiver.recv() {
         if let ServiceEvent::ServiceResolved(resolved) = event {
-            let host = resolved.host.replace(".local.", "");
+            let host = if let Some(ip) = resolved
+                .addresses
+                .iter()
+                .find(|ip| !ip.is_loopback() && !ip.to_ip_addr().is_unspecified())
+            {
+                ip.to_string()
+            } else {
+                resolved.host.replace(".local.", "")
+            };
             let key = if let Some(key) = resolved.txt_properties.get(conclave_common::MDNS_KEY) {
                 let Ok(key) = base64::engine::general_purpose::STANDARD.decode(key.val_str())
                 else {

@@ -48,7 +48,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     Ok(std::process::ExitCode::SUCCESS)
 }
 
-#[allow(unused_variables)]
 #[cfg(feature = "gui")]
 fn main() -> eframe::Result {
     conclave_common::init_tracing();

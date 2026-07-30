@@ -105,7 +105,6 @@ pub struct ChatRoom {
 }
 
 /// Connection information
-#[allow(dead_code)]
 #[derive(Clone)]
 pub struct ConclaveConnection {
     /// Encrypted connection to a server
