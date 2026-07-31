@@ -32,6 +32,8 @@ futures = { workspace = true, features = ["executor"] }
 hex = { workspace = true, features = ["alloc", "std"] }
 mdns-sd = { workspace = true }
 semver = { workspace = true }
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["alloc", "std"] }
 sysinfo = { workspace = true, features = ["disk"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 toml = { workspace = true, features = ["parse", "display", "serde"] }

@@ -936,6 +936,8 @@ dependencies = [
  "hex",
  "mdns-sd",
  "semver",
+ "serde",
+ "serde_json",
  "sysinfo",
  "tempdir",
  "tokio",

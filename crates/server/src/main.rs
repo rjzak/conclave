@@ -7,12 +7,14 @@
 
 use conclave_server::{DEFAULT_DATABASE, State};
 
+use std::ffi::OsStr;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueHint};
 use dialoguer::Password;
+use serde::Deserialize;
 use zeroize::Zeroize;
 
 pub const VERSION: &str = concat!(
@@ -29,8 +31,11 @@ enum Args {
     /// Administrative commands
     Admin(Admin),
 
-    /// Run the server
+    /// Run the server with configuration on the command line
     Run(Run),
+
+    /// Run the server with configuration from a file
+    Load(Load),
 }
 
 #[derive(Parser, Debug)]
@@ -49,7 +54,7 @@ enum AdminActions {
     ResetAdminPassword,
 }
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Deserialize)]
 struct Run {
     /// IP Address to listen on
     #[arg(short, long, default_value = "127.0.0.1")]
@@ -57,6 +62,7 @@ struct Run {
 
     /// Advertised domain
     #[arg(short, long)]
+    #[serde(default)]
     domain: Option<String>,
 
     /// Port to listen on for connections
@@ -69,11 +75,36 @@ struct Run {
 
     /// Advertise this server via Multicast DNS
     #[arg(short, long)]
+    #[serde(default)]
     mdns: bool,
 
     /// Directory to share with clients (enables file sharing)
     #[arg(short, long, value_hint = ValueHint::DirPath)]
+    #[serde(default)]
     share: Option<PathBuf>,
+}
+
+/// Get a file path and parse as configuration
+#[derive(Parser, Debug)]
+struct Load {
+    /// Path to a JSON or TOML config file.
+    #[arg(value_hint = ValueHint::FilePath)]
+    config: PathBuf,
+}
+
+impl From<Load> for Run {
+    fn from(load: Load) -> Self {
+        let Some(ext) = load.config.as_path().extension().and_then(OsStr::to_str) else {
+            panic!("Config file does not have a file extension");
+        };
+
+        let content = std::fs::read_to_string(&load.config).expect("Failed to read file");
+        match ext {
+            "toml" => toml::from_str(&content).expect("Failed to parse TOML"),
+            "json" => serde_json::from_str(&content).expect("Failed to parse JSON"),
+            x => panic!("Unknown file extension: {x}"),
+        }
+    }
 }
 
 async fn common_main(args: Args) -> Result<State> {
@@ -85,7 +116,7 @@ async fn common_main(args: Args) -> Result<State> {
                 AdminActions::ResetAdminPassword => {
                     let password = Password::new()
                         .with_prompt("New Password")
-                        .with_confirmation("Confirm password", "Passwords mismatching")
+                        .with_confirmation("Confirm password", "Passwords mismatch")
                         .interact()?;
                     state.reset_admin_password(&password).await?;
                 }
@@ -93,6 +124,7 @@ async fn common_main(args: Args) -> Result<State> {
             std::process::exit(0);
         }
         Args::Run(run) => run,
+        Args::Load(load) => load.into(),
     };
 
     let state = if run.config.exists() {
