@@ -7,6 +7,7 @@
 #![deny(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
+use conclave_common::pqc::{Generate, Keypair, MlDsaPrivateKey, MlDsaPublicKey};
 use conclave_common::tracker::{Advertise, SignedServerList, TrackerProtocol};
 
 use std::fmt::{Debug, Display};
@@ -19,8 +20,6 @@ use std::sync::{Arc, LazyLock};
 
 use anyhow::{Result, bail};
 use dashmap::DashMap;
-use pqcrypto_mldsa::mldsa87;
-use pqcrypto_mldsa::mldsa87_keypair;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
@@ -33,24 +32,25 @@ pub static VERSION: LazyLock<Version> =
 /// Tracker keypair
 #[derive(Serialize, Deserialize)]
 pub struct Keys {
-    /// ML-DSA 87 private key
+    /// ML-DSA 87 private key, stored as the 32-byte seed it is derived from
     #[serde(
         serialize_with = "conclave_common::serde::serialize_mldsa_private_key",
         deserialize_with = "conclave_common::serde::deserialize_mldsa_private_key"
     )]
-    private_key: mldsa87::SecretKey,
+    private_key: MlDsaPrivateKey,
 
     /// ML-DSA 87 public key
     #[serde(
         serialize_with = "conclave_common::serde::serialize_mldsa_public_key",
         deserialize_with = "conclave_common::serde::deserialize_mldsa_public_key"
     )]
-    public_key: mldsa87::PublicKey,
+    public_key: MlDsaPublicKey,
 }
 
 impl Default for Keys {
     fn default() -> Self {
-        let (public_key, private_key) = mldsa87_keypair();
+        let private_key = MlDsaPrivateKey::generate();
+        let public_key = private_key.verifying_key();
         Self {
             private_key,
             public_key,
@@ -67,16 +67,35 @@ impl Keys {
     ///
     /// # Errors
     ///
-    /// Returns errors if the file cannot be read, doesn't have an extension, or isn't JSON or TOML.
+    /// Returns errors if the file cannot be read, doesn't have an extension, isn't JSON or TOML,
+    /// or holds a public key that doesn't belong to the private key beside it.
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let contents = std::fs::read_to_string(&path)?;
 
-        match path.as_ref().extension() {
-            Some(ext) if ext == "toml" => Ok(toml::from_str(&contents)?),
-            Some(ext) if ext == "json" => Ok(serde_json::from_str(&contents)?),
+        let keys: Self = match path.as_ref().extension() {
+            Some(ext) if ext == "toml" => toml::from_str(&contents)?,
+            Some(ext) if ext == "json" => serde_json::from_str(&contents)?,
             Some(ext) => bail!("Unsupported file format {}", ext.display()),
             None => bail!("File {} has no extension", path.as_ref().display()),
+        };
+
+        // The public key is derivable from the private key, so a mismatch means the file was
+        // edited or merged by hand and the tracker would sign with a key nobody expects.
+        if keys.private_key.verifying_key() != keys.public_key {
+            bail!(
+                "Public key in {} does not belong to the private key beside it",
+                path.as_ref().display()
+            );
         }
+
+        Ok(keys)
+    }
+
+    /// The public key clients use to verify this tracker's server listings
+    #[inline]
+    #[must_use]
+    pub fn public_key(&self) -> &MlDsaPublicKey {
+        &self.public_key
     }
 
     /// Save the keys to a file path, using the file extension to determine the format
@@ -235,7 +254,7 @@ impl State {
 
             match message {
                 TrackerProtocol::KeyRequest => {
-                    if let Err(e) = TrackerProtocol::TrackerKey(self.keys.public_key)
+                    if let Err(e) = TrackerProtocol::TrackerKey(self.keys.public_key.clone())
                         .send(&mut socket)
                         .await
                     {
@@ -407,5 +426,49 @@ impl eframe::App for State {
             ui.separator();
             eframe::egui::widgets::global_theme_preference_buttons(ui);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Keys survive a save/load cycle in both supported formats, and `load_or_save` reuses an
+    /// existing file rather than replacing the tracker's identity.
+    #[test]
+    fn keys_round_trip() {
+        let dir = tempdir::TempDir::new("conclave_tracker_keys").unwrap();
+
+        for name in ["keys.toml", "keys.json"] {
+            let path = dir.path().join(name);
+
+            let keys = Keys::default();
+            keys.save(&path).unwrap();
+
+            let loaded = Keys::load(&path).unwrap();
+            assert_eq!(loaded.public_key(), keys.public_key());
+            assert_eq!(loaded.private_key.to_seed(), keys.private_key.to_seed());
+
+            assert_eq!(
+                Keys::load_or_save(&path).unwrap().public_key(),
+                keys.public_key()
+            );
+        }
+    }
+
+    /// A key file whose public key belongs to some other private key is rejected rather than
+    /// silently signing with a key nobody has pinned.
+    #[test]
+    fn mismatched_keys_are_rejected() {
+        let dir = tempdir::TempDir::new("conclave_tracker_mismatch").unwrap();
+        let path = dir.path().join("keys.toml");
+
+        let mismatched = Keys {
+            private_key: Keys::default().private_key,
+            public_key: Keys::default().public_key,
+        };
+        mismatched.save(&path).unwrap();
+
+        assert!(Keys::load(&path).is_err());
     }
 }

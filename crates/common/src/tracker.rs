@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::pqc::{
+    EncodedMlDsaPublicKey, EncodedMlDsaSignature, MlDsaPrivateKey, MlDsaPublicKey, MlDsaSignature,
+    Signer, Verifier,
+};
+
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 
@@ -7,8 +12,6 @@ use anyhow::{anyhow, bail};
 use base64::Engine;
 use chrono::Duration;
 use ed25519_dalek::VerifyingKey;
-use pqcrypto_mldsa::mldsa87;
-use pqcrypto_traits::sign::{PublicKey, SignedMessage};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -101,15 +104,22 @@ pub struct TrackerWithKey {
         serialize_with = "crate::serde::serialize_mldsa_public_key",
         deserialize_with = "crate::serde::deserialize_mldsa_public_key"
     )]
-    pub key: mldsa87::PublicKey,
+    pub key: MlDsaPublicKey,
 }
 
 impl TrackerWithKey {
+    /// Returns the public key in its encoded form
+    #[inline]
+    #[must_use]
+    pub fn key_bytes(&self) -> EncodedMlDsaPublicKey {
+        self.key.encode()
+    }
+
     /// Returns the public key as a base64 string
     #[inline]
     #[must_use]
     pub fn key_as_str(&self) -> String {
-        base64::engine::general_purpose::STANDARD.encode(self.key.as_bytes())
+        base64::engine::general_purpose::STANDARD.encode(self.key_bytes())
     }
 
     /// String representation of the tracker's address, useful for making
@@ -139,8 +149,8 @@ impl From<(String, u16, String)> for TrackerWithKey {
             Ok(key) => key,
             Err(e) => panic!("Failed to decode base64 key for tracker {host}:{port}: {e}"),
         };
-        let key = match mldsa87::PublicKey::from_bytes(&key) {
-            Ok(key) => key,
+        let key = match EncodedMlDsaPublicKey::try_from(key.as_slice()) {
+            Ok(key) => MlDsaPublicKey::decode(&key),
             Err(e) => panic!("Failed to public key bytes for tracker {host}:{port}: {e}"),
         };
         Self { host, port, key }
@@ -262,22 +272,20 @@ pub struct SignedServerList {
     /// Tracker version
     pub version: Version,
 
-    /// Tracker's signature of the list
-    pub signature: mldsa87::SignedMessage,
+    /// Tracker's detached signature over the list
+    #[serde(
+        serialize_with = "crate::serde::serialize_mldsa_signature",
+        deserialize_with = "crate::serde::deserialize_mldsa_signature"
+    )]
+    pub signature: MlDsaSignature,
 }
 
 impl SignedServerList {
     /// Create a signed server list
     #[inline]
     #[must_use]
-    pub fn new(
-        servers: Vec<Advertise>,
-        version: Version,
-        private_key: &mldsa87::SecretKey,
-    ) -> Self {
-        let mut servers_bytes = Advertise::servers_to_vec(&servers);
-        servers_bytes.extend(version.to_string().as_bytes());
-        let signature = mldsa87::sign(&servers_bytes, private_key);
+    pub fn new(servers: Vec<Advertise>, version: Version, private_key: &MlDsaPrivateKey) -> Self {
+        let signature = private_key.sign(&Self::signed_bytes(&servers, &version));
 
         Self {
             servers,
@@ -289,17 +297,27 @@ impl SignedServerList {
     /// Get the raw signature bytes
     #[inline]
     #[must_use]
-    pub fn signature_bytes(&self) -> &[u8] {
-        self.signature.as_bytes()
+    pub fn signature_bytes(&self) -> EncodedMlDsaSignature {
+        self.signature.encode()
     }
 
     /// Verify the server list given the public key
     #[inline]
     #[must_use]
-    pub fn verify(&self, public_key: &mldsa87::PublicKey) -> bool {
-        let mut servers_bytes = Advertise::servers_to_vec(&self.servers);
-        servers_bytes.extend(self.version.to_string().as_bytes());
-        servers_bytes == mldsa87::open(&self.signature, public_key).unwrap_or_default()
+    pub fn verify(&self, public_key: &MlDsaPublicKey) -> bool {
+        public_key
+            .verify(
+                &Self::signed_bytes(&self.servers, &self.version),
+                &self.signature,
+            )
+            .is_ok()
+    }
+
+    /// The bytes covered by the signature: the server listing followed by the tracker version.
+    fn signed_bytes(servers: &[Advertise], version: &Version) -> Vec<u8> {
+        let mut bytes = Advertise::servers_to_vec(servers);
+        bytes.extend(version.to_string().as_bytes());
+        bytes
     }
 }
 
@@ -308,7 +326,7 @@ impl std::fmt::Debug for SignedServerList {
         f.debug_struct("SignedServerList")
             .field("servers", &self.servers)
             .field("version", &self.version)
-            .field("signature", &self.signature.as_bytes())
+            .field("signature", &self.signature_bytes())
             .finish()
     }
 }
@@ -336,13 +354,17 @@ pub enum TrackerProtocol {
     ServersList(SignedServerList),
 
     /// Tracker's public key
-    TrackerKey(mldsa87::PublicKey),
+    TrackerKey(
+        #[serde(
+            serialize_with = "crate::serde::serialize_mldsa_public_key_bytes",
+            deserialize_with = "crate::serde::deserialize_mldsa_public_key_bytes"
+        )]
+        MlDsaPublicKey,
+    ),
 }
 
 impl std::fmt::Debug for TrackerProtocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use pqcrypto_traits::sign::PublicKey;
-
         match self {
             TrackerProtocol::GetServers => f.write_str("TrackerProtocol::GetServers"),
             TrackerProtocol::Subscribe => f.write_str("TrackerProtocol::Subscribe"),
@@ -357,7 +379,7 @@ impl std::fmt::Debug for TrackerProtocol {
                 .finish(),
             TrackerProtocol::TrackerKey(key) => f
                 .debug_struct("TrackerProtocol::TrackerKey")
-                .field("key", &hex::encode(key.as_bytes()))
+                .field("key", &hex::encode(key.encode()))
                 .finish(),
         }
     }

@@ -22,10 +22,9 @@ serde = { workspace = true, features = ["alloc", "derive", "std"] }
 sha2 = { workspace = true }
 tokio = { workspace = true, features = ["net", "io-util", "sync"] }
 tracing-subscriber = { workspace = true, features = ["alloc", "fmt", "std"] }
+ml-dsa = { workspace = true, features = ["alloc", "getrandom", "zeroize"] }
+ml-kem = { workspace = true, features = ["alloc", "getrandom", "zeroize"] }
 postcard = { workspace = true, features = ["alloc", "use-std"] }
-pqcrypto-mldsa = { workspace = true, features = ["serde", "serialization"] }
-pqcrypto-mlkem = { workspace = true, features = ["std"] }
-pqcrypto-traits = { workspace = true, features = ["std"] }
 zeroize = { workspace = true, features = ["aarch64", "derive", "serde"] }
 
 [dev-dependencies]

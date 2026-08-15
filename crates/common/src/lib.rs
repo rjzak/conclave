@@ -16,6 +16,9 @@ pub mod tracker;
 /// Networking utilities
 pub mod net;
 
+/// Post-quantum primitives, from the `RustCrypto` project's `ml-dsa` and `ml-kem` crates
+pub mod pqc;
+
 /// End-to-end encryption for direct messages between users
 pub mod dm;
 
@@ -25,9 +28,10 @@ pub mod files;
 /// Data structures for the optional threaded-discussion (forum) feature
 pub mod forum;
 
-/// Serialization and deserialization utilities, only to be used to load/save some cryptographic keys
-/// as hex-encoded bytes for use with config files. Any cryptographic materials sent over the network
-/// will be as raw bytes using the respective crates' default `serde` implementations.
+/// Serialization and deserialization utilities for cryptographic keys. Keys stored in config files
+/// are base64-encoded; the `_bytes` variants, along with the signature helpers, keep the same
+/// material as raw bytes for the ML-DSA types sent over the network, which have no `serde`
+/// implementations of their own.
 pub mod serde;
 
 /// Data structures for communicating with the server

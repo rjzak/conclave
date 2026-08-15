@@ -23,13 +23,16 @@ anyhow = { workspace = true, features = ["std"] }
 clap = { workspace = true, features = ["color", "derive", "help", "std", "suggestions"] }
 dashmap = { workspace = true, features = ["inline"] }
 eframe = { workspace = true, features = ["accesskit", "default_fonts", "glow"], optional = true }
-pqcrypto-mldsa = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync"] }
 toml = { workspace = true, features = ["display", "parse", "serde"] }
 tracing = { workspace = true, features = ["attributes", "std"] }
+
+[dev-dependencies]
+base64 = { workspace = true, features = ["alloc"] }
+tempdir = { workspace = true }
 
 [build-dependencies]
 chrono = { workspace = true, features = ["now"] }

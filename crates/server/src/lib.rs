@@ -4057,6 +4057,7 @@ mod tests {
 
         let version = env!("CARGO_PKG_VERSION").parse().unwrap();
         let keys = conclave_tracker::Keys::default();
+        let tracker_key = keys.public_key().clone();
         let state = conclave_tracker::State::new(IpAddr::V4(Ipv4Addr::LOCALHOST), PORT, keys);
         let (_server_signing, server_verifying) = random_keypair();
 
@@ -4078,6 +4079,14 @@ mod tests {
                 TrackerProtocol::ServersList(servers) => {
                     assert!(servers.servers.is_empty());
                 }
+                _ => panic!("Unexpected response type"),
+            }
+
+            // The key the tracker hands out has to survive the round trip over the wire, and
+            // has to be the one its listings are signed with.
+            TrackerProtocol::KeyRequest.send(&mut stream).await.unwrap();
+            match TrackerProtocol::receive(&mut stream).await.unwrap() {
+                TrackerProtocol::TrackerKey(key) => assert_eq!(key, tracker_key),
                 _ => panic!("Unexpected response type"),
             }
         }
@@ -4118,6 +4127,7 @@ mod tests {
                     assert_eq!(servers.servers.len(), 1);
                     assert_eq!(servers.servers[0].name, "Testing");
                     assert!(!servers.signature_bytes().is_empty());
+                    assert!(servers.verify(&tracker_key));
                 }
                 _ => panic!("Unexpected response type"),
             }

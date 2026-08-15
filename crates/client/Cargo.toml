@@ -27,7 +27,6 @@ hex = { workspace = true, features = ["alloc"] }
 home = { workspace = true }
 image = { workspace = true, features = ["jpeg", "png"] }
 mdns-sd = { workspace = true }
-pqcrypto-traits = { workspace = true }
 rfd = { workspace = true, features = ["xdg-portal", "wayland"] }
 semver = { workspace = true }
 serde = { workspace = true, features = ["alloc", "derive", "std"] }

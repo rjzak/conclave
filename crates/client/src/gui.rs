@@ -2063,11 +2063,8 @@ impl ConclaveGUI {
                     // Confirmation dialog
                     let maybe_tracker = pending_info_arc.read().ok().and_then(|g| g.clone());
                     if let Some(ref tracker) = maybe_tracker {
-                        use base64::Engine as _;
-                        use pqcrypto_traits::sign::PublicKey as _;
-                        let key_b64 = base64::engine::general_purpose::STANDARD
-                            .encode(tracker.key.as_bytes());
-                        let key_sha256 = hex::encode(Sha256::digest(tracker.key.as_bytes()));
+                        let key_b64 = tracker.key_as_str();
+                        let key_sha256 = hex::encode(Sha256::digest(tracker.key_bytes()));
 
                         let mut confirmed = false;
                         let mut cancelled = false;
