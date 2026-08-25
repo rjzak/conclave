@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#![cfg_attr(
+    all(not(debug_assertions), feature = "gui"),
+    windows_subsystem = "windows"
+)]
 #![deny(clippy::all)]
 //#![deny(clippy::cargo)]
 #![deny(clippy::pedantic)]
