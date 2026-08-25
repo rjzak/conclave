@@ -7,6 +7,8 @@
 #![deny(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
+use std::path::PathBuf;
+
 /// Administrative data structures
 pub mod admin;
 
@@ -64,6 +66,9 @@ pub const DNS_SRV_RECORD: &str = "_conclave._tcp.conclave-srv.";
 /// Default server port
 pub const SERVER_DEFAULT_PORT: u16 = 9123;
 
+/// Default tracker port
+pub const TRACKER_DEFAULT_PORT: u16 = 9321;
+
 /// Initialize tracing
 pub fn init_tracing() {
     use std::sync::Once;
@@ -71,4 +76,30 @@ pub fn init_tracing() {
     // Useful currently for testing
     static TRACING: Once = Once::new();
     TRACING.call_once(tracing_subscriber::fmt::init);
+}
+
+/// Get a path for storing various config files for Conclave in this order:
+///
+/// 1. User's home directory: `~/.config/conclave/`.
+/// 2. The directory containing the executable.
+/// 3. The current working directory.
+///
+/// # Errors
+///
+/// File system errors may occur, possible if there's a permissions issue.
+pub fn default_config_directory() -> anyhow::Result<PathBuf> {
+    if let Some(mut home_config) = home::home_dir() {
+        home_config.push(".config");
+        home_config.push("conclave");
+        if !home_config.exists() {
+            std::fs::create_dir_all(&home_config)?;
+        }
+        Ok(home_config)
+    } else if let Ok(exe_path) = std::env::current_exe()
+        && let Some(parent) = exe_path.parent()
+    {
+        Ok(parent.into())
+    } else {
+        Ok(PathBuf::from("./"))
+    }
 }

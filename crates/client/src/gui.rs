@@ -3,12 +3,12 @@
 use conclave_client::config::{BookmarkEntry, KnownHost, UserAuth};
 use conclave_client::conn::{ChatLine, ConclaveConnection};
 use conclave_client::{Client, DiscoveredServer, discover_servers};
-use conclave_common::SERVER_DEFAULT_PORT;
 use conclave_common::forum::ForumPost;
 use conclave_common::server::{
     ChatroomInfo, ConnectedUser, IDLE_TIMEOUT_MINUTES, UserAuthentication, VerifyingKey,
 };
 use conclave_common::tracker::{Advertise, Tracker, TrackerWithKey};
+use conclave_common::{SERVER_DEFAULT_PORT, TRACKER_DEFAULT_PORT};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2008,8 +2008,10 @@ impl ConclaveGUI {
                     let form_port_id = egui::Id::new("tracker_form_port");
                     let mut form_host =
                         ctx.data(|d| d.get_temp::<String>(form_host_id).unwrap_or_default());
-                    let mut form_port =
-                        ctx.data(|d| d.get_temp::<String>(form_port_id).unwrap_or_default());
+                    let mut form_port = ctx.data(|d| {
+                        d.get_temp::<String>(form_port_id)
+                            .unwrap_or_else(|| TRACKER_DEFAULT_PORT.to_string())
+                    });
 
                     let mut remove_request: Option<(String, u16)> = None;
                     let mut add_request = false;

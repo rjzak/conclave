@@ -3,6 +3,7 @@
 //! Trackers tab: add and remove the trackers this server advertises to.
 
 use crate::conn::ConclaveConnection;
+use conclave_common::TRACKER_DEFAULT_PORT;
 
 use eframe::egui;
 
@@ -13,7 +14,10 @@ pub fn ui(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str) {
     let host_id = egui::Id::new(format!("admin_th:{key}"));
     let port_id = egui::Id::new(format!("admin_tp:{key}"));
     let mut host: String = ui.data(|d| d.get_temp(host_id).unwrap_or_default());
-    let mut port: String = ui.data(|d| d.get_temp(port_id).unwrap_or_else(|| "9100".to_string()));
+    let mut port: String = ui.data(|d| {
+        d.get_temp(port_id)
+            .unwrap_or_else(|| TRACKER_DEFAULT_PORT.to_string())
+    });
 
     let mut add_tracker = false;
     let mut remove_tracker: Option<(String, u16)> = None;

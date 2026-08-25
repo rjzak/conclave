@@ -5,9 +5,12 @@
 #![deny(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
-use clap::Parser;
-use std::net::IpAddr;
+use conclave_common::default_config_directory;
+use conclave_tracker::TrackerConfig;
+
 use std::path::PathBuf;
+
+use clap::Parser;
 
 pub const VERSION: &str = concat!(
     "v",
@@ -20,15 +23,8 @@ pub const VERSION: &str = concat!(
 #[derive(Parser, Debug)]
 #[command(author, about, version = VERSION)]
 struct Args {
-    /// IP Address to listen on
-    #[arg(short, long, default_value = "127.0.0.1")]
-    ip: IpAddr,
-
-    /// Port to listen on
-    port: u16,
-
-    /// Path to the key file. Creates keys if the file doesn't exist.
-    keys: PathBuf,
+    /// Path to config
+    config: Option<PathBuf>,
 }
 
 #[cfg(not(feature = "gui"))]
@@ -36,14 +32,21 @@ struct Args {
 async fn main() -> anyhow::Result<std::process::ExitCode> {
     conclave_common::init_tracing();
     let args = Args::parse();
-    let keys = conclave_tracker::Keys::load_or_save(&args.keys)
-        .map_err(|e| {
-            eprintln!("Error loading keys: {e}");
-            std::process::exit(1);
-        })
-        .unwrap();
-    let tracker = conclave_tracker::State::new(args.ip, args.port, keys);
-    println!("Listening on {}:{}", args.ip, args.port);
+    let config = if let Some(config_path) = args.config {
+        TrackerConfig::load_or_save(&config_path)
+            .map_err(|e| panic!("Unable to read {}: {e}", config_path.display()))
+            .unwrap()
+    } else {
+        let mut default_dir =
+            default_config_directory().expect("Unable to determine default config directory");
+        default_dir.push("conclave-tracker.toml");
+        TrackerConfig::load_or_save(&default_dir)
+            .map_err(|e| panic!("Unable to read {}: {e}", default_dir.display()))
+            .unwrap()
+    };
+
+    let tracker = conclave_tracker::State::new(config.ip, config.port, config.keys);
+    println!("Listening on {}:{}", config.ip, config.port);
     tracker.serve().await?;
     Ok(std::process::ExitCode::SUCCESS)
 }
@@ -52,14 +55,21 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 fn main() -> eframe::Result {
     conclave_common::init_tracing();
     let args = Args::parse();
-    let keys = conclave_tracker::Keys::load_or_save(&args.keys)
-        .map_err(|e| {
-            eprintln!("Error loading keys: {e}");
-            std::process::exit(1);
-        })
-        .unwrap();
-    let tracker = conclave_tracker::State::new(args.ip, args.port, keys);
-    println!("Listening on {}:{}", args.ip, args.port);
+    let config = if let Some(config_path) = args.config {
+        TrackerConfig::load_or_save(&config_path)
+            .map_err(|e| panic!("Unable to read {}: {e}", config_path.display()))
+            .unwrap()
+    } else {
+        let mut default_dir =
+            default_config_directory().expect("Unable to determine default config directory");
+        default_dir.push("conclave-tracker.toml");
+        TrackerConfig::load_or_save(&default_dir)
+            .map_err(|e| panic!("Unable to read {}: {e}", default_dir.display()))
+            .unwrap()
+    };
+
+    let tracker = conclave_tracker::State::new(config.ip, config.port, config.keys);
+    println!("Listening on {}:{}", config.ip, config.port);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueHint};
+use conclave_common::SERVER_DEFAULT_PORT;
 use dialoguer::Password;
 use serde::Deserialize;
 use zeroize::Zeroize;
@@ -66,7 +67,8 @@ struct Run {
     domain: Option<String>,
 
     /// Port to listen on for connections
-    #[arg(short, long)]
+    #[arg(short, long, default_value_t = default_port())]
+    #[serde(default = "default_port")]
     port: u16,
 
     /// Database file path
@@ -82,6 +84,11 @@ struct Run {
     #[arg(short, long, value_hint = ValueHint::DirPath)]
     #[serde(default)]
     share: Option<PathBuf>,
+}
+
+#[inline]
+const fn default_port() -> u16 {
+    SERVER_DEFAULT_PORT
 }
 
 /// Get a file path and parse as configuration

@@ -903,6 +903,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "hkdf",
+ "home",
  "ml-dsa",
  "ml-kem",
  "postcard",
