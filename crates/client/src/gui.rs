@@ -2048,8 +2048,7 @@ impl ConclaveGUI {
                             ui.label("Port:");
                             ui.add(egui::TextEdit::singleline(&mut form_port).desired_width(60.0));
                         });
-                        let has_pending_info =
-                            pending_info_arc.read().is_ok_and(|g| g.is_some());
+                        let has_pending_info = pending_info_arc.read().is_ok_and(|g| g.is_some());
                         let can_add = !is_pending
                             && !has_pending_info
                             && !form_host.is_empty()
@@ -2785,7 +2784,7 @@ impl ConclaveGUI {
                                             } else {
                                                 "No"
                                             });
-                                            ui.label(format_uptime(server.uptime));
+                                            ui.label(format_uptime(server.uptime()));
                                             ui.label(&server.description);
                                             if let Some((host, port)) =
                                                 parse_server_url(&server.url)

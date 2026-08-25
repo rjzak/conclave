@@ -10,7 +10,7 @@ use std::net::IpAddr;
 
 use anyhow::{anyhow, bail};
 use base64::Engine;
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::VerifyingKey;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -205,8 +205,8 @@ pub struct Advertise {
     /// Maximum number of users allowed on the server
     pub max_users: u16,
 
-    /// For how long the server has been running
-    pub uptime: Duration,
+    /// When the server started so the client may calculate uptime.
+    pub started: DateTime<Utc>,
 
     /// URL of the server as advertised using the unencrypted port so the client can get
     /// the server's public key and has a chance to verify it.
@@ -217,6 +217,15 @@ pub struct Advertise {
 }
 
 impl Advertise {
+    /// How long the server has been running, as of now. Clamped at zero, since
+    /// a clock difference between the server and the reader can otherwise put
+    /// the start time in the future.
+    #[inline]
+    #[must_use]
+    pub fn uptime(&self) -> Duration {
+        (Utc::now() - self.started).max(Duration::zero())
+    }
+
     /// Serialize with Postcard.
     ///
     /// # Panics

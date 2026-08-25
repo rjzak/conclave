@@ -1575,7 +1575,7 @@ impl State {
             anonymous: self.allow_anonymous.load(Ordering::Relaxed),
             users_connected: u32::try_from(self.connections.read().await.len()).unwrap_or_default(),
             max_users: self.max_connections.load(Ordering::Relaxed),
-            uptime: self.since(),
+            started: self.started,
             url: self.url.clone(),
             key: self.public_key,
         }
@@ -4046,7 +4046,7 @@ mod tests {
 
     use std::net::{IpAddr, Ipv4Addr};
 
-    use chrono::Duration;
+    use chrono::{Duration, Utc};
     use tokio::net::TcpStream;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4103,7 +4103,7 @@ mod tests {
             anonymous: false,
             users_connected: 0,
             max_users: u16::MAX,
-            uptime: Duration::seconds(0),
+            started: Utc::now(),
             url: String::new(),
             key: server_verifying,
         })
