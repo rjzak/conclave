@@ -3,6 +3,7 @@
 use conclave_client::config::{BookmarkEntry, KnownHost, UserAuth};
 use conclave_client::conn::{ChatLine, ConclaveConnection};
 use conclave_client::{Client, DiscoveredServer, discover_servers};
+use conclave_common::SERVER_DEFAULT_PORT;
 use conclave_common::forum::ForumPost;
 use conclave_common::server::{
     ChatroomInfo, ConnectedUser, IDLE_TIMEOUT_MINUTES, UserAuthentication, VerifyingKey,
@@ -32,6 +33,26 @@ pub const MAIN_WINDOW_SIZE: [f32; 2] = [460.0, 200.0];
 /// The main window is never allowed to occupy more than this fraction of the
 /// monitor in either dimension.
 const MAIN_WINDOW_MAX_SCREEN_FRACTION: f32 = 0.9;
+
+/// Look up `host`'s SRV record in the background, storing the resolved host and
+/// port in `result` on success. A failed lookup is ignored: the user can still
+/// enter a port by hand. Non-async wrapper for an async function.
+#[inline]
+fn spawn_srv_lookup(
+    host: String,
+    result: Arc<RwLock<Option<(String, u16)>>>,
+    pending: Arc<AtomicBool>,
+) {
+    pending.store(true, Ordering::SeqCst);
+    tokio::spawn(async move {
+        if let Ok(found) = conclave_client::lookup_srv_record(&host).await
+            && let Ok(mut slot) = result.write()
+        {
+            *slot = Some(found);
+        }
+        pending.store(false, Ordering::SeqCst);
+    });
+}
 
 fn do_start_discovery(
     servers_arc: Arc<RwLock<HashSet<DiscoveredServer>>>,
@@ -1063,8 +1084,11 @@ pub struct ConclaveGUI {
     /// the login form's "Share local time" checkbox.
     default_share_timezone: bool,
 
-    /// Show the direct-connect host/port form in the central panel
+    /// Show the direct-connect host/port window
     show_direct_connect: bool,
+
+    /// Direct-connect window close flag (set when the user closes the window)
+    direct_connect_closed: Arc<AtomicBool>,
 
     /// Login window close flag (set when the user closes the login window)
     login_window_closed: Arc<AtomicBool>,
@@ -1187,6 +1211,7 @@ impl ConclaveGUI {
             default_display_name,
             default_share_timezone,
             show_direct_connect: false,
+            direct_connect_closed: Arc::new(AtomicBool::new(false)),
             login_window_closed: Arc::new(AtomicBool::new(false)),
             show_servers_window: false,
             show_about: false,
@@ -1231,6 +1256,7 @@ impl eframe::App for ConclaveGUI {
         self.tracker_list_window(ui);
         self.bookmarks_window(ui);
         self.tracker_servers_window(ui);
+        self.direct_connect_window(ui);
         self.login_window(ui);
         self.prune_dead_connections();
         let conn_snapshots = self.snapshot_connections();
@@ -1302,6 +1328,9 @@ impl ConclaveGUI {
         }
         if self.bookmarks_viewport_closed.swap(false, Ordering::SeqCst) {
             self.show_bookmarks_window = false;
+        }
+        if self.direct_connect_closed.swap(false, Ordering::SeqCst) {
+            self.show_direct_connect = false;
         }
         if self.about_closed.swap(false, Ordering::SeqCst) {
             self.show_about = false;
@@ -1447,7 +1476,7 @@ impl ConclaveGUI {
                         self.show_tracker_servers = true;
                     }
                     if ui.button("Direct Connect").clicked() {
-                        self.show_direct_connect = !self.show_direct_connect;
+                        self.show_direct_connect = true;
                     }
                     ui.separator();
                     // Bookmarks as a submenu: clicking one connects to it.
@@ -2238,8 +2267,10 @@ impl ConclaveGUI {
                         ctx.data(|d| d.get_temp::<String>(name_id).unwrap_or_default());
                     let mut f_host =
                         ctx.data(|d| d.get_temp::<String>(host_id).unwrap_or_default());
-                    let mut f_port =
-                        ctx.data(|d| d.get_temp::<String>(port_id).unwrap_or_default());
+                    let mut f_port = ctx.data(|d| {
+                        d.get_temp::<String>(port_id)
+                            .unwrap_or_else(|| SERVER_DEFAULT_PORT.to_string())
+                    });
                     let mut f_display =
                         ctx.data(|d| d.get_temp::<String>(display_id).unwrap_or_default());
                     let mut f_user =
@@ -4564,6 +4595,127 @@ impl ConclaveGUI {
         }
     }
 
+    /// Render the direct-connect host/port window when open.
+    ///
+    /// The main window is locked to a size that only fits the launcher, so this
+    /// form gets its own viewport like every other way to connect; inline, its
+    /// Connect button fell below the bottom edge and could not be reached.
+    #[inline]
+    fn direct_connect_window(&mut self, ui: &mut egui::Ui) {
+        // ── Direct Connect viewport ───────────────────────────────────────
+        if !self.show_direct_connect {
+            return;
+        }
+
+        let closed_arc = self.direct_connect_closed.clone();
+        let connect_pending = self.connect_pending.clone();
+        let connect_error = self.connect_error.clone();
+        let pending_server = self.pending_server.clone();
+        let srv_result = self.srv_result.clone();
+        let srv_pending = self.srv_pending.clone();
+
+        ui.ctx().show_viewport_deferred(
+            egui::ViewportId::from_hash_of("direct_connect"),
+            egui::ViewportBuilder::default()
+                .with_title("Direct Connect")
+                .with_inner_size([380.0, 100.0])
+                .with_resizable(false),
+            move |ctx, _class| {
+                if ctx.input(|i| i.viewport().close_requested()) {
+                    closed_arc.store(true, Ordering::SeqCst);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+
+                let host_id = egui::Id::new("direct_connect_host");
+                let port_id = egui::Id::new("direct_connect_port");
+                let mut host: String = ctx.data(|d| d.get_temp(host_id).unwrap_or_default());
+                let mut port_str: String = ctx.data(|d| {
+                    d.get_temp(port_id)
+                        .unwrap_or_else(|| SERVER_DEFAULT_PORT.to_string())
+                });
+
+                // A completed SRV lookup fills in the resolved host and port so
+                // the user can see and use them.
+                if let Some((srv_host, srv_port)) =
+                    srv_result.write().ok().and_then(|mut r| r.take())
+                {
+                    host = srv_host;
+                    port_str = srv_port.to_string();
+                }
+
+                let lookup_pending = srv_pending.load(Ordering::SeqCst);
+                let busy = lookup_pending || connect_pending.load(Ordering::SeqCst);
+                if busy {
+                    ctx.request_repaint();
+                }
+
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    // Enter in either field submits, the same as the button.
+                    let mut submit = false;
+                    ui.horizontal(|ui| {
+                        ui.label("Host:");
+                        let host_edit =
+                            ui.add(egui::TextEdit::singleline(&mut host).desired_width(160.0));
+                        ui.label("Port:");
+                        let port_edit =
+                            ui.add(egui::TextEdit::singleline(&mut port_str).desired_width(50.0));
+                        submit = (host_edit.lost_focus() || port_edit.lost_focus())
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    });
+
+                    let port_ok = port_str.parse::<u16>().is_ok();
+                    let no_port = port_str.trim().is_empty();
+                    // Connecting is allowed with a valid port, or with no port
+                    // (which triggers an SRV lookup instead).
+                    let can_connect = !host.is_empty() && (port_ok || no_port) && !busy;
+
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(can_connect, egui::Button::new("Connect"))
+                            .clicked()
+                        {
+                            submit = true;
+                        }
+                        if lookup_pending {
+                            ui.add(egui::Spinner::new());
+                            ui.label("Looking up SRV record…");
+                        }
+                    });
+
+                    if submit && can_connect {
+                        if no_port {
+                            // No port given: resolve one from the SRV record and
+                            // fill the fields in above.
+                            spawn_srv_lookup(host.clone(), srv_result.clone(), srv_pending.clone());
+                        } else {
+                            let port = port_str.parse::<u16>().unwrap_or(SERVER_DEFAULT_PORT);
+                            if let Ok(mut p) = pending_server.write() {
+                                *p = Some(PendingServer {
+                                    host: host.clone(),
+                                    port,
+                                    key: None,
+                                    name: format!("{host}:{port}"),
+                                    anonymous_allowed: true,
+                                });
+                            }
+                            if let Ok(mut e) = connect_error.write() {
+                                *e = None;
+                            }
+                            // The login window takes over from here.
+                            ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+                        }
+                    }
+                });
+
+                ctx.data_mut(|d| {
+                    d.insert_temp(host_id, host);
+                    d.insert_temp(port_id, port_str);
+                });
+            },
+        );
+    }
+
     /// Render the root connection-launcher panel.
     #[inline]
     #[allow(clippy::too_many_lines)]
@@ -4612,98 +4764,8 @@ impl ConclaveGUI {
                         ui.colored_label(egui::Color32::RED, err);
                     }
 
-                    // ── Direct Connect form ───────────────────────────────────
-                    if self.show_direct_connect {
-                        ui.add_space(16.0);
-                        ui.separator();
-                        ui.add_space(8.0);
-                        ui.label(egui::RichText::new("Direct Connect").strong());
-
-                        let host_id = egui::Id::new("direct_connect_host");
-                        let port_id = egui::Id::new("direct_connect_port");
-                        let mut host: String =
-                            ui.ctx().data(|d| d.get_temp(host_id).unwrap_or_default());
-                        let mut port_str: String = ui
-                            .ctx()
-                            .data(|d| d.get_temp(port_id).unwrap_or_else(|| "9101".to_string()));
-
-                        // A completed SRV lookup fills in the resolved host and
-                        // port so the user can see and use them.
-                        if let Some((srv_host, srv_port)) =
-                            self.srv_result.write().ok().and_then(|mut r| r.take())
-                        {
-                            host = srv_host;
-                            port_str = srv_port.to_string();
-                        }
-
-                        ui.horizontal(|ui| {
-                            ui.label("Host:");
-                            ui.text_edit_singleline(&mut host);
-                            ui.label("Port:");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut port_str)
-                                    .desired_width(60.0)
-                                    .hint_text("SRV"),
-                            );
-                        });
-
-                        let port_ok = port_str.parse::<u16>().is_ok();
-                        let no_port = port_str.trim().is_empty();
-                        let srv_pending = self.srv_pending.load(Ordering::SeqCst);
-                        // Connecting is allowed with a valid port, or with no
-                        // port (which triggers an SRV lookup instead).
-                        let can_connect = !host.is_empty()
-                            && (port_ok || no_port)
-                            && !bm_is_pending
-                            && !srv_pending;
-
-                        ui.add_space(4.0);
-                        if ui
-                            .add_enabled(can_connect, egui::Button::new("Connect"))
-                            .clicked()
-                        {
-                            if no_port {
-                                // No port: look up the SRV record and, if
-                                // successful, fill in the host and port above.
-                                // Errors are ignored.
-                                self.srv_pending.store(true, Ordering::SeqCst);
-                                let lookup_host = host.clone();
-                                let result = self.srv_result.clone();
-                                let pending = self.srv_pending.clone();
-                                tokio::spawn(async move {
-                                    if let Ok(found) =
-                                        conclave_client::lookup_srv_record(&lookup_host).await
-                                        && let Ok(mut slot) = result.write()
-                                    {
-                                        *slot = Some(found);
-                                    }
-                                    pending.store(false, Ordering::SeqCst);
-                                });
-                            } else {
-                                let port = port_str.parse::<u16>().unwrap_or(9101);
-                                if let Ok(mut p) = self.pending_server.write() {
-                                    *p = Some(PendingServer {
-                                        host: host.clone(),
-                                        port,
-                                        key: None,
-                                        name: format!("{host}:{port}"),
-                                        anonymous_allowed: true,
-                                    });
-                                }
-                                if let Ok(mut e) = self.connect_error.write() {
-                                    *e = None;
-                                }
-                            }
-                        }
-
-                        ui.ctx().data_mut(|d| {
-                            d.insert_temp(host_id, host);
-                            d.insert_temp(port_id, port_str);
-                        });
-                    }
-
                     // When nothing else is on screen, point to the Connect menu.
-                    if !self.show_direct_connect && conn_snapshots.is_empty() {
+                    if conn_snapshots.is_empty() {
                         ui.add_space(24.0);
                         ui.label(
                             egui::RichText::new(
