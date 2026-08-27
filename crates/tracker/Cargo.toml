@@ -31,7 +31,6 @@ toml = { workspace = true, features = ["display", "parse", "serde"] }
 tracing = { workspace = true, features = ["attributes", "std"] }
 
 [dev-dependencies]
-base64 = { workspace = true, features = ["alloc"] }
 tempdir = { workspace = true }
 
 [build-dependencies]
