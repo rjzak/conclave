@@ -80,7 +80,7 @@ pub fn init_tracing() {
 
 /// Get a path for storing various config files for Conclave in this order:
 ///
-/// 1. User's home directory: `~/.config/conclave/`.
+/// 1. User's home directory: `~/.config/conclave/` or `C:\Users\USER\AppData\Local\Conclave` on Windows.
 /// 2. The directory containing the executable.
 /// 3. The current working directory.
 ///
@@ -89,8 +89,17 @@ pub fn init_tracing() {
 /// File system errors may occur, possible if there's a permissions issue.
 pub fn default_config_directory() -> anyhow::Result<PathBuf> {
     if let Some(mut home_config) = home::home_dir() {
-        home_config.push(".config");
-        home_config.push("conclave");
+        #[cfg(target_family = "windows")]
+        {
+            home_config.push("AppData");
+            home_config.push("Local");
+            home_config.push("Conclave");
+        }
+        #[cfg(not(target_family = "windows"))]
+        {
+            home_config.push(".config");
+            home_config.push("conclave");
+        }
         if !home_config.exists() {
             std::fs::create_dir_all(&home_config)?;
         }
