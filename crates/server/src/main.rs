@@ -1,21 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#![cfg_attr(
+    all(not(debug_assertions), feature = "gui"),
+    windows_subsystem = "windows"
+)]
+#![doc = include_str!("../README.md")]
 #![deny(clippy::all)]
 //#![deny(clippy::cargo)]
 #![deny(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
-use conclave_server::{DEFAULT_DATABASE, State};
+use conclave_common::default_config_directory;
+use conclave_server::{DEFAULT_DATABASE, ServerConfig, State};
 
-use std::ffi::OsStr;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueHint};
-use conclave_common::SERVER_DEFAULT_PORT;
 use dialoguer::Password;
-use serde::Deserialize;
 use zeroize::Zeroize;
 
 pub const VERSION: &str = concat!(
@@ -32,11 +35,14 @@ enum Args {
     /// Administrative commands
     Admin(Admin),
 
-    /// Run the server with configuration on the command line
+    /// Run the server with configuration from a file (default)
     Run(Run),
+}
 
-    /// Run the server with configuration from a file
-    Load(Load),
+impl Default for Args {
+    fn default() -> Self {
+        Args::Run(Run::default())
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -52,72 +58,26 @@ struct Admin {
 
 #[derive(Subcommand, Clone, Debug)]
 enum AdminActions {
+    /// Reset the admin password
     ResetAdminPassword,
 }
 
-#[derive(Parser, Debug, Deserialize)]
-struct Run {
-    /// IP Address to listen on
-    #[arg(short, long, default_value = "127.0.0.1")]
-    ip: IpAddr,
-
-    /// Advertised domain
-    #[arg(short, long)]
-    #[serde(default)]
-    domain: Option<String>,
-
-    /// Port to listen on for connections
-    #[arg(short, long, default_value_t = default_port())]
-    #[serde(default = "default_port")]
-    port: u16,
-
-    /// Database file path
-    #[arg(short, long, default_value = DEFAULT_DATABASE, value_hint = ValueHint::FilePath)]
-    config: PathBuf,
-
-    /// Advertise this server via Multicast DNS
-    #[arg(short, long)]
-    #[serde(default)]
-    mdns: bool,
-
-    /// Directory to share with clients (enables file sharing)
-    #[arg(short, long, value_hint = ValueHint::DirPath)]
-    #[serde(default)]
-    share: Option<PathBuf>,
-}
-
-#[inline]
-const fn default_port() -> u16 {
-    SERVER_DEFAULT_PORT
-}
-
 /// Get a file path and parse as configuration
-#[derive(Parser, Debug)]
-struct Load {
-    /// Path to a JSON or TOML config file.
-    #[arg(value_hint = ValueHint::FilePath)]
-    config: PathBuf,
-}
+#[derive(Parser, Debug, Default)]
+struct Run {
+    /// Database file path
+    #[arg(short, long, value_hint = ValueHint::FilePath)]
+    database: Option<PathBuf>,
 
-impl From<Load> for Run {
-    fn from(load: Load) -> Self {
-        let Some(ext) = load.config.as_path().extension().and_then(OsStr::to_str) else {
-            panic!("Config file does not have a file extension");
-        };
-
-        let content = std::fs::read_to_string(&load.config).expect("Failed to read file");
-        match ext {
-            "toml" => toml::from_str(&content).expect("Failed to parse TOML"),
-            "json" => serde_json::from_str(&content).expect("Failed to parse JSON"),
-            x => panic!("Unknown file extension: {x}"),
-        }
-    }
+    /// Config file path
+    #[arg(short, long, value_hint = ValueHint::FilePath)]
+    config: Option<PathBuf>,
 }
 
 async fn common_main(args: Args) -> Result<State> {
     let run = match args {
         Args::Admin(admin) => {
-            // These ports don't matter as we won't use them
+            // The IP, ports, and mdns options don't matter as we won't start the server.
             let state = State::load(IpAddr::V4(Ipv4Addr::LOCALHOST), 9998, false, &admin.config)?;
             match &admin.action {
                 AdminActions::ResetAdminPassword => {
@@ -131,38 +91,60 @@ async fn common_main(args: Args) -> Result<State> {
             std::process::exit(0);
         }
         Args::Run(run) => run,
-        Args::Load(load) => load.into(),
     };
 
-    let state = if run.config.exists() {
-        State::load(run.ip, run.port, run.mdns, &run.config)?
+    let (state, share) = if let Some(config_file) = &run.config
+        && let Some(database_path) = run.database
+    {
+        let config = ServerConfig::load(config_file)?;
+        (
+            State::load(config.ip, config.port, config.mdns, database_path)?,
+            config.share,
+        )
+    } else if run.config.is_none() && run.database.is_none() {
+        let mut config_file =
+            default_config_directory().expect("Unable to determine default config directory");
+        let mut database_file = config_file.clone();
+        config_file.push("server.toml");
+        database_file.push("server.db");
+        let config = ServerConfig::load_or_save(config_file)?;
+        let state = if database_file.exists() {
+            State::load(config.ip, config.port, config.mdns, database_file)?
+        } else {
+            let (state, mut password) = State::new(
+                "Conclave".into(),
+                "Conclave server".into(),
+                config.ip,
+                config.domain,
+                config.port,
+                config.mdns,
+                database_file,
+            )?;
+            println!(
+                "Admin password: {}\nTake note, as this will not appear again.",
+                password.as_str()
+            );
+            password.zeroize();
+            state
+        };
+        (state, config.share)
     } else {
-        let (state, mut password) = State::new(
-            "Conclave".into(),
-            "Conclave server".into(),
-            run.ip,
-            run.domain,
-            run.port,
-            run.mdns,
-            run.config,
-        )?;
-
-        println!(
-            "Admin password: {}\nThis will only appears this first time.",
-            password.as_str()
-        );
-        password.zeroize();
-        state
+        anyhow::bail!("config and database must both be provided or both not provided");
     };
 
-    Ok(state.with_share_directory(run.share))
+    Ok(state.with_share_directory(share))
 }
 
 #[cfg(not(feature = "gui"))]
 #[tokio::main]
 async fn main() -> Result<std::process::ExitCode> {
     conclave_common::init_tracing();
-    let state = common_main(Args::parse()).await?;
+    let args = if std::env::args().collect::<Vec<String>>().len() > 1 {
+        Args::parse()
+    } else {
+        Args::default()
+    };
+    let state = common_main(args).await?;
     state.serve().await?;
     Ok(std::process::ExitCode::SUCCESS)
 }
@@ -174,10 +156,16 @@ fn main() -> eframe::Result {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .unwrap();
+        .expect("Failed to create Tokio runtime");
+
+    let args = if std::env::args().collect::<Vec<String>>().len() > 1 {
+        Args::parse()
+    } else {
+        Args::default()
+    };
 
     let state = rt
-        .block_on(common_main(Args::parse()))
+        .block_on(common_main(args))
         .expect("Failed to load server state from provided arguments or database file.");
 
     let state_copy = state.clone();

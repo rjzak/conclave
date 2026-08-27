@@ -9,7 +9,6 @@
 
 mod files;
 
-use conclave_common::URL_PROTOCOL;
 use conclave_common::admin::server::{
     AdminForumTopic, AdminUser, Chatroom, ClientAdminMessagesEncrypted, CreateGroup, Group,
     ServerAdminMessagesEncrypted, is_reserved_red,
@@ -27,14 +26,17 @@ use conclave_common::server::{
 };
 use conclave_common::tracker::TrackerProtocol::AdvertiseServer;
 use conclave_common::tracker::{Advertise, Tracker, TrackerWithKey};
+use conclave_common::{SERVER_DEFAULT_PORT, URL_PROTOCOL};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::net::{IpAddr, SocketAddr};
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 
-use anyhow::{Result, anyhow, ensure};
+use anyhow::{Result, anyhow, bail, ensure};
 use argon2::password_hash::{SaltString, rand_core::OsRng};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use async_sqlite::rusqlite::fallible_iterator::FallibleIterator;
@@ -44,6 +46,7 @@ use chrono::{DateTime, Duration, Local, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use semver::Version;
+use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, RwLock};
 use tracing::{error, info, trace, warn};
@@ -58,6 +61,129 @@ const SCHEMA: &str = include_str!("schema.sql");
 /// Conclave version
 pub static VERSION: LazyLock<Version> =
     LazyLock::new(|| Version::parse(env!("CONCLAVE_VERSION")).unwrap());
+
+/// Config file
+#[derive(Serialize, Deserialize)]
+pub struct ServerConfig {
+    /// IP Address to listen on
+    #[serde(default = "default_ip")]
+    pub ip: IpAddr,
+
+    /// Listening port
+    #[serde(default = "default_port")]
+    pub port: u16,
+
+    /// Advertised domain
+    #[serde(default)]
+    pub domain: Option<String>,
+
+    /// Advertise this server via Multicast DNS
+    #[serde(default)]
+    pub mdns: bool,
+
+    /// Directory to share with clients (enables file sharing)
+    #[serde(default)]
+    pub share: Option<PathBuf>,
+}
+
+const fn default_ip() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::LOCALHOST)
+}
+
+const fn default_port() -> u16 {
+    SERVER_DEFAULT_PORT
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            ip: default_ip(),
+            port: default_port(),
+            domain: None,
+            mdns: false,
+            share: None,
+        }
+    }
+}
+
+impl ServerConfig {
+    /// Load config from a file path, using the file extension to determine the format.
+    ///
+    /// Supported formats:
+    /// - JSON
+    /// - TOML
+    ///
+    /// # Errors
+    ///
+    /// Returns errors if the file cannot be read, doesn't have an extension, isn't JSON or TOML.
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let contents = std::fs::read_to_string(&path)?;
+
+        let config: Self = match path.as_ref().extension() {
+            Some(ext) if ext == "toml" => toml::from_str(&contents)?,
+            Some(ext) if ext == "json" => serde_json::from_str(&contents)?,
+            Some(ext) => bail!("Unsupported file format {}", ext.display()),
+            None => bail!("File {} has no extension", path.as_ref().display()),
+        };
+
+        Ok(config)
+    }
+
+    /// Save the config to a file path, using the file extension to determine the format
+    ///
+    /// Supported formats:
+    /// - JSON
+    /// - TOML
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be written or if the extension doesn't indicate a JSON or TOML format.
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let contents = match path.as_ref().extension() {
+            Some(ext) if ext == "toml" => toml::to_string(&self)?,
+            Some(ext) if ext == "json" => serde_json::to_string(&self)?,
+            Some(ext) => bail!("Unsupported file format {}", ext.display()),
+            None => bail!("File {} has no extension", path.as_ref().display()),
+        };
+
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create(true)
+            .append(false)
+            .truncate(true);
+
+        #[cfg(target_family = "unix")]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            options.mode(0o600);
+        }
+
+        let mut file = options.open(&path)?;
+        write!(file, "{contents}")?;
+        Ok(())
+    }
+
+    /// Load or save config. If a file exists, it's loaded. Otherwise config is generated and saved.
+    ///
+    /// Supported formats:
+    /// - JSON
+    /// - TOML
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be written or if the extension doesn't indicate a JSON or TOML format.
+    pub fn load_or_save<P: AsRef<Path>>(path: P) -> Result<Self> {
+        if path.as_ref().exists() {
+            Self::load(path)
+        } else {
+            let config = Self::default();
+            config.save(path)?;
+            Ok(config)
+        }
+    }
+}
 
 /// Client connection
 struct ClientConnection {

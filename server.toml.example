@@ -1,6 +1,0 @@
-ip = "127.0.0.1"
-port = 1234
-# domain = "conclave.mydomain.com"
-config = "server.db"
-mdns = true
-# share = "/opt/conclave/shared_files"
