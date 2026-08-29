@@ -32,15 +32,14 @@ pub static VERSION: LazyLock<Version> =
 
 const DEFAULT_TRACKER_FILE: &str = "conclave-tracker.toml";
 
-/// Find a conf file from the common Conclave config directory
+/// Find the tracker config file from the common OS-specific Conclave config directory
 ///
 /// # Panics
 ///
-/// Panics if the home directory can't be found or if the config directory can't be found/created.
+/// Panics if the home directory can't be created in the user's home directory.
 #[must_use]
 pub fn default_config_path() -> PathBuf {
-    let mut config_file = conclave_common::default_config_directory()
-        .expect("Unable to determine default config directory");
+    let mut config_file = conclave_common::default_config_directory();
     config_file.push(DEFAULT_TRACKER_FILE);
     config_file
 }

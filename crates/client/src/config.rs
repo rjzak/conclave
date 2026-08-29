@@ -16,15 +16,14 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// Default client config file
 const DEFAULT_CLIENT_FILE: &str = "conclave.toml";
 
-/// Find a conf file from the common Conclave config directory
+/// Find the client config file from the common OS-specific Conclave config directory
 ///
 /// # Panics
 ///
-/// Panics if the home directory can't be found or if the config directory can't be found/created.
+/// Panics if the home directory can't be created in the user's home directory.
 #[must_use]
 pub fn default_config_path() -> PathBuf {
-    let mut config_file = conclave_common::default_config_directory()
-        .expect("Unable to determine default config directory");
+    let mut config_file = conclave_common::default_config_directory();
     config_file.push(DEFAULT_CLIENT_FILE);
     config_file
 }

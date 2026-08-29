@@ -64,15 +64,14 @@ const SCHEMA: &str = include_str!("schema.sql");
 pub static VERSION: LazyLock<Version> =
     LazyLock::new(|| Version::parse(env!("CONCLAVE_VERSION")).unwrap());
 
-/// Find a conf file and server database file from the common Conclave config directory
+/// Find the server config and database files from the common OS-specific Conclave config directory
 ///
 /// # Panics
 ///
-/// Panics if the home directory can't be found or if the config directory can't be found/created.
+/// Panics if the home directory can't be created in the user's home directory.
 #[must_use]
 pub fn default_config_paths() -> (PathBuf, PathBuf) {
-    let mut config_file = conclave_common::default_config_directory()
-        .expect("Unable to determine default config directory");
+    let mut config_file = conclave_common::default_config_directory();
     let mut database_file = config_file.clone();
     config_file.push(DEFAULT_SERVER_CONFIG);
     database_file.push(DEFAULT_DATABASE);

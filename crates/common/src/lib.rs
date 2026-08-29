@@ -39,9 +39,6 @@ pub mod serde;
 /// Data structures for communicating with the server
 pub mod server;
 
-/// Protocol magic
-pub const HELLO: &[u8] = b"HELLO CONCLAVE!";
-
 /// URL protocol
 pub const URL_PROTOCOL: &str = "conclave://";
 
@@ -80,14 +77,38 @@ pub fn init_tracing() {
 
 /// Get a path for storing various config files for Conclave in this order:
 ///
-/// 1. User's home directory: `~/.config/conclave/` or `C:\Users\USER\AppData\Local\Conclave` on Windows.
+/// 1. User's home directory: `$HOME/.config/conclave/`, `%USERPROFILE%\AppData\Local\Conclave` on Windows, or
+///    `/boot/home/config/settings/Conclave` on Haiku.
 /// 2. The directory containing the executable.
 /// 3. The current working directory.
 ///
-/// # Errors
+/// # Panics
 ///
-/// File system errors may occur, possible if there's a permissions issue.
-pub fn default_config_directory() -> anyhow::Result<PathBuf> {
+/// A panic occurs if the configuration directory cannot be created in the user's home directory. It's
+/// expected that this function is only called when the program immediately loads, so it won't interfere
+/// with a long-running process.
+#[inline]
+#[must_use]
+pub fn default_config_directory() -> PathBuf {
+    #[cfg(target_os = "haiku")]
+    {
+        use std::str::FromStr;
+
+        let path = PathBuf::from_str("/boot/home/config/settings/Conclave").unwrap();
+        if !path.exists() {
+            std::fs::create_dir_all(&path)
+                .map_err(|e| {
+                    panic!(
+                        "Error creating Conclave's config directory {}: {e}",
+                        path.display()
+                    )
+                })
+                .unwrap();
+        }
+        return path;
+    }
+
+    #[cfg(not(target_os = "haiku"))]
     if let Some(mut home_config) = home::home_dir() {
         #[cfg(target_family = "windows")]
         {
@@ -101,14 +122,21 @@ pub fn default_config_directory() -> anyhow::Result<PathBuf> {
             home_config.push("conclave");
         }
         if !home_config.exists() {
-            std::fs::create_dir_all(&home_config)?;
+            std::fs::create_dir_all(&home_config)
+                .map_err(|e| {
+                    panic!(
+                        "Error creating Conclave's config directory {}: {e}",
+                        home_config.display()
+                    )
+                })
+                .unwrap();
         }
-        Ok(home_config)
+        home_config
     } else if let Ok(exe_path) = std::env::current_exe()
         && let Some(parent) = exe_path.parent()
     {
-        Ok(parent.into())
+        parent.into()
     } else {
-        Ok(PathBuf::from("./"))
+        PathBuf::from("./")
     }
 }
