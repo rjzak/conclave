@@ -9,12 +9,11 @@
 #![deny(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
-use conclave_common::default_config_directory;
 use conclave_tracker::TrackerConfig;
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueHint};
 
 pub const VERSION: &str = concat!(
     "v",
@@ -28,7 +27,8 @@ pub const VERSION: &str = concat!(
 #[command(author, about, version = VERSION)]
 struct Args {
     /// Path to config
-    config: Option<PathBuf>,
+    #[arg(short, long, value_hint = ValueHint::FilePath, default_value = conclave_tracker::default_config_path().into_os_string())]
+    config: PathBuf,
 }
 
 #[cfg(not(feature = "gui"))]
@@ -36,18 +36,9 @@ struct Args {
 async fn main() -> anyhow::Result<std::process::ExitCode> {
     conclave_common::init_tracing();
     let args = Args::parse();
-    let config = if let Some(config_path) = args.config {
-        TrackerConfig::load_or_save(&config_path)
-            .map_err(|e| panic!("Unable to read {}: {e}", config_path.display()))
-            .unwrap()
-    } else {
-        let mut default_dir =
-            default_config_directory().expect("Unable to determine default config directory");
-        default_dir.push("conclave-tracker.toml");
-        TrackerConfig::load_or_save(&default_dir)
-            .map_err(|e| panic!("Unable to read {}: {e}", default_dir.display()))
-            .unwrap()
-    };
+    let config = TrackerConfig::load_or_save(&args.config)
+        .map_err(|e| panic!("Unable to read {}: {e}", args.config.display()))
+        .unwrap();
 
     let tracker = conclave_tracker::State::new(config.ip, config.port, config.keys);
     println!("Listening on {}:{}", config.ip, config.port);
@@ -59,18 +50,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 fn main() -> eframe::Result {
     conclave_common::init_tracing();
     let args = Args::parse();
-    let config = if let Some(config_path) = args.config {
-        TrackerConfig::load_or_save(&config_path)
-            .map_err(|e| panic!("Unable to read {}: {e}", config_path.display()))
-            .unwrap()
-    } else {
-        let mut default_dir =
-            default_config_directory().expect("Unable to determine default config directory");
-        default_dir.push("conclave-tracker.toml");
-        TrackerConfig::load_or_save(&default_dir)
-            .map_err(|e| panic!("Unable to read {}: {e}", default_dir.display()))
-            .unwrap()
-    };
+    let config = TrackerConfig::load_or_save(&args.config)
+        .map_err(|e| panic!("Unable to read {}: {e}", args.config.display()))
+        .unwrap();
 
     let tracker = conclave_tracker::State::new(config.ip, config.port, config.keys);
     println!("Listening on {}:{}", config.ip, config.port);

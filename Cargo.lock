@@ -868,7 +868,6 @@ dependencies = [
  "domain",
  "eframe",
  "hex",
- "home",
  "image",
  "mdns-sd",
  "rfd",

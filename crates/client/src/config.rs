@@ -14,34 +14,19 @@ use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Default client config file
-pub const DEFAULT_CLIENT_FILE: &str = "conclave.toml";
+const DEFAULT_CLIENT_FILE: &str = "conclave.toml";
 
-/// Find a conf file, either in the home directory or in the current directory.
+/// Find a conf file from the common Conclave config directory
 ///
-/// # Errors
+/// # Panics
 ///
-/// Filesystem errors are possible.
+/// Panics if the home directory can't be found or if the config directory can't be found/created.
+#[must_use]
 pub fn default_config_path() -> PathBuf {
-    if Path::new(DEFAULT_CLIENT_FILE).exists() {
-        return DEFAULT_CLIENT_FILE.into();
-    }
-
-    if let Some(mut home_config) = home::home_dir() {
-        home_config.push(".config");
-        if !home_config.exists()
-            && let Err(e) = std::fs::create_dir_all(&home_config)
-        {
-            tracing::error!(
-                "Failed to create directory `.config` ({}): {e}",
-                home_config.display()
-            );
-            return PathBuf::from(DEFAULT_CLIENT_FILE);
-        }
-        home_config.push(DEFAULT_CLIENT_FILE);
-        home_config
-    } else {
-        PathBuf::from(DEFAULT_CLIENT_FILE)
-    }
+    let mut config_file = conclave_common::default_config_directory()
+        .expect("Unable to determine default config directory");
+    config_file.push(DEFAULT_CLIENT_FILE);
+    config_file
 }
 
 /// Client configuration

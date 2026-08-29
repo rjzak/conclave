@@ -24,7 +24,7 @@ argon2 = { workspace = true, features = ["alloc", "getrandom", "password-hash", 
 async-sqlite = { workspace = true, features = ["bundled", "chrono", "fallible_uint"] }
 base64 = { workspace = true, features = ["alloc"] }
 chrono = { workspace = true, features = ["clock", "std"] }
-clap = { workspace = true, features = ["color", "derive", "help", "std", "suggestions"] }
+clap = { workspace = true, features = ["color", "derive", "help", "std", "string", "suggestions"] }
 dialoguer = { workspace = true, features = ["password"] }
 ed25519-dalek = { workspace = true, features = ["serde"] }
 eframe = { workspace = true, features = ["accesskit", "default_fonts", "wayland", "wgpu", "x11"], optional = true }

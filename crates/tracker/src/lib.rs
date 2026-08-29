@@ -15,7 +15,7 @@ use std::fmt::{Debug, Display};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 
@@ -29,6 +29,21 @@ use tokio::sync::watch;
 /// Conclave version
 pub static VERSION: LazyLock<Version> =
     LazyLock::new(|| Version::parse(env!("CONCLAVE_VERSION")).unwrap());
+
+const DEFAULT_TRACKER_FILE: &str = "conclave-tracker.toml";
+
+/// Find a conf file from the common Conclave config directory
+///
+/// # Panics
+///
+/// Panics if the home directory can't be found or if the config directory can't be found/created.
+#[must_use]
+pub fn default_config_path() -> PathBuf {
+    let mut config_file = conclave_common::default_config_directory()
+        .expect("Unable to determine default config directory");
+    config_file.push(DEFAULT_TRACKER_FILE);
+    config_file
+}
 
 /// Config file
 #[derive(Serialize, Deserialize)]

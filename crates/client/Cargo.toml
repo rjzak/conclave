@@ -18,13 +18,12 @@ conclave-common = { workspace = true }
 anyhow = { workspace = true, features = ["std"] }
 arboard = { workspace = true, features = ["image-data", "wayland-data-control"] }
 base64 = { workspace = true, features = ["alloc"] }
-clap = { workspace = true, features = ["color", "derive", "help", "std", "suggestions"] }
+clap = { workspace = true, features = ["color", "derive", "help", "std", "string", "suggestions"] }
 chrono = { workspace = true, features = ["clock", "serde", "std"] }
 dashmap = { workspace = true, features = ["inline"] }
 domain = { workspace = true, features = ["resolv"] }
 eframe = { workspace = true, features = ["accesskit", "default_fonts", "serde", "wayland", "wgpu", "x11"] }
 hex = { workspace = true, features = ["alloc"] }
-home = { workspace = true }
 image = { workspace = true, features = ["jpeg", "png"] }
 mdns-sd = { workspace = true }
 rfd = { workspace = true, features = ["xdg-portal", "wayland"] }

@@ -8,11 +8,11 @@
 
 mod gui;
 
-use conclave_client::{Client, config::DEFAULT_CLIENT_FILE};
+use conclave_client::{Client, config::default_config_path};
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueHint};
 
 pub const VERSION: &str = concat!(
     "v",
@@ -26,7 +26,7 @@ pub const VERSION: &str = concat!(
 #[command(author, about, version = VERSION)]
 struct Args {
     /// Config file path
-    #[arg(short, long, default_value = DEFAULT_CLIENT_FILE)]
+    #[arg(short, long, value_hint = ValueHint::FilePath, default_value = default_config_path().into_os_string())]
     config: PathBuf,
 }
 
@@ -34,7 +34,9 @@ struct Args {
 async fn main() -> eframe::Result {
     conclave_common::init_tracing();
     let args = Args::parse();
-    let client = Client::new(args.config).unwrap();
+    let client = Client::new(&args.config)
+        .map_err(|e| panic!("Unable to read {}: {e}", args.config.display()))
+        .unwrap();
 
     #[cfg(debug_assertions)]
     {

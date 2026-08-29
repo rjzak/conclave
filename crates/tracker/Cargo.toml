@@ -20,7 +20,7 @@ conclave-common = { workspace = true }
 
 # External
 anyhow = { workspace = true, features = ["std"] }
-clap = { workspace = true, features = ["color", "derive", "help", "std", "suggestions"] }
+clap = { workspace = true, features = ["color", "derive", "help", "std", "string", "suggestions"] }
 dashmap = { workspace = true, features = ["inline"] }
 eframe = { workspace = true, features = ["accesskit", "default_fonts", "glow"], optional = true }
 semver = { workspace = true }

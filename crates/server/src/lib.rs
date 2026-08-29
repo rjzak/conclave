@@ -53,13 +53,31 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 /// Default config file name.
-pub const DEFAULT_DATABASE: &str = "server.db";
+const DEFAULT_DATABASE: &str = "server.db";
+
+/// Default server config file name
+const DEFAULT_SERVER_CONFIG: &str = "server.toml";
 
 const SCHEMA: &str = include_str!("schema.sql");
 
 /// Conclave version
 pub static VERSION: LazyLock<Version> =
     LazyLock::new(|| Version::parse(env!("CONCLAVE_VERSION")).unwrap());
+
+/// Find a conf file and server database file from the common Conclave config directory
+///
+/// # Panics
+///
+/// Panics if the home directory can't be found or if the config directory can't be found/created.
+#[must_use]
+pub fn default_config_paths() -> (PathBuf, PathBuf) {
+    let mut config_file = conclave_common::default_config_directory()
+        .expect("Unable to determine default config directory");
+    let mut database_file = config_file.clone();
+    config_file.push(DEFAULT_SERVER_CONFIG);
+    database_file.push(DEFAULT_DATABASE);
+    (config_file, database_file)
+}
 
 /// Config file
 #[derive(Serialize, Deserialize)]

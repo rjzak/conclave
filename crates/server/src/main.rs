@@ -10,8 +10,7 @@
 #![deny(clippy::pedantic)]
 #![forbid(unsafe_code)]
 
-use conclave_common::default_config_directory;
-use conclave_server::{DEFAULT_DATABASE, ServerConfig, State};
+use conclave_server::{ServerConfig, State, default_config_paths};
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
@@ -48,8 +47,8 @@ impl Default for Args {
 #[derive(Parser, Debug)]
 struct Admin {
     /// Database file path
-    #[arg(short, long, default_value = DEFAULT_DATABASE)]
-    config: PathBuf,
+    #[arg(short, long, value_hint = ValueHint::FilePath, default_value = default_config_paths().1.into_os_string())]
+    db: PathBuf,
 
     /// Admin action
     #[clap(subcommand)]
@@ -66,19 +65,19 @@ enum AdminActions {
 #[derive(Parser, Debug, Default)]
 struct Run {
     /// Database file path
-    #[arg(short, long, value_hint = ValueHint::FilePath)]
-    database: Option<PathBuf>,
+    #[arg(short, long, value_hint = ValueHint::FilePath, default_value = default_config_paths().1.into_os_string())]
+    database: PathBuf,
 
     /// Config file path
-    #[arg(short, long, value_hint = ValueHint::FilePath)]
-    config: Option<PathBuf>,
+    #[arg(short, long, value_hint = ValueHint::FilePath, default_value = default_config_paths().0.into_os_string())]
+    config: PathBuf,
 }
 
 async fn common_main(args: Args) -> Result<State> {
     let run = match args {
         Args::Admin(admin) => {
             // The IP, ports, and mdns options don't matter as we won't start the server.
-            let state = State::load(IpAddr::V4(Ipv4Addr::LOCALHOST), 9998, false, &admin.config)?;
+            let state = State::load(IpAddr::V4(Ipv4Addr::LOCALHOST), 9998, false, &admin.db)?;
             match &admin.action {
                 AdminActions::ResetAdminPassword => {
                     let password = Password::new()
@@ -93,46 +92,28 @@ async fn common_main(args: Args) -> Result<State> {
         Args::Run(run) => run,
     };
 
-    let (state, share) = if let Some(config_file) = &run.config
-        && let Some(database_path) = run.database
-    {
-        let config = ServerConfig::load(config_file)?;
-        (
-            State::load(config.ip, config.port, config.mdns, database_path)?,
-            config.share,
-        )
-    } else if run.config.is_none() && run.database.is_none() {
-        let mut config_file =
-            default_config_directory().expect("Unable to determine default config directory");
-        let mut database_file = config_file.clone();
-        config_file.push("server.toml");
-        database_file.push("server.db");
-        let config = ServerConfig::load_or_save(config_file)?;
-        let state = if database_file.exists() {
-            State::load(config.ip, config.port, config.mdns, database_file)?
-        } else {
-            let (state, mut password) = State::new(
-                "Conclave".into(),
-                "Conclave server".into(),
-                config.ip,
-                config.domain,
-                config.port,
-                config.mdns,
-                database_file,
-            )?;
-            println!(
-                "Admin password: {}\nTake note, as this will not appear again.",
-                password.as_str()
-            );
-            password.zeroize();
-            state
-        };
-        (state, config.share)
+    let config = ServerConfig::load_or_save(&run.config)?;
+    let state = if run.database.exists() {
+        State::load(config.ip, config.port, config.mdns, &run.database)?
     } else {
-        anyhow::bail!("config and database must both be provided or both not provided");
+        let (state, mut password) = State::new(
+            "Conclave".into(),
+            "Conclave server".into(),
+            config.ip,
+            config.domain,
+            config.port,
+            config.mdns,
+            &run.database,
+        )?;
+        println!(
+            "Admin password: {}\nTake note, as this will not appear again.",
+            password.as_str()
+        );
+        password.zeroize();
+        state
     };
 
-    Ok(state.with_share_directory(share))
+    Ok(state.with_share_directory(config.share))
 }
 
 #[cfg(not(feature = "gui"))]
