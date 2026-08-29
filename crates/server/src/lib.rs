@@ -37,7 +37,6 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, AtomicU32, AtomicU64, 
 use std::sync::{Arc, LazyLock};
 
 use anyhow::{Result, anyhow, bail, ensure};
-use argon2::password_hash::{SaltString, rand_core::OsRng};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use async_sqlite::rusqlite::fallible_iterator::FallibleIterator;
 use async_sqlite::rusqlite::{Batch, Connection, OptionalExtension, params};
@@ -4156,10 +4155,8 @@ fn color_from_db(value: i64) -> [u8; 3] {
 #[inline]
 #[track_caller]
 fn hash_password(password: &str) -> String {
-    let salt = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::default();
-    argon2
-        .hash_password(password.as_bytes(), &salt)
+    Argon2::default()
+        .hash_password(password.as_bytes())
         .unwrap()
         .to_string()
 }

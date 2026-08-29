@@ -12,7 +12,7 @@ conclave-tracker = { path = "crates/tracker", version = "0.0", default-features 
 # External
 anyhow = { version = "1.0", default-features = false }
 arboard = { version = "3.6.1", default-features = false }
-argon2 = { version = "0.5.3", default-features = false }
+argon2 = { version = "0.6.0", default-features = false }
 async-sqlite = { version = "0.6.0", default-features = false }
 base64 = { version = "0.23.1", default-features = false }
 chacha20poly1305 = { version = "0.11.0", default-features = false }

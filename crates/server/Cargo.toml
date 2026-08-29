@@ -20,7 +20,7 @@ conclave-common = { workspace = true }
 
 # External
 anyhow = { workspace = true, features = ["std"] }
-argon2 = { workspace = true, features = ["alloc", "password-hash", "std", "zeroize"] }
+argon2 = { workspace = true, features = ["alloc", "getrandom", "password-hash", "zeroize"] }
 async-sqlite = { workspace = true, features = ["bundled", "chrono", "fallible_uint"] }
 base64 = { workspace = true, features = ["alloc"] }
 chrono = { workspace = true, features = ["clock", "std"] }
