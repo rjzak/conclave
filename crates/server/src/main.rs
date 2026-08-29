@@ -62,7 +62,7 @@ enum AdminActions {
 }
 
 /// Get a file path and parse as configuration
-#[derive(Parser, Debug, Default)]
+#[derive(Parser, Debug)]
 struct Run {
     /// Database file path
     #[arg(short, long, value_hint = ValueHint::FilePath, default_value = default_config_paths().1.into_os_string())]
@@ -71,6 +71,13 @@ struct Run {
     /// Config file path
     #[arg(short, long, value_hint = ValueHint::FilePath, default_value = default_config_paths().0.into_os_string())]
     config: PathBuf,
+}
+
+impl Default for Run {
+    fn default() -> Self {
+        let (config, database) = default_config_paths();
+        Self { database, config }
+    }
 }
 
 async fn common_main(args: Args) -> Result<State> {
