@@ -97,7 +97,9 @@ jobs:
           egress-policy: audit
           disable-sudo: true
       - name: Update Rust
-        run: rustup update
+        run: |
+          rustup update
+          rustup target install x86_64-apple-darwin
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install cargo audit & auditable
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
@@ -106,9 +108,13 @@ jobs:
       - name: Build w/ GUI
         run: |
           cargo auditable build --workspace --release --features=gui
+          cargo auditable build --workspace --release --features=gui --target=x86_64-apple-darwin
           mv target/release/conclave-tracker target/release/conclave-tracker-darwin-gui-arm64
           mv target/release/conclave-server target/release/conclave-server-darwin-gui-arm64
           mv target/release/conclave-client target/release/conclave-client-darwin-arm64
+          mv target/x86_64-apple-darwin/release/conclave-tracker target/x86_64-apple-darwin/release/conclave-tracker-darwin-gui-x86_64
+          mv target/x86_64-apple-darwin/release/conclave-server target/x86_64-apple-darwin/release/conclave-server-darwin-gui-x86_64
+          mv target/x86_64-apple-darwin/release/conclave-client target/x86_64-apple-darwin/release/conclave-client-darwin-x86_64
       - name: Upload tracker
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -130,11 +136,35 @@ jobs:
           path: target/release/conclave-client-darwin-arm64
           if-no-files-found: error
           retention-days: 5
+      - name: Upload tracker x86_64
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-tracker-darwin-gui-x86_64
+          path: target/x86_64-apple-darwin/release/conclave-tracker-darwin-gui-x86_64
+          if-no-files-found: error
+          retention-days: 5
+      - name: Upload server x86_64
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-server-darwin-gui-x86_64
+          path: target/x86_64-apple-darwin/release/conclave-server-darwin-gui-x86_64
+          if-no-files-found: error
+          retention-days: 5
+      - name: Upload client x86_64
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-client-darwin-x86_64
+          path: target/x86_64-apple-darwin/release/conclave-client-darwin-x86_64
+          if-no-files-found: error
+          retention-days: 5
       - name: Build sans GUI
         run: |
           cargo auditable build --workspace --release
+          cargo auditable build --workspace --release --target=x86_64-apple-darwin
           mv target/release/conclave-tracker target/release/conclave-tracker-darwin-arm64
           mv target/release/conclave-server target/release/conclave-server-darwin-arm64
+          mv target/x86_64-apple-darwin/release/conclave-tracker target/x86_64-apple-darwin/release/conclave-tracker-darwin-x86_64
+          mv target/x86_64-apple-darwin/release/conclave-server target/x86_64-apple-darwin/release/conclave-server-darwin-x86_64
       - name: Upload tracker
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -147,6 +177,20 @@ jobs:
         with:
           name: conclave-server-darwin-arm64
           path: target/release/conclave-server-darwin-arm64
+          if-no-files-found: error
+          retention-days: 5
+      - name: Upload tracker x86_64
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-tracker-darwin-x86_64
+          path: target/x86_64-apple-darwin/release/conclave-tracker-darwin-x86_64
+          if-no-files-found: error
+          retention-days: 5
+      - name: Upload server x86_64
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-server-darwin-x86_64
+          path: target/x86_64-apple-darwin/release/conclave-server-darwin-x86_64
           if-no-files-found: error
           retention-days: 5
 
