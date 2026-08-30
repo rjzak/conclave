@@ -48,3 +48,8 @@ wgpu = { workspace = true, features = ["dx12"] }
 
 [build-dependencies]
 chrono = { workspace = true, features = ["now"] }
+winresource = { workspace = true, features = ["toml"] }
+
+[package.metadata.winresource]
+OriginalFilename = "CONCLAVE-CLIENT.EXE"
+LegalCopyright = "Copyright © 2026, Conclave Developers"

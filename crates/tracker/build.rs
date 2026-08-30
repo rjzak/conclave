@@ -3,6 +3,12 @@
 use chrono::Utc;
 
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "windows" {
+        let mut res = winresource::WindowsResource::new();
+        res.set_language(0x0009);
+        res.compile().unwrap();
+    }
+
     // Manually get Git information
     // Adapted from https://github.com/ratatui/async-template/blob/main/ratatui-counter/build.rs
 

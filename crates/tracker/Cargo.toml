@@ -35,6 +35,7 @@ tempdir = { workspace = true }
 
 [build-dependencies]
 chrono = { workspace = true, features = ["now"] }
+winresource = { workspace = true, features = ["toml"] }
 
 [package.metadata.deb]
 assets = [
@@ -49,3 +50,7 @@ maintainer-scripts = "debian/scripts"
 priority = "optional"
 section = "network"
 systemd-units = { enable = false }
+
+[package.metadata.winresource]
+OriginalFilename = "CONCLAVE-TRACKER.EXE"
+LegalCopyright = "Copyright © 2026, Conclave Developers"
