@@ -1,0 +1,15 @@
+conclave-server (0.0.2-1) unreleased; urgency=low
+
+  * Configuration file loads from the user's home directory or specified on the CLI.
+  * Listening IP, port, and directory for shared files are in a config file only.
+  * Default server port decision was been made: 9123.
+  * Minor yet breaking protocol adjustments.
+  * Dependency updates.
+
+ -- Richard Zak <richard.j.zak@gmail.com>  Sun, 30 Aug 2026 15:19:00 -0400
+
+conclave-server (0.0.1-1) unstable; urgency=medium
+
+  * Initial alpha release. See the Github project page for details.
+
+ -- Richard Zak <richard.j.zak@gmail.com>  Sun, 26 Jul 2026 15:23:00 -0400

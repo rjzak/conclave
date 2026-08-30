@@ -58,3 +58,17 @@ chrono = { workspace = true, features = ["now"] }
 [dev-dependencies]
 conclave-tracker = { workspace = true }
 tempdir = { workspace = true }
+
+[package.metadata.deb]
+assets = [
+    ["target/release/conclave-server", "usr/sbin/conclave-server", "755"],
+    ["README.md", "usr/share/doc/conclave-server/README", "644"],
+]
+changelog = "debian/changelog"
+copyright = "2026, Conclave Developers"
+depends = "$auto"
+extended-description = ""
+maintainer-scripts = "debian/scripts"
+priority = "optional"
+section = "network"
+systemd-units = { enable = false }

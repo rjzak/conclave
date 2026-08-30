@@ -1,0 +1,16 @@
+[Unit]
+Description=Conclave Server
+Wants=network-online.target
+After=network-online.target nss-lookup.target
+
+[Service]
+User=ccsd
+Group=ccsd
+Type=exec
+Restart=always
+RuntimeMaxSec=1d
+StandardOutput=journal
+ExecStart=/usr/sbin/conclave-server
+
+[Install]
+WantedBy=multi-user.target

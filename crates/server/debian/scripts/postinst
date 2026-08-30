@@ -1,0 +1,22 @@
+#!/bin/sh
+
+set -e
+
+# Postinstall script for Conclave Tracker, based on Postgres' script.
+
+# Add the user if it doesn't exist.
+if ! getent passwd mdbd > /dev/null; then
+    adduser --system --home /var/lib/conclave \
+        --shell /bin/bash --group --gecos "Conclave Services" ccsd
+fi
+
+# if the user was created manually, make sure the group is there as well
+if ! getent group ccsd > /dev/null; then
+    addgroup --system ccsd
+fi
+# make sure ccsd is in the ccsd group
+if ! id -Gn ccsd | grep -qw ccsd; then
+    adduser ccsd ccsd
+fi
+
+#DEBHELPER#
