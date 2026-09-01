@@ -36,9 +36,13 @@ const DEFAULT_TRACKER_FILE: &str = "conclave-tracker.toml";
 ///
 /// # Panics
 ///
-/// Panics if the home directory can't be created in the user's home directory.
+/// Panics if the config directory can't be created in the user's home directory.
 #[must_use]
 pub fn default_config_path() -> PathBuf {
+    #[cfg(not(feature = "gui"))]
+    let mut config_file = conclave_common::system_config_directory()
+        .unwrap_or_else(conclave_common::default_config_directory);
+    #[cfg(feature = "gui")]
     let mut config_file = conclave_common::default_config_directory();
     config_file.push(DEFAULT_TRACKER_FILE);
     config_file

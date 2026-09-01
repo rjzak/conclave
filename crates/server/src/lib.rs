@@ -68,9 +68,13 @@ pub static VERSION: LazyLock<Version> =
 ///
 /// # Panics
 ///
-/// Panics if the home directory can't be created in the user's home directory.
+/// Panics if the config directory can't be created in the user's home directory.
 #[must_use]
 pub fn default_config_paths() -> (PathBuf, PathBuf) {
+    #[cfg(not(feature = "gui"))]
+    let mut config_file = conclave_common::system_config_directory()
+        .unwrap_or_else(conclave_common::default_config_directory);
+    #[cfg(feature = "gui")]
     let mut config_file = conclave_common::default_config_directory();
     let mut database_file = config_file.clone();
     config_file.push(DEFAULT_SERVER_CONFIG);

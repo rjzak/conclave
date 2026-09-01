@@ -75,6 +75,42 @@ pub fn init_tracing() {
     TRACING.call_once(tracing_subscriber::fmt::init);
 }
 
+/// Operating system specific, system-wide configuration directory, if it exists:
+///
+/// * FreeBSD: `/usr/local/etc/conclave`
+/// * macOS: `/Library/Preferences/Conclave`
+/// * Other Unix flavours: `/etc/conclave`
+///
+/// Returns [`None`] if no such directory exists, or on platforms without one. Intended for
+/// daemons (the server and the tracker); the client always uses [`default_config_directory`].
+#[must_use]
+pub fn system_config_directory() -> Option<PathBuf> {
+    #[cfg(target_family = "unix")]
+    {
+        use std::path::Path;
+
+        #[cfg(target_os = "freebsd")]
+        {
+            let config_path = Path::new("/usr/local/etc/conclave/");
+            if config_path.exists() {
+                return Some(config_path.to_path_buf());
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let config_path = Path::new("/Library/Preferences/Conclave/");
+            if config_path.exists() {
+                return Some(config_path.to_path_buf());
+            }
+        }
+        let config_path = Path::new("/etc/conclave/");
+        if config_path.exists() {
+            return Some(config_path.to_path_buf());
+        }
+    }
+    None
+}
+
 /// Get a path for storing various config files for Conclave in this order:
 ///
 /// 1. User's home directory: `$HOME/.config/conclave/`, `%USERPROFILE%\AppData\Local\Conclave` on Windows, or
@@ -92,11 +128,11 @@ pub fn init_tracing() {
 pub fn default_config_directory() -> PathBuf {
     #[cfg(target_os = "haiku")]
     {
-        use std::str::FromStr;
+        use std::path::Path;
 
-        let path = PathBuf::from_str("/boot/home/config/settings/Conclave").unwrap();
+        let path = Path::new("/boot/home/config/settings/Conclave");
         if !path.exists() {
-            std::fs::create_dir_all(&path)
+            std::fs::create_dir_all(path)
                 .map_err(|e| {
                     panic!(
                         "Error creating Conclave's config directory {}: {e}",
@@ -105,7 +141,7 @@ pub fn default_config_directory() -> PathBuf {
                 })
                 .unwrap();
         }
-        return path;
+        return path.to_path_buf();
     }
 
     #[cfg(not(target_os = "haiku"))]
