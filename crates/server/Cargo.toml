@@ -63,9 +63,11 @@ tempdir = { workspace = true }
 [package.metadata.deb]
 assets = [
     ["target/release/conclave-server", "usr/sbin/conclave-server", "755"],
+    ["server.toml", "etc/conclave/server.toml", "600"],
     ["README.md", "usr/share/doc/conclave-server/README", "644"],
 ]
 changelog = "debian/changelog"
+conf-files = ["/etc/conclave/server.toml", "/etc/conclave/server.db"]
 copyright = "2026, Conclave Developers"
 depends = "$auto"
 extended-description = ""

@@ -30,7 +30,7 @@ use tokio::sync::watch;
 pub static VERSION: LazyLock<Version> =
     LazyLock::new(|| Version::parse(env!("CONCLAVE_VERSION")).unwrap());
 
-const DEFAULT_TRACKER_FILE: &str = "conclave-tracker.toml";
+const DEFAULT_TRACKER_FILE: &str = "tracker.toml";
 
 /// Find the tracker config file from the common OS-specific Conclave config directory
 ///

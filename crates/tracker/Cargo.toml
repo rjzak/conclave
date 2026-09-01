@@ -40,9 +40,11 @@ winresource = { workspace = true, features = ["toml"] }
 [package.metadata.deb]
 assets = [
     ["target/release/conclave-tracker", "usr/sbin/conclave-tracker", "755"],
+    ["tracker.toml", "etc/conclave/tracker.toml", "600"],
     ["README.md", "usr/share/doc/conclave-tracker/README", "644"],
 ]
 changelog = "debian/changelog"
+conf-files = ["/etc/conclave/tracker.toml"]
 copyright = "2026, Conclave Developers"
 depends = "$auto"
 extended-description = ""
