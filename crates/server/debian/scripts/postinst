@@ -22,6 +22,9 @@ fi
 # Generate the default config and empty database
 /usr/sbin/conclave-server run -d /etc/conclave/server.db -c /etc/conclave/server.toml --gen-config
 
+chown ccsd:ccsd /etc/conclave
+chmod 0770 /etc/conclave
+chmod 0600 /etc/conclave/server.db /etc/conclave/server.toml
 chown ccsd:ccsd /etc/conclave/server.db /etc/conclave/server.toml
 
 #DEBHELPER#

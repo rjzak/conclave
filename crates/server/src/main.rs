@@ -108,7 +108,11 @@ async fn common_main(args: Args) -> Result<State> {
 
     let config = ServerConfig::load_or_save(&run.config)?;
     let state = if run.database.exists() {
-        State::load(config.ip, config.port, config.mdns, &run.database)?
+        let s = State::load(config.ip, config.port, config.mdns, &run.database)?;
+        if run.gen_config {
+            std::process::exit(0);
+        }
+        s
     } else {
         let (state, mut password) = State::new(
             "Conclave".into(),
