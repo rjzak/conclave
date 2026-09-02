@@ -34,12 +34,18 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 #v1
+      - name: Install musl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl musl-dev musl-tools
       - name: Setup Rust toolchain
-        run: rustup update
+        run: |
+          rustup update
+          rustup target add ${{ matrix.platform.target }}-unknown-linux-musl
       - name: Install cargo audit & auditable
         uses: taiki-e/install-action@742a3317eac7bd62f91cd888b4eead5e784ba833 # v2.87.1
         with:
-          tool: cargo-audit,cargo-auditable
+          tool: cargo-audit,cargo-auditable,cargo-deb
       - name: Build w/ GUI
         run: |
           cargo auditable build --workspace --release --features=gui
@@ -69,21 +75,30 @@ jobs:
           retention-days: 5
       - name: Build sans GUI
         run: |
-          cargo auditable build --workspace --release
-          mv target/release/conclave-tracker target/release/conclave-tracker-linux-${{ matrix.platform.target }}
-          mv target/release/conclave-server target/release/conclave-server-linux-${{ matrix.platform.target }}
+          cargo auditable deb -p conclave-server --target=${{ matrix.platform.target }}-unknown-linux-musl
+          cargo auditable deb -p conclave-tracker --target=${{ matrix.platform.target }}-unknown-linux-musl
+          mv target/${{ matrix.platform.target }}-unknown-linux-musl/release/conclave-tracker target/${{ matrix.platform.target }}-unknown-linux-musl/release/conclave-tracker-linux-${{ matrix.platform.target }}
+          mv target/${{ matrix.platform.target }}-unknown-linux-musl/release/conclave-server target/${{ matrix.platform.target }}-unknown-linux-musl/release/conclave-server-linux-${{ matrix.platform.target }}
       - name: Upload tracker
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: conclave-tracker-linux-${{ matrix.platform.target }}
-          path: target/release/conclave-tracker-linux-${{ matrix.platform.target }}
+          path: target/${{ matrix.platform.target }}-unknown-linux-musl/release/conclave-tracker-linux-${{ matrix.platform.target }}
           if-no-files-found: error
           retention-days: 5
       - name: Upload server
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: conclave-server-linux-${{ matrix.platform.target }}
-          path: target/release/conclave-server-linux-${{ matrix.platform.target }}
+          path: target/${{ matrix.platform.target }}-unknown-linux-musl/release/conclave-server-linux-${{ matrix.platform.target }}
+          if-no-files-found: error
+          retention-days: 5
+      - name: Upload debs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conclave-server-debian-${{ matrix.platform.target }}
+          path: |
+            target/${{ matrix.platform.target }}-unknown-linux-musl/debian/*.deb
           if-no-files-found: error
           retention-days: 5
 
