@@ -49,20 +49,61 @@ pub fn default_config_path() -> PathBuf {
 }
 
 /// Config file
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(from = "TrackerConfigSerde", into = "TrackerConfigSerde")]
 pub struct TrackerConfig {
     /// Listening IP address
-    #[serde(default = "default_ip")]
     pub ip: IpAddr,
 
     /// Listening port
-    #[serde(default = "default_port")]
     pub port: u16,
 
     /// Path to signing keys
-    /// Keys will be generated if missing.
-    #[serde(default)]
+    /// Keys will be generated if missing. The boolean flags indicates if the keys are new and
+    /// a save is required.
     pub keys: Keys,
+
+    /// If the keys were just generated so the config needs to be saved
+    needs_saving: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct TrackerConfigSerde {
+    #[serde(default = "default_ip")]
+    ip: IpAddr,
+
+    #[serde(default = "default_port")]
+    port: u16,
+
+    #[serde(default)]
+    pub keys: Option<Keys>,
+}
+
+impl From<TrackerConfigSerde> for TrackerConfig {
+    fn from(config: TrackerConfigSerde) -> Self {
+        let (keys, needs_saving) = if let Some(keys) = config.keys {
+            (keys, false)
+        } else {
+            (Keys::default(), true)
+        };
+
+        Self {
+            ip: config.ip,
+            port: config.port,
+            keys,
+            needs_saving,
+        }
+    }
+}
+
+impl From<TrackerConfig> for TrackerConfigSerde {
+    fn from(config: TrackerConfig) -> Self {
+        Self {
+            ip: config.ip,
+            port: config.port,
+            keys: Some(config.keys),
+        }
+    }
 }
 
 #[inline]
@@ -155,7 +196,11 @@ impl TrackerConfig {
     /// Returns an error if the file cannot be written or if the extension doesn't indicate a JSON or TOML format.
     pub fn load_or_save<P: AsRef<Path>>(path: P) -> Result<Self> {
         if path.as_ref().exists() {
-            Self::load(path)
+            let cfg = Self::load(&path)?;
+            if cfg.needs_saving {
+                cfg.save(path)?;
+            }
+            Ok(cfg)
         } else {
             let config = Self::default();
             config.save(path)?;
@@ -170,12 +215,13 @@ impl Default for TrackerConfig {
             ip: default_ip(),
             port: default_port(),
             keys: Keys::default(),
+            needs_saving: true,
         }
     }
 }
 
 /// Tracker keypair
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Keys {
     /// ML-DSA 87 private key, stored as the 32-byte seed it is derived from
     #[serde(
@@ -540,9 +586,36 @@ mod tests {
                 private_key: Keys::default().private_key,
                 public_key: Keys::default().public_key,
             },
+            needs_saving: true,
         };
         config.save(&path).unwrap();
 
         assert!(TrackerConfig::load(&path).is_err());
+    }
+
+    #[test]
+    fn new_config_saved() {
+        let dir = tempdir::TempDir::new("conclave_tracker_keys_config").unwrap();
+        let path = dir.path().join("config.toml");
+
+        // No keys here.
+        let config = TrackerConfigSerde {
+            ip: "127.0.0.1".parse().unwrap(),
+            port: 8888,
+            keys: None,
+        };
+
+        // Converted into a config which needs keys
+        let real_config: TrackerConfig = config.into();
+        real_config.save(&path).unwrap();
+
+        // Load the data back from disk
+        let serde_config: TrackerConfigSerde =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        // The keys exist.
+        assert!(serde_config.keys.is_some());
+        let real_config: TrackerConfig = serde_config.into();
+        assert!(!real_config.needs_saving);
     }
 }
