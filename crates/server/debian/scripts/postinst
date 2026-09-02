@@ -19,4 +19,9 @@ if ! id -Gn ccsd | grep -qw ccsd; then
     adduser ccsd ccsd
 fi
 
+# Generate the default config and empty database
+/usr/sbin/conclave-server run -d /etc/conclave/server.db -c /etc/conclave/server.toml --gen-config
+
+chown ccsd:ccsd /etc/conclave/server.db /etc/conclave/server.toml
+
 #DEBHELPER#

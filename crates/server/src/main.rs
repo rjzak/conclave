@@ -71,12 +71,19 @@ struct Run {
     /// Config file path
     #[arg(short, long, value_hint = ValueHint::FilePath, default_value = default_config_paths().0.into_os_string())]
     config: PathBuf,
+
+    #[arg(long, hide = true, default_value_t = false, action)]
+    gen_config: bool,
 }
 
 impl Default for Run {
     fn default() -> Self {
         let (config, database) = default_config_paths();
-        Self { database, config }
+        Self {
+            database,
+            config,
+            gen_config: false,
+        }
     }
 }
 
@@ -117,6 +124,9 @@ async fn common_main(args: Args) -> Result<State> {
             password.as_str()
         );
         password.zeroize();
+        if run.gen_config {
+            std::process::exit(0);
+        }
         state
     };
 
