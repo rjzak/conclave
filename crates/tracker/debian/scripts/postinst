@@ -19,4 +19,9 @@ if ! id -Gn ccsd | grep -qw ccsd; then
     adduser ccsd ccsd
 fi
 
+# Generate the default config with unique key
+/usr/sbin/conclave-tracker -c /etc/conclave/tracker.toml --gen-config
+
+chown ccsd:ccsd /etc/conclave/tracker.toml
+
 #DEBHELPER#

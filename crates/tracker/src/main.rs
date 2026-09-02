@@ -29,6 +29,9 @@ struct Args {
     /// Path to config
     #[arg(short, long, value_hint = ValueHint::FilePath, default_value = conclave_tracker::default_config_path().into_os_string())]
     config: PathBuf,
+
+    #[arg(long, hide = true, default_value_t = false, action)]
+    gen_config: bool,
 }
 
 #[cfg(not(feature = "gui"))]
@@ -41,8 +44,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .unwrap();
 
     let tracker = conclave_tracker::State::new(config.ip, config.port, config.keys);
-    println!("Listening on {}:{}", config.ip, config.port);
-    tracker.serve().await?;
+    if !args.gen_config {
+        println!("Listening on {}:{}", config.ip, config.port);
+        tracker.serve().await?;
+    }
     Ok(std::process::ExitCode::SUCCESS)
 }
 
@@ -53,6 +58,10 @@ fn main() -> eframe::Result {
     let config = TrackerConfig::load_or_save(&args.config)
         .map_err(|e| panic!("Unable to read {}: {e}", args.config.display()))
         .unwrap();
+
+    if args.gen_config {
+        return Ok(());
+    }
 
     let tracker = conclave_tracker::State::new(config.ip, config.port, config.keys);
     println!("Listening on {}:{}", config.ip, config.port);
