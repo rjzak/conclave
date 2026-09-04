@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Bundle metadata for Conclave.app. `macos/bundle.sh` copies this into
+     Contents/Info.plist and rewrites the version keys from Cargo.toml. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>conclave-client</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.github.rjzak.conclave.client</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Conclave</string>
+	<key>CFBundleDisplayName</key>
+	<string>Conclave</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.0.1</string>
+	<key>CFBundleVersion</key>
+	<string>0.0.1</string>
+	<key>CFBundleIconFile</key>
+	<string>client.icns</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.social-networking</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026, Conclave Developers. Licensed under the Apache License 2.0.</string>
+
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLName</key>
+			<string>Conclave server URL</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>conclave</string>
+			</array>
+		</dict>
+	</array>
+
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Conclave Client discovers local Conclave Servers.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_conclave._tcp</string>
+	</array>
+</dict>
+</plist>
