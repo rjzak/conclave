@@ -50,6 +50,14 @@ async fn main() -> eframe::Result {
     // See `gui::MAIN_WINDOW_SIZE` and `ConclaveGUI::fit_main_window`.
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
+            .with_icon(eframe::egui::IconData {
+                rgba: image::load_from_memory(include_bytes!("../client.png"))
+                    .unwrap()
+                    .to_rgba8()
+                    .to_vec(),
+                width: 182,
+                height: 210,
+            })
             .with_inner_size(gui::MAIN_WINDOW_SIZE)
             .with_resizable(false),
         ..Default::default()

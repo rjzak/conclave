@@ -12,7 +12,7 @@ version.workspace = true
 
 [features]
 default = []
-gui = ["dep:eframe", "dep:wgpu", "dep:tracing-subscriber"]
+gui = ["dep:eframe", "dep:image", "dep:wgpu", "dep:tracing-subscriber"]
 
 [dependencies]
 # Internal
@@ -30,6 +30,7 @@ ed25519-dalek = { workspace = true, features = ["serde"] }
 eframe = { workspace = true, features = ["accesskit", "default_fonts", "wayland", "wgpu", "x11"], optional = true }
 futures = { workspace = true, features = ["executor"] }
 hex = { workspace = true, features = ["alloc", "std"] }
+image = { workspace = true, features = ["png"], optional = true }
 mdns-sd = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive", "std"] }

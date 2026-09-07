@@ -185,6 +185,14 @@ fn main() -> eframe::Result {
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
+            .with_icon(eframe::egui::IconData {
+                rgba: image::load_from_memory(include_bytes!("../server.png"))
+                    .unwrap()
+                    .to_rgba8()
+                    .to_vec(),
+                width: 182,
+                height: 221,
+            })
             .with_inner_size([240.0, 97.0])
             .with_resizable(false),
         ..Default::default()
