@@ -140,7 +140,10 @@ async fn common_main(args: Args) -> Result<State> {
 #[cfg(not(feature = "gui"))]
 #[tokio::main]
 async fn main() -> Result<std::process::ExitCode> {
-    conclave_common::init_tracing();
+    conclave_common::init_tracing_with_system_logger(
+        #[cfg(target_family = "windows")]
+        "Conclave Server",
+    );
     let args = if std::env::args().collect::<Vec<String>>().len() > 1 {
         Args::parse()
     } else {

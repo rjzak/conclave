@@ -37,7 +37,10 @@ struct Args {
 #[cfg(not(feature = "gui"))]
 #[tokio::main]
 async fn main() -> anyhow::Result<std::process::ExitCode> {
-    conclave_common::init_tracing();
+    conclave_common::init_tracing_with_system_logger(
+        #[cfg(target_family = "windows")]
+        "Conclave Tracker",
+    );
     let args = Args::parse();
     let config = TrackerConfig::load_or_save(&args.config)
         .map_err(|e| panic!("Unable to read {}: {e}", args.config.display()))
@@ -53,6 +56,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
 #[cfg(feature = "gui")]
 fn main() -> eframe::Result {
+    #[cfg(target_family = "windows")]
+    conclave_common::init_tracing_with_system_logger(
+        #[cfg(target_family = "windows")]
+        "Conclave Tracker",
+    );
+    #[cfg(not(target_family = "windows"))]
     conclave_common::init_tracing();
     let args = Args::parse();
     let config = TrackerConfig::load_or_save(&args.config)

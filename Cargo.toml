@@ -42,6 +42,8 @@ tempdir = { version = "0.3.7", default-features = false }
 tokio = { version = "1.53.1", default-features = false }
 toml = { version = "1.1.4", default-features = false }
 tracing = { version = "0.1.44", default-features = false }
+tracing-journald = { version = "0.3.2", default-features = false }
+tracing-layer-win-eventlog = { version = "1.0.1", default-features = false }
 tracing-subscriber = { version = "0.3.23", default-features = false }
 uuid = { version = "1.26.0", default-features = false }
 wgpu = { version = "30", default-features = false } # Needs to be the same version used by egui

@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 use std::path::PathBuf;
+use std::sync::Once;
 
 /// Administrative data structures
 pub mod admin;
@@ -66,13 +67,53 @@ pub const SERVER_DEFAULT_PORT: u16 = 9123;
 /// Default tracker port
 pub const TRACKER_DEFAULT_PORT: u16 = 9321;
 
+static TRACING: Once = Once::new();
+
 /// Initialize tracing
 pub fn init_tracing() {
-    use std::sync::Once;
-
-    // Useful currently for testing
-    static TRACING: Once = Once::new();
     TRACING.call_once(tracing_subscriber::fmt::init);
+}
+
+/// Initialize tracing and use systemd (Linux) or the Windows Event Log
+/// Defaults to the plain log initializer function [`init_tracing`] if the operating system
+/// log initializer fails.
+pub fn init_tracing_with_system_logger(
+    #[cfg(target_family = "windows")] service_name: &'static str,
+) {
+    #[cfg(not(all(target_os = "linux", target_family = "windows")))]
+    init_tracing();
+
+    #[cfg(target_os = "linux")]
+    if let Ok(layer) = tracing_journald::layer() {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        let fmt_layer = tracing_subscriber::fmt::layer();
+        TRACING.call_once(|| {
+            tracing_subscriber::registry()
+                .with(fmt_layer)
+                .with(layer)
+                .init();
+        });
+    } else {
+        init_tracing();
+    }
+
+    #[cfg(target_family = "windows")]
+    if let Ok(eventlog) = tracing_layer_win_eventlog::EventLogLayer::new(service_name) {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        let fmt_layer = tracing_subscriber::fmt::layer();
+        TRACING.call_once(|| {
+            tracing_subscriber::registry()
+                .with(fmt_layer)
+                .with(eventlog)
+                .init();
+        });
+    } else {
+        init_tracing();
+    }
 }
 
 /// Operating system specific, system-wide configuration directory, if it exists:

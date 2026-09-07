@@ -27,6 +27,12 @@ ml-kem = { workspace = true, features = ["alloc", "getrandom", "zeroize"] }
 postcard = { workspace = true, features = ["alloc", "use-std"] }
 zeroize = { workspace = true, features = ["aarch64", "derive", "serde"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+tracing-journald = { workspace = true }
+
+[target.'cfg(target_family = "windows")'.dependencies]
+tracing-layer-win-eventlog = { workspace = true }
+
 [target.'cfg(not(target_os = "haiku"))'.dependencies]
 home = { workspace = true }
 
