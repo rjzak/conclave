@@ -4,7 +4,8 @@ If any vulnerability or security issue is discovered in Conclave, please inform 
 
 Please include:
 * The steps needed to reproduce the vulnerability;
-* The vulnerable version(s), preferably with Git hash (`git log -1`);
+* The vulnerable version(s), preferably with Git hash (`git log -1`) or include the output from running the application
+  with `--version`;
 * and any additional files to reproduce the vulnerability.
 
 Upon receipt, the maintainer will review, respond, and fix the vulnerability in a timely manner.

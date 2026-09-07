@@ -1,4 +1,5 @@
 [![Test](https://github.com/rjzak/conclave/actions/workflows/ci.yml/badge.svg)](https://github.com/rjzak/conclave/actions/workflows/ci.yml)
+[![Release](https://github.com/rjzak/conclave/actions/workflows/release.yml/badge.svg)](https://github.com/rjzak/conclave/actions/workflows/release.yml)
 [![CodeQL](https://github.com/rjzak/conclave/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/rjzak/conclave/actions/workflows/github-code-scanning/codeql)
 ![GitHub License](https://img.shields.io/github/license/rjzak/conclave)
 
@@ -8,9 +9,15 @@ This is a work-in-progress effort to make a modern version of [Carracho](https:/
 
 ### Components
 
-* Client: a client connects to a server, either directly, via local discovery, or via finding it from a tracker.
+* Client: a client connects to a server:
+  * directly,
+  * via DNS [service record](https://www.cloudflare.com/learning/dns/dns-records/dns-srv-record/),
+  * via local discovery ([mDNS](https://en.wikipedia.org/wiki/Multicast_DNS)), or 
+  * via a tracker.
 * Server: a server accepts connections from a client and optionally advertises itself to one or more trackers.
 * Tracker: a tracker receives information from servers and relays it to clients.
+* The tracker and server may be graphical desktop applications (`--features=gui`) which have "gui" in the file name in
+  releases or background system processes (command line).
 
 ### Internal Features
 
@@ -27,9 +34,9 @@ This is a work-in-progress effort to make a modern version of [Carracho](https:/
 
 ### User Features
 
-* A user may connect to the server: directly, via bookmark, via local discovery, via tracker, or via a DNS SRV record.
-* Administration via the client
-* Group chats
+* A user connects to the server in a variety of ways (see above)
+* Server administration via the client if authenticated
+* Ephemeral group chats
 * Direct messages (end-to-end encrypted)
 * File sharing
 * Message boards

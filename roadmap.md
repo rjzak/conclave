@@ -17,15 +17,27 @@
 ### Phase 2
 - [X] Add forums.
 - [X] Add file sharing and permissions for shared files and filesystem.
-- [ ] Add optional chat and forum content expiration.
+- [ ] Add support for `conclave://` links.
+- [ ] Add optional forum content expiration.
 
 ### Phase 3
 - [ ] Add rich text support, possibly including graphics.
+- [ ] Add reactions to:
+  - [ ] forums
+  - [ ] chat
+  - [ ] determine the type of reaction: emoji, custom image, something else?
 
 ## Possible Future Features
 - [ ] Web-based client, possibly using WebAssembly.
 - [ ] Mobile client.
-- [ ] Audio/Video sharing. Streaming. Video chat.
-- [ ] End-to-end encryption.
+- [ ] Audio/Video sharing.
+  - [ ] Streaming.
+  - [ ] Audio chat.
+  - [ ] Video chat.
+- [ ] End-to-end encryption for:
+  - [X] direct messages
+  - [ ] chat
+  - [ ] forums
+  - [ ] everything else.
 - [ ] Plugin systems for servers, clients; possibly using WebAssembly.
-- [ ] Python module for the client, possibly useful for bots or automation.
+- [ ] Python client module for bots and other automation.

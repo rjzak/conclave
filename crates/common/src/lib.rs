@@ -59,6 +59,7 @@ pub const MDNS_KEY: &str = "key";
 pub const MDNS_VERSION: &str = "version";
 
 /// DNS SRV record if just given a domain name without a port
+/// `https://www.cloudflare.com/learning/dns/dns-records/dns-srv-record/`
 pub const DNS_SRV_RECORD: &str = "_conclave._tcp.conclave-srv.";
 
 /// Default server port
