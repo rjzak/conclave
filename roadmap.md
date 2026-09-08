@@ -19,6 +19,7 @@
 - [X] Add file sharing and permissions for shared files and filesystem.
 - [ ] Add support for `conclave://` links.
 - [ ] Add optional forum content expiration.
+- [ ] Add forum search functionality.
 
 ### Phase 3
 - [ ] Add rich text support, possibly including graphics.
