@@ -101,6 +101,11 @@ version=$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version *= *"\([^"]*\)".*/\
 	exit 1
 }
 
+[ -f "$HOME/.cargo/bin/cargo-auditable" ] || {
+	echo "bundle.sh: cargo-auditable is missing, please install with \"cargo install cargo-auditable\"" >&2
+	exit 1
+}
+
 # Only the server and tracker gate their GUI behind a feature; the client is
 # always graphical.
 features_for() {
@@ -138,12 +143,12 @@ for crate in $crates; do
 		if [ -n "$targets" ]; then
 			for triple in $targets; do
 				# shellcheck disable=SC2086
-				(cd "$repo_root" && cargo build -p "$package" --release \
+				(cd "$repo_root" && cargo auditable build -p "$package" --release \
 					--target="$triple" $features)
 			done
 		else
 			# shellcheck disable=SC2086
-			(cd "$repo_root" && cargo build -p "$package" --release $features)
+			(cd "$repo_root" && cargo auditable build -p "$package" --release $features)
 		fi
 	fi
 
