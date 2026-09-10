@@ -32,7 +32,6 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026, Conclave Developers. Licensed under the Apache License 2.0.</string>
-
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Conclave Server advertises itself to clients on your local network.</string>
 	<key>NSBonjourServices</key>
