@@ -3895,7 +3895,27 @@ impl State {
     fn mdns_service_info(&self) -> mdns_sd::Result<ServiceInfo> {
         use base64::Engine;
 
-        let host_name = format!("{}.local.", self.ip);
+        let host_name = if self.ip.is_unspecified() {
+            let networks = sysinfo::Networks::new_with_refreshed_list();
+            let mut found_ip = None;
+            'outer: for (_, network) in &networks {
+                if network.total_packets_received() > 0 {
+                    for ip_addr in network.ip_networks() {
+                        if !ip_addr.addr.is_loopback() && !ip_addr.addr.is_multicast() {
+                            found_ip = Some(ip_addr);
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            if let Some(found_ip) = found_ip {
+                format!("{found_ip}.local.")
+            } else {
+                return Err(mdns_sd::Error::Msg("Failed to find an IP address".into()));
+            }
+        } else {
+            format!("{}.local.", self.ip)
+        };
         let key_encoded = base64::engine::general_purpose::STANDARD.encode(self.public_key);
         let server_name = self.server_name();
         let properties = [
@@ -3916,9 +3936,7 @@ impl State {
             self.port,
             &properties[..],
         )?;
-        if self.ip.is_unspecified() {
-            service = service.enable_addr_auto();
-        }
+        service = service.enable_addr_auto();
 
         Ok(service)
     }
