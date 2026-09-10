@@ -1,14 +1,20 @@
 conclave-tracker (0.0.2-1) unreleased; urgency=low
 
+  * Nothing yet
+
+ -- Richard Zak <richard.j.zak@gmail.com>  Thu, 10 Sept 2026 00:00:00 -0400
+
+conclave-tracker (0.0.1-1) unstable; urgency=low
+
   * Configuration file loads from the user's home directory or specified on the CLI.
   * Listening IP & port are in a config file only.
   * Default tracker port decision was been made: 9321.
   * Minor yet breaking protocol adjustment.
   * Dependency updates.
 
- -- Richard Zak <richard.j.zak@gmail.com>  Sun, 30 Aug 2026 15:19:00 -0400
+ -- Richard Zak <richard.j.zak@gmail.com>  Wed, 09 Sept 2026 23:00:00 -0400
 
-conclave-tracker (0.0.1-1) unstable; urgency=medium
+conclave-tracker (0.0.0-1) unstable; urgency=medium
 
   * Initial alpha release. See the Github project page for details.
 
