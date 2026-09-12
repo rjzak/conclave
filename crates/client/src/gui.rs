@@ -110,6 +110,36 @@ fn format_uptime(d: chrono::Duration) -> String {
     }
 }
 
+/// A discovered server's name, prefixed with a padlock when the server doesn't allow
+/// anonymous guests, so the account requirement is visible before connecting.
+#[inline]
+fn server_list_name(name: &str, anonymous_allowed: bool) -> String {
+    if anonymous_allowed {
+        name.to_string()
+    } else {
+        format!("{LOCKED_SERVER_PREFIX}{name}")
+    }
+}
+
+/// The connected-user count for a server listing: `connected / max` when the
+/// server caps concurrent connections, and the bare count when it does not
+/// (`u16::MAX` is the advertisement's "no limit" sentinel).
+#[inline]
+fn server_list_users(connected: u32, max_users: u16) -> String {
+    if max_users == u16::MAX {
+        connected.to_string()
+    } else {
+        format!("{connected} / {max_users}")
+    }
+}
+
+/// Hover text explaining the padlock shown by [`server_list_name`].
+const LOCKED_SERVER_HINT: &str = "This server does not allow anonymous users — a username and \
+     password are required.";
+
+/// Padlock shown before the name of a server that requires an account.
+const LOCKED_SERVER_PREFIX: &str = "🔒 ";
+
 /// Whether a user counts as idle (inactive for longer than the timeout), in
 /// which case their name is shown dulled.
 #[inline]
@@ -1922,7 +1952,16 @@ impl ConclaveGUI {
                                 for server in servers.iter() {
                                     ui.group(|ui| {
                                         ui.horizontal(|ui| {
-                                            ui.label(egui::RichText::new(&server.name).strong());
+                                            let name = ui.label(
+                                                egui::RichText::new(server_list_name(
+                                                    &server.name,
+                                                    server.anonymous_allowed,
+                                                ))
+                                                .strong(),
+                                            );
+                                            if !server.anonymous_allowed {
+                                                name.on_hover_text(LOCKED_SERVER_HINT);
+                                            }
                                             ui.with_layout(
                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
@@ -2791,16 +2830,22 @@ impl ConclaveGUI {
                                         ui.label(egui::RichText::new("Version").strong());
                                         ui.label(egui::RichText::new("Address").strong());
                                         ui.label(egui::RichText::new("Users").strong());
-                                        ui.label(egui::RichText::new("Guests").strong());
                                         ui.label(egui::RichText::new("Uptime").strong());
                                         ui.label(egui::RichText::new("Description").strong());
                                         ui.label(egui::RichText::new("").strong());
                                         ui.end_row();
 
                                         for server in servers.iter() {
-                                            ui.label(
-                                                egui::RichText::new(&server.name).strong(),
+                                            let name = ui.label(
+                                                egui::RichText::new(server_list_name(
+                                                    &server.name,
+                                                    server.anonymous,
+                                                ))
+                                                .strong(),
                                             );
+                                            if !server.anonymous {
+                                                name.on_hover_text(LOCKED_SERVER_HINT);
+                                            }
                                             ui.label(
                                                 egui::RichText::new(format!(
                                                     "v{}",
@@ -2811,12 +2856,16 @@ impl ConclaveGUI {
                                             ui.label(
                                                 egui::RichText::new(&server.url).monospace(),
                                             );
-                                            ui.label(server.users_connected.to_string());
-                                            ui.label(if server.anonymous {
-                                                "Yes"
-                                            } else {
-                                                "No"
-                                            });
+                                            let users = ui.label(server_list_users(
+                                                server.users_connected,
+                                                server.max_users,
+                                            ));
+                                            if server.max_users != u16::MAX {
+                                                users.on_hover_text(
+                                                    "Connected users out of the server's \
+                                                     maximum.",
+                                                );
+                                            }
                                             ui.label(format_uptime(server.uptime()));
                                             ui.label(&server.description);
                                             if let Some((host, port)) =
@@ -2934,12 +2983,9 @@ impl ConclaveGUI {
                         let credentials_required = !server.anonymous_allowed;
                         if credentials_required {
                             ui.label(
-                                egui::RichText::new(
-                                    "This server does not allow anonymous users — a username and \
-                                     password are required.",
-                                )
-                                .small()
-                                .color(egui::Color32::from_rgb(0xff, 0xa5, 0x00)),
+                                egui::RichText::new(LOCKED_SERVER_HINT)
+                                    .small()
+                                    .color(egui::Color32::from_rgb(0xff, 0xa5, 0x00)),
                             );
                             ui.add_space(4.0);
                         }

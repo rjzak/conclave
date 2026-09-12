@@ -767,6 +767,7 @@ impl State {
             .await?;
         self.max_connections
             .store(max.unwrap_or(u16::MAX), Ordering::Relaxed);
+        self.notify_trackers();
         Ok(())
     }
 
