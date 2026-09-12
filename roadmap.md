@@ -20,6 +20,7 @@
 - [ ] Add support for `conclave://` links.
 - [ ] Add optional forum content expiration.
 - [ ] Add forum search functionality.
+- [ ] Add reactions to forum posts.
 
 ### Phase 3
 - [ ] Add rich text support, possibly including graphics.
@@ -42,3 +43,4 @@
   - [ ] everything else.
 - [ ] Plugin systems for servers, clients; possibly using WebAssembly.
 - [ ] Python client module for bots and other automation.
+- [ ] Reactions to chat messages.

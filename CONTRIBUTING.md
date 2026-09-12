@@ -23,8 +23,8 @@ Contributions welcome!
 * Keep the new PR as a draft until it's ready for review.
 
 ### Testing and Linting
-* Run `cargo test` to ensure all tests pass.
-* Run `cargo clippy` for code quality checks.
+* Run `cargo test --workspace` to ensure all tests pass.
+* Run `cargo clippy --workspace --tests --all-features` for code quality checks.
 
 ### Code Style
-We use the standard Rust code style, so run `cargo fmt` to format your code before committing.
+We use the standard Rust code style, so run `cargo fmt --all` to format your code before committing.
