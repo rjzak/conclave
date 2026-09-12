@@ -1476,6 +1476,21 @@ impl ConclaveConnection {
         .await
     }
 
+    /// (Admin) Set whether anonymous (guest) users may connect to the server.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn admin_set_allow_anonymous(&self, allow: bool) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::AdministrativeRequest(
+                ServerAdminMessagesEncrypted::SetAllowAnonymous(allow),
+            )
+            .to_vec(),
+        )
+        .await
+    }
+
     /// (Admin) Request the list of user accounts; the reply arrives asynchronously
     /// and is available from [`Self::admin_users`].
     ///

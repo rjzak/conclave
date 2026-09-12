@@ -46,6 +46,22 @@ pub fn ui(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str) {
         });
     }
 
+    // ── Access ────────────────────────────────────────────────────────────
+    // Applies immediately; the server pushes updated info to every client.
+    ui.separator();
+    ui.label(egui::RichText::new("Access").strong());
+    let mut allow_anonymous = info.anonymous;
+    if ui
+        .checkbox(&mut allow_anonymous, "Allow anonymous users")
+        .on_hover_text("Let users connect as guests, without an account on this server")
+        .changed()
+    {
+        let conn = conn.clone();
+        tokio::spawn(async move {
+            let _ = conn.admin_set_allow_anonymous(allow_anonymous).await;
+        });
+    }
+
     // Read-only file-sharing status.
     ui.separator();
     ui.label(egui::RichText::new("File sharing").strong());

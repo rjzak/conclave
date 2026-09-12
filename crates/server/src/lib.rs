@@ -828,6 +828,7 @@ impl State {
             })
             .await?;
         self.allow_anonymous.store(anon, Ordering::Relaxed);
+        self.broadcast_server_info().await;
         self.notify_trackers();
         Ok(())
     }
@@ -2539,6 +2540,9 @@ impl State {
             }
             ServerAdminMessagesEncrypted::SetServerDescription(description) => {
                 self.set_server_description(description).await.map(|()| ok)
+            }
+            ServerAdminMessagesEncrypted::SetAllowAnonymous(allow) => {
+                self.anonymous_clients_enabled(allow).await.map(|()| ok)
             }
             ServerAdminMessagesEncrypted::ListUsers => self
                 .admin_list_users()
