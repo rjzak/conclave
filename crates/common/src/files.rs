@@ -3,7 +3,7 @@
 //! Shared data structures for the file-sharing feature.
 //!
 //! A server may optionally expose a single directory tree. Access is controlled
-//! per directory by a hidden [`ACL_FILENAME`] file that grants permissions to
+//! per directory by a hidden `ACL_FILENAME` file that grants permissions to
 //! groups (by name) and, explicitly, to unauthenticated guests. Permissions are
 //! inherited from the nearest ancestor directory that has an ACL; the root
 //! denies everything unless it has an ACL of its own.

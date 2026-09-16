@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The per-server administration window, split into one tab per area of
-//! administration. [`admin_ui`] renders the tab bar and dispatches to the
+//! administration. This `admin_ui` renders the tab bar and dispatches to the
 //! relevant tab module; each submodule owns the UI and actions for its area so
 //! new areas can be added without growing a single giant function or file.
 

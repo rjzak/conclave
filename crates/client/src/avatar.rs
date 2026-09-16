@@ -2,8 +2,8 @@
 
 //! Avatar image handling.
 //!
-//! Avatars are stored in the config as a canonical [`AVATAR_SIZE`]×[`AVATAR_SIZE`]
-//! PNG. When connecting, a small [`DISPLAY_SIZE`]×[`DISPLAY_SIZE`] thumbnail is
+//! Avatars are stored in the config as a canonical [`crate::avatar::AVATAR_SIZE`]×[`crate::avatar::AVATAR_SIZE`]
+//! PNG. When connecting, a small [`crate::avatar::DISPLAY_SIZE`]×[`crate::avatar::DISPLAY_SIZE`] thumbnail is
 //! derived and shared with the server so peers can render it beside the user's
 //! name. This module centralises the decode/resize/encode logic and the base64
 //! (de)serialisation used to embed avatar bytes in the TOML/JSON config.

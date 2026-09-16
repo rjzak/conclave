@@ -17,9 +17,6 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-/// Response to protocol handshake
-pub const RESPONSE: &[u8] = b"Tracker";
-
 /// Tracker information
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub struct Tracker {

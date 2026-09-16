@@ -12,9 +12,6 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-/// Response to protocol handshake
-pub const RESPONSE: &[u8] = b"Server";
-
 /// Protocol for getting the server's public key
 pub mod unencrypted {
     use anyhow::{Result, anyhow};
@@ -297,7 +294,7 @@ pub const MAX_BANNER_BYTES: usize = 512 * 128;
 /// this holds what requires a lookup or elevated privileges.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct UserDetails {
-    /// Connection handle this refers to (matches [`ConnectedUser::connection_id`]).
+    /// Connection handle this refers to (matches [`ConnectedUser::id`]).
     pub connection_id: u16,
 
     /// Groups the user belongs to (empty for unauthenticated guests).

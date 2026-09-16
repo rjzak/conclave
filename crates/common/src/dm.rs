@@ -6,7 +6,7 @@
 //! each converted to its X25519 (Montgomery) form for a static Diffie-Hellman
 //! exchange. Both sides compute the same key from their own private key and the
 //! other's public key, so the relaying server — which never holds a private key
-//! — cannot read the messages. Users can compare the [`fingerprint`] of a peer's
+//! — cannot read the messages. Users can compare the fingerprint of a peer's
 //! key out of band to detect a server substituting its own key.
 
 use anyhow::{Result, anyhow};
