@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! End-to-end encryption for direct messages.
+//! End-to-end encryption for direct messages, and for the files users send each
+//! other alongside them.
 //!
 //! A shared symmetric key is derived from the two users' ed25519 identity keys,
 //! each converted to its X25519 (Montgomery) form for a static Diffie-Hellman
@@ -8,6 +9,10 @@
 //! other's public key, so the relaying server — which never holds a private key
 //! — cannot read the messages. Users can compare the fingerprint of a peer's
 //! key out of band to detect a server substituting its own key.
+//!
+//! A file transfer uses the same key: its name and each of its chunks are
+//! sealed separately, so the server relaying them learns only how large the
+//! file claims to be.
 
 use anyhow::{Result, anyhow};
 use chacha20poly1305::aead::{Aead, Generate};
@@ -22,6 +27,11 @@ const DM_INFO: &[u8] = b"conclave-direct-message";
 
 /// Length of the XChaCha20-Poly1305 nonce prepended to each ciphertext.
 const NONCE_LEN: usize = 24;
+
+/// Bytes [`encrypt`] adds to a plaintext: the prepended nonce and the trailing
+/// authentication tag. Lets a relay bound a ciphertext against the plaintext
+/// size it was promised without being able to read either.
+pub const OVERHEAD: usize = NONCE_LEN + 16;
 
 /// Derive the shared 256-bit key for direct messages between the local user
 /// (holding `my_signing`) and the peer identified by `their_verifying`. Both
@@ -125,6 +135,17 @@ mod tests {
         let sealed = encrypt(&shared_key(&alice_secret, &bob_public), b"secret");
         // Eve derives a different shared key and cannot open the message.
         assert!(decrypt(&shared_key(&eve_secret, &bob_public), &sealed).is_err());
+    }
+
+    #[test]
+    fn overhead_matches_the_ciphertext_expansion() {
+        let (alice_secret, _alice_public) = random_keypair();
+        let (_bob_secret, bob_public) = random_keypair();
+        let key = shared_key(&alice_secret, &bob_public);
+        for len in [0usize, 1, 64, 65536] {
+            let sealed = encrypt(&key, &vec![0u8; len]);
+            assert_eq!(sealed.len(), len + super::OVERHEAD);
+        }
     }
 
     #[test]

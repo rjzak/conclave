@@ -236,10 +236,12 @@ fn limits_editor(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str) {
         .num_columns(2)
         .spacing([8.0, 6.0])
         .show(ui, |ui| {
-            ui.label("Max upload size:");
+            ui.label("Max file size:");
             ui.horizontal(|ui| {
-                ui.checkbox(&mut cap_upload, "")
-                    .on_hover_text("Cap the size of uploaded files");
+                ui.checkbox(&mut cap_upload, "").on_hover_text(
+                    "Cap the size of files uploaded to the share, and of files \
+                     users send each other directly",
+                );
                 ui.add_enabled(
                     cap_upload,
                     egui::TextEdit::singleline(&mut upload_val)

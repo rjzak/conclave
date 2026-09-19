@@ -289,6 +289,23 @@ pub const MAX_AVATAR_BYTES: usize = 16 * 1024;
 /// 512×128 pixels; this byte limit bounds even a photographic PNG.
 pub const MAX_BANNER_BYTES: usize = 512 * 128;
 
+/// Size of one chunk of a user-to-user file transfer, before encryption. The
+/// sender splits the file into chunks this large and encrypts each separately,
+/// so neither side needs the whole file resident in one buffer on the wire.
+pub const DM_FILE_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Largest chunk a server will relay for a user-to-user file transfer: one
+/// plaintext chunk plus the end-to-end encryption's per-payload overhead.
+pub const MAX_DM_FILE_CHUNK_BYTES: usize = DM_FILE_CHUNK_BYTES + crate::dm::OVERHEAD;
+
+/// Longest file name a server will relay with a file offer. The name is
+/// end-to-end encrypted, so this bounds the ciphertext rather than the name.
+pub const MAX_DM_FILE_NAME_BYTES: usize = 512;
+
+/// How many file transfers one connection may have offered or in flight at
+/// once. Bounds the state a single client can make a server hold.
+pub const MAX_DM_FILE_TRANSFERS: usize = 8;
+
 /// Extra, on-demand information about a connected user. The base fields (display
 /// name, connection duration, timezone) are already carried by [`ConnectedUser`];
 /// this holds what requires a lookup or elevated privileges.
@@ -474,6 +491,70 @@ pub enum ServerMessagesEncrypted {
         payload: Vec<u8>,
     },
 
+    /// Offer to send a file to another connected user. The server checks `size`
+    /// against its upload limit and relays the offer as
+    /// [`ClientMessagesEncrypted::DirectFileOffered`]; nothing is sent until the
+    /// recipient answers with [`ServerMessagesEncrypted::DirectFileAnswer`].
+    ///
+    /// Unlike a direct message, which falls back to plaintext for a peer that
+    /// advertised no identity key, a file transfer is always end-to-end
+    /// encrypted: a client with no key to encrypt to cannot offer a file at all.
+    /// There is deliberately no flag saying otherwise, so nothing in the relayed
+    /// message can ask the recipient to accept an unencrypted file.
+    DirectFileOffer {
+        /// Recipient's connection id
+        to: u16,
+        /// Sender-chosen id, unique among that sender's live transfers
+        transfer: u32,
+        /// Size of the file in bytes, before encryption. Plaintext, because the
+        /// relaying server enforces its limit against it.
+        size: u64,
+        /// File name, as [`crate::dm`] ciphertext
+        name: Vec<u8>,
+    },
+
+    /// Accept or decline a file another user offered.
+    DirectFileAnswer {
+        /// Offering user's connection id
+        to: u16,
+        /// Transfer id from the offer
+        transfer: u32,
+        /// Whether the file is accepted
+        accept: bool,
+    },
+
+    /// A chunk of an accepted file transfer, in order. The server relays it
+    /// verbatim, having only checked it against the offer's size.
+    DirectFileChunk {
+        /// Recipient's connection id
+        to: u16,
+        /// Transfer id from the offer
+        transfer: u32,
+        /// Chunk bytes, as [`crate::dm`] ciphertext
+        data: Vec<u8>,
+    },
+
+    /// Marks the end of a file transfer; no further chunks follow.
+    DirectFileEnd {
+        /// Recipient's connection id
+        to: u16,
+        /// Transfer id from the offer
+        transfer: u32,
+    },
+
+    /// Abandon a transfer before it completes. Either side may send it: the
+    /// sender to withdraw, the receiver to give up on a transfer it accepted.
+    DirectFileCancel {
+        /// The other user's connection id
+        to: u16,
+        /// Transfer id from the offer
+        transfer: u32,
+        /// Whether the sender of this message is the one sending the file. Ids
+        /// are only unique per sender, so both users may hold the same id at
+        /// once — one in each direction — and this says which is meant.
+        outgoing: bool,
+    },
+
     /// Do nothing message to keep the connection alive.
     KeepAlive,
 
@@ -645,6 +726,66 @@ pub enum ClientMessagesEncrypted {
         encrypted: bool,
         /// Message bytes (UTF-8 plaintext, or [`crate::dm`] ciphertext)
         payload: Vec<u8>,
+    },
+
+    /// Another user offers to send a file. The recipient replies with
+    /// [`ServerMessagesEncrypted::DirectFileAnswer`]; declining ends it there.
+    ///
+    /// `name`, and every chunk that follows, is always end-to-end encrypted —
+    /// so a recipient that cannot decrypt the name has been sent something it
+    /// should refuse rather than display.
+    DirectFileOffered {
+        /// Offering user's connection id
+        from: u16,
+        /// Offering user's display name
+        from_display_name: String,
+        /// Transfer id, unique among that sender's live transfers
+        transfer: u32,
+        /// Size of the file in bytes, before encryption
+        size: u64,
+        /// File name, as [`crate::dm`] ciphertext
+        name: Vec<u8>,
+    },
+
+    /// The recipient's answer to a file this user offered.
+    DirectFileAnswered {
+        /// Answering user's connection id
+        from: u16,
+        /// Transfer id from the offer
+        transfer: u32,
+        /// Whether the file was accepted
+        accept: bool,
+    },
+
+    /// A chunk of a file transfer this user accepted, delivered in order.
+    DirectFileChunk {
+        /// Sending user's connection id
+        from: u16,
+        /// Transfer id from the offer
+        transfer: u32,
+        /// Chunk bytes, as [`crate::dm`] ciphertext
+        data: Vec<u8>,
+    },
+
+    /// Marks the end of a file transfer; the received file is complete.
+    DirectFileEnded {
+        /// Sending user's connection id
+        from: u16,
+        /// Transfer id from the offer
+        transfer: u32,
+    },
+
+    /// A file transfer will not complete: the server refused it, the other user
+    /// cancelled or disconnected, or the stream broke its own offer.
+    DirectFileFailed {
+        /// The other user's connection id
+        peer: u16,
+        /// Transfer id from the offer
+        transfer: u32,
+        /// Whether this user was the one sending the file
+        outgoing: bool,
+        /// Human-readable reason, written by this server (never by the peer)
+        reason: String,
     },
 
     /// Container for administrative responses.

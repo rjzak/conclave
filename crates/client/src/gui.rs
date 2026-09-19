@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use conclave_client::config::{BookmarkEntry, KnownHost, UserAuth};
-use conclave_client::conn::{ChatLine, ConclaveConnection};
+use conclave_client::conn::{ChatLine, ConclaveConnection, DmBody, FileTransfer, TransferState};
 use conclave_client::{Client, DiscoveredServer, discover_servers};
 use conclave_common::forum::ForumPost;
 use conclave_common::server::{
@@ -345,6 +345,88 @@ fn human_size(bytes: u64) -> String {
         format!("{bytes} B")
     } else {
         format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
+/// Render one file transfer within a direct-message conversation: what the file
+/// is, how far it has got, and whatever it is waiting for the user to decide.
+fn dm_file_entry(ui: &mut egui::Ui, conn: &ConclaveConnection, who: &str, transfer: &FileTransfer) {
+    ui.label(egui::RichText::new(format!("{who}:")).strong());
+    ui.label(format!(
+        "📎 {} ({})",
+        transfer.name,
+        human_size(transfer.size)
+    ));
+
+    let key = transfer.key;
+    match &transfer.state {
+        TransferState::Offered if transfer.outgoing => {
+            ui.label(egui::RichText::new("offered — awaiting a reply").weak());
+            if ui.small_button("Cancel").clicked() {
+                let c = conn.clone();
+                tokio::spawn(async move {
+                    let _ = c.cancel_file(key).await;
+                });
+            }
+        }
+        TransferState::Offered => {
+            // Choosing the destination up front means the file is written as
+            // soon as it arrives, with no second prompt.
+            if ui.small_button("Accept").clicked()
+                && let Some(destination) = rfd::FileDialog::new()
+                    .set_file_name(&transfer.name)
+                    .save_file()
+            {
+                let c = conn.clone();
+                tokio::spawn(async move {
+                    let _ = c.accept_file(key, destination).await;
+                });
+            }
+            if ui.small_button("Decline").clicked() {
+                let c = conn.clone();
+                tokio::spawn(async move {
+                    let _ = c.decline_file(key).await;
+                });
+            }
+        }
+        TransferState::Transferring => {
+            ui.add(
+                egui::ProgressBar::new(transfer.fraction())
+                    .desired_width(120.0)
+                    .show_percentage(),
+            );
+            if ui.small_button("Cancel").clicked() {
+                let c = conn.clone();
+                tokio::spawn(async move {
+                    let _ = c.cancel_file(key).await;
+                });
+            }
+        }
+        TransferState::Complete => {
+            let done = if transfer.outgoing {
+                "sent".to_string()
+            } else {
+                transfer.path.as_ref().map_or_else(
+                    || "received".to_string(),
+                    |path| format!("saved to {}", path.display()),
+                )
+            };
+            ui.label(egui::RichText::new(done).color(egui::Color32::from_rgb(0x33, 0xaa, 0x33)));
+        }
+        TransferState::Declined => {
+            let text = if transfer.outgoing {
+                "declined".to_string()
+            } else {
+                "you declined this file".to_string()
+            };
+            ui.label(egui::RichText::new(text).color(egui::Color32::from_rgb(0xcc, 0x88, 0x00)));
+        }
+        TransferState::Failed(reason) => {
+            ui.label(
+                egui::RichText::new(format!("failed — {reason}"))
+                    .color(egui::Color32::from_rgb(0xcc, 0x44, 0x44)),
+            );
+        }
     }
 }
 
@@ -3920,6 +4002,7 @@ impl ConclaveGUI {
                     let input_id = egui::Id::new(format!("dm_input:{key_owned}:{peer}"));
                     let mut input: String = ctx.data(|d| d.get_temp(input_id).unwrap_or_default());
                     let mut send = false;
+                    let mut offer: Option<std::path::PathBuf> = None;
 
                     // Top: encryption status and the peer's key fingerprint.
                     egui::Panel::top(format!("dm_status:{key_owned}:{peer}")).show(ctx, |ui| {
@@ -3953,7 +4036,7 @@ impl ConclaveGUI {
                         ui.horizontal(|ui| {
                             let response = ui.add(
                                 egui::TextEdit::singleline(&mut input)
-                                    .desired_width(ui.available_width() - 60.0)
+                                    .desired_width(ui.available_width() - 100.0)
                                     .hint_text("Message"),
                             );
                             let entered = response.lost_focus()
@@ -3961,6 +4044,21 @@ impl ConclaveGUI {
                             if (ui.button("Send").clicked() || entered) && !input.trim().is_empty()
                             {
                                 send = true;
+                            }
+                            // The peer decides whether to accept; nothing leaves
+                            // this machine until they do. A file is only ever
+                            // sent encrypted, so a peer with no key cannot be
+                            // offered one at all.
+                            let attach = ui.add_enabled(encrypted, egui::Button::new("📎"));
+                            let attach = if encrypted {
+                                attach.on_hover_text("Offer a file to this user")
+                            } else {
+                                attach.on_disabled_hover_text(
+                                    "This user has no key, so a file cannot be encrypted to them",
+                                )
+                            };
+                            if attach.clicked() {
+                                offer = rfd::FileDialog::new().pick_file();
                             }
                         });
                         ui.add_space(4.0);
@@ -3986,8 +4084,26 @@ impl ConclaveGUI {
                                         } else {
                                             peer_name.as_str()
                                         };
-                                        ui.label(egui::RichText::new(format!("{who}:")).strong());
-                                        ui.label(&msg.text);
+                                        match &msg.body {
+                                            DmBody::Text(text) => {
+                                                ui.label(
+                                                    egui::RichText::new(format!("{who}:")).strong(),
+                                                );
+                                                ui.label(text);
+                                            }
+                                            // The transfer is looked up fresh so
+                                            // the row tracks its progress.
+                                            DmBody::File(key) => {
+                                                if let Some(transfer) = conn.file_transfer(*key) {
+                                                    dm_file_entry(ui, &conn, who, &transfer);
+                                                }
+                                            }
+                                            DmBody::Notice(notice) => {
+                                                ui.label(
+                                                    egui::RichText::new(notice).weak().italics(),
+                                                );
+                                            }
+                                        }
                                     });
                                 }
                             });
@@ -3998,6 +4114,12 @@ impl ConclaveGUI {
                         let conn = conn.clone();
                         tokio::spawn(async move {
                             let _ = conn.send_dm(peer, message).await;
+                        });
+                    }
+                    if let Some(path) = offer {
+                        let conn = conn.clone();
+                        tokio::spawn(async move {
+                            let _ = conn.offer_file(peer, &path).await;
                         });
                     }
                     ctx.data_mut(|d| d.insert_temp(input_id, input));

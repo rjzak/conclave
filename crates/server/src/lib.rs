@@ -334,6 +334,12 @@ pub struct State {
     /// Forum thread subscriptions: thread id -> connection ids currently viewing.
     forum_viewers: Arc<RwLock<HashMap<u32, HashSet<u16>>>>,
 
+    /// User-to-user file transfers being relayed, keyed by the sending
+    /// connection's id and the transfer id it chose. The file's bytes are never
+    /// held here — only what the server needs to hold a sender to the offer the
+    /// recipient agreed to.
+    dm_transfers: Arc<RwLock<HashMap<(u16, u32), DmTransfer>>>,
+
     /// Optional server banner image (a 512×128 PNG), shown by clients.
     banner: Arc<RwLock<Option<Vec<u8>>>>,
 
@@ -347,12 +353,11 @@ pub struct State {
     /// the server is not sharing files.
     share_directory: Option<PathBuf>,
 
-    /// Optional maximum accepted upload size, in bytes. `-1` means uncapped;
-    /// stored as an atomic so admins can change it at runtime.
+    /// Maximum accepted file size, in bytes, applied both to uploads to the shared
+    /// directory and to files users send each other.
     max_upload_size: Arc<AtomicU64>,
 
-    /// Optional maximum number of concurrent connections. `-1` means unlimited;
-    /// stored as an atomic so admins can change it at runtime.
+    /// Maximum number of concurrent connections.
     max_connections: Arc<AtomicU16>,
 
     /// Show the log window
@@ -478,7 +483,7 @@ impl State {
                 private_key,
                 sqlite,
                 trackers: Arc::new(RwLock::new(Vec::new())),
-                advertising: Arc::new(RwLock::new(std::collections::HashSet::new())),
+                advertising: Arc::new(RwLock::new(HashSet::new())),
                 tracker_update: Arc::new(tokio::sync::watch::channel(0u64).0),
                 connections: Arc::new(RwLock::new(Vec::new())),
                 total_visits: Arc::new(AtomicU32::new(0)),
@@ -489,6 +494,7 @@ impl State {
                 chat_topics: Arc::new(RwLock::new(HashMap::new())),
                 forums_enabled: Arc::new(AtomicBool::new(false)), // Database default
                 forum_viewers: Arc::new(RwLock::new(HashMap::new())),
+                dm_transfers: Arc::new(RwLock::new(HashMap::new())),
                 banner: Arc::new(RwLock::new(None)),
                 serving: Arc::new(AtomicBool::new(false)),
                 mdns: mdns.then(|| ServiceDaemon::new().expect("Failed to start Multicast DNS")),
@@ -660,7 +666,7 @@ impl State {
             private_key,
             sqlite,
             trackers: Arc::new(RwLock::new(trackers)),
-            advertising: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            advertising: Arc::new(RwLock::new(HashSet::new())),
             tracker_update: Arc::new(tokio::sync::watch::channel(0u64).0),
             connections: Arc::new(RwLock::new(Vec::new())),
             total_visits: Arc::new(AtomicU32::new(0)),
@@ -671,6 +677,7 @@ impl State {
             chat_topics: Arc::new(RwLock::new(HashMap::new())),
             forums_enabled: Arc::new(AtomicBool::new(forums_enabled)),
             forum_viewers: Arc::new(RwLock::new(HashMap::new())),
+            dm_transfers: Arc::new(RwLock::new(HashMap::new())),
             banner: Arc::new(RwLock::new(banner)),
             serving: Arc::new(AtomicBool::new(false)),
             mdns: mdns.then(|| ServiceDaemon::new().expect("Failed to start Multicast DNS")),
@@ -2482,6 +2489,44 @@ impl State {
                     self.send_to_connection(to, &delivery).await;
                 }
 
+                Ok(ServerMessagesEncrypted::DirectFileOffer {
+                    to,
+                    transfer,
+                    size,
+                    name,
+                }) => {
+                    if let Some(refusal) = self.dm_file_offer(&user, to, transfer, size, name).await
+                    {
+                        reply(&write, &addr, &refusal).await;
+                    }
+                }
+
+                Ok(ServerMessagesEncrypted::DirectFileAnswer {
+                    to,
+                    transfer,
+                    accept,
+                }) => {
+                    self.dm_file_answer(user.id, to, transfer, accept).await;
+                }
+
+                Ok(ServerMessagesEncrypted::DirectFileChunk { to, transfer, data }) => {
+                    if let Some(refusal) = self.dm_file_chunk(user.id, to, transfer, data).await {
+                        reply(&write, &addr, &refusal).await;
+                    }
+                }
+
+                Ok(ServerMessagesEncrypted::DirectFileEnd { to, transfer }) => {
+                    self.dm_file_end(user.id, to, transfer).await;
+                }
+
+                Ok(ServerMessagesEncrypted::DirectFileCancel {
+                    to,
+                    transfer,
+                    outgoing,
+                }) => {
+                    self.dm_file_cancel(user.id, to, transfer, outgoing).await;
+                }
+
                 Ok(ServerMessagesEncrypted::Disconnect) => break,
 
                 // Administrative requests: allowed only on an authenticated admin
@@ -2519,6 +2564,7 @@ impl State {
         }
         self.chat_leave_all(user.id, &user.display_name).await;
         self.forum_leave_all(user.id).await;
+        self.dm_file_disconnect(user.id).await;
         self.connections.write().await.retain(|c| c.addr != addr);
         self.broadcast_user_list().await;
         self.notify_trackers();
@@ -3009,6 +3055,269 @@ impl State {
             && let Err(e) = writer.write().await.send(&message.to_vec()).await
         {
             error!("Failed to send chat message: {e}");
+        }
+    }
+
+    /// Whether a connection id belongs to a client that is still connected.
+    async fn connection_present(&self, connection_id: u16) -> bool {
+        self.connections
+            .read()
+            .await
+            .iter()
+            .any(|c| c.connection_id == connection_id)
+    }
+
+    /// Build the message telling one side that a transfer will not complete.
+    #[inline]
+    fn dm_file_failure(
+        peer: u16,
+        transfer: u32,
+        outgoing: bool,
+        reason: impl Into<String>,
+    ) -> ClientMessagesEncrypted {
+        ClientMessagesEncrypted::DirectFileFailed {
+            peer,
+            transfer,
+            outgoing,
+            reason: reason.into(),
+        }
+    }
+
+    /// Register a user-to-user file offer and relay it to the recipient. The
+    /// file itself is not sent yet: nothing moves until the recipient accepts.
+    /// Returns a reply for the offering user when the server refuses to carry
+    /// the transfer.
+    async fn dm_file_offer(
+        &self,
+        from: &ConnectedUser,
+        to: u16,
+        transfer: u32,
+        size: u64,
+        name: Vec<u8>,
+    ) -> Option<ClientMessagesEncrypted> {
+        use conclave_common::server::{MAX_DM_FILE_NAME_BYTES, MAX_DM_FILE_TRANSFERS};
+
+        let refuse = |reason: &str| Some(Self::dm_file_failure(to, transfer, true, reason));
+
+        if name.is_empty() || name.len() > MAX_DM_FILE_NAME_BYTES {
+            return refuse("File name is missing or too long");
+        }
+        // The same limit as uploads to the server's share: an administrator sets
+        // one ceiling for how large a file this server will carry.
+        if let Some(max) = self.max_upload_size()
+            && size > max
+        {
+            return refuse(&format!(
+                "File is larger than this server's {max}-byte limit"
+            ));
+        }
+        if !self.connection_present(to).await {
+            return refuse("That user is no longer connected");
+        }
+
+        {
+            let mut transfers = self.dm_transfers.write().await;
+            if transfers.contains_key(&(from.id, transfer)) {
+                return refuse("A transfer with that id is already in progress");
+            }
+            if transfers
+                .keys()
+                .filter(|(sender, _)| *sender == from.id)
+                .count()
+                >= MAX_DM_FILE_TRANSFERS
+            {
+                return refuse("Too many file transfers in progress");
+            }
+            transfers.insert(
+                (from.id, transfer),
+                DmTransfer {
+                    to,
+                    size,
+                    accepted: false,
+                    relayed: 0,
+                    chunks: 0,
+                },
+            );
+        }
+
+        self.send_to_connection(
+            to,
+            &ClientMessagesEncrypted::DirectFileOffered {
+                from: from.id,
+                from_display_name: from.display_name.clone(),
+                transfer,
+                size,
+                name,
+            },
+        )
+        .await;
+        None
+    }
+
+    /// Relay a recipient's answer to a file offer. Only the user the offer was
+    /// addressed to can answer it; declining ends the transfer here.
+    async fn dm_file_answer(&self, responder: u16, offerer: u16, transfer: u32, accept: bool) {
+        {
+            let mut transfers = self.dm_transfers.write().await;
+            // The offer must exist and must be the one addressed to this user.
+            match transfers.get_mut(&(offerer, transfer)) {
+                Some(pending) if pending.to == responder => {
+                    if accept {
+                        pending.accepted = true;
+                    } else {
+                        transfers.remove(&(offerer, transfer));
+                    }
+                }
+                _ => return,
+            }
+        }
+        self.send_to_connection(
+            offerer,
+            &ClientMessagesEncrypted::DirectFileAnswered {
+                from: responder,
+                transfer,
+                accept,
+            },
+        )
+        .await;
+    }
+
+    /// Relay a chunk of an accepted transfer. Returns a reply for the sender if
+    /// the chunk does not belong to a live, accepted transfer or overruns the
+    /// size that was offered; in that case the transfer is abandoned.
+    async fn dm_file_chunk(
+        &self,
+        from: u16,
+        to: u16,
+        transfer: u32,
+        data: Vec<u8>,
+    ) -> Option<ClientMessagesEncrypted> {
+        use conclave_common::server::MAX_DM_FILE_CHUNK_BYTES;
+
+        let len = data.len() as u64;
+        let reason = {
+            let mut transfers = self.dm_transfers.write().await;
+            let reason = match transfers.get_mut(&(from, transfer)) {
+                None => Some("No such file transfer"),
+                Some(pending) if pending.to != to => Some("No such file transfer"),
+                Some(pending) if !pending.accepted => Some("That file has not been accepted"),
+                Some(_) if data.len() > MAX_DM_FILE_CHUNK_BYTES => Some("Chunk is too large"),
+                Some(pending) if !pending.accepts_chunk(len) => {
+                    Some("Transfer is larger than the file that was offered")
+                }
+                Some(pending) => {
+                    pending.relayed += len;
+                    pending.chunks += 1;
+                    None
+                }
+            };
+            // A violation ends the transfer.
+            if reason.is_some() {
+                transfers.remove(&(from, transfer));
+            }
+            reason
+        };
+
+        if let Some(reason) = reason {
+            self.send_to_connection(to, &Self::dm_file_failure(from, transfer, false, reason))
+                .await;
+            return Some(Self::dm_file_failure(to, transfer, true, reason));
+        }
+
+        self.send_to_connection(
+            to,
+            &ClientMessagesEncrypted::DirectFileChunk {
+                from,
+                transfer,
+                data,
+            },
+        )
+        .await;
+        None
+    }
+
+    /// Relay the end of a transfer and forget it.
+    async fn dm_file_end(&self, from: u16, to: u16, transfer: u32) {
+        let known = self
+            .dm_transfers
+            .write()
+            .await
+            .remove(&(from, transfer))
+            .is_some_and(|pending| pending.to == to);
+        if known {
+            self.send_to_connection(
+                to,
+                &ClientMessagesEncrypted::DirectFileEnded { from, transfer },
+            )
+            .await;
+        }
+    }
+
+    /// Abandon a transfer at either side's request and tell the other user.
+    /// `sending` says whether the canceller is the one sending the file, which
+    /// is what tells two transfers with the same id — one in each direction —
+    /// apart.
+    async fn dm_file_cancel(&self, canceller: u16, peer: u16, transfer: u32, sending: bool) {
+        // A transfer is keyed by its sender, so which user that is decides
+        // which key to look under and who still needs telling.
+        let (key, expected_recipient) = if sending {
+            ((canceller, transfer), peer)
+        } else {
+            ((peer, transfer), canceller)
+        };
+        let mut transfers = self.dm_transfers.write().await;
+        let known = transfers
+            .get(&key)
+            .is_some_and(|pending| pending.to == expected_recipient);
+        if !known {
+            return;
+        }
+        transfers.remove(&key);
+        drop(transfers);
+
+        // From the other user's point of view the direction is reversed.
+        self.send_to_connection(
+            peer,
+            &Self::dm_file_failure(canceller, transfer, !sending, "The other user cancelled"),
+        )
+        .await;
+    }
+
+    /// Abandon every transfer involving a departing connection, telling whoever
+    /// is left at the other end.
+    async fn dm_file_disconnect(&self, connection_id: u16) {
+        let dropped: Vec<((u16, u32), u16)> = {
+            let mut transfers = self.dm_transfers.write().await;
+            let ended: Vec<(u16, u32)> = transfers
+                .iter()
+                .filter(|((sender, _), pending)| {
+                    *sender == connection_id || pending.to == connection_id
+                })
+                .map(|(key, _)| *key)
+                .collect();
+            ended
+                .into_iter()
+                .filter_map(|key| transfers.remove(&key).map(|pending| (key, pending.to)))
+                .collect()
+        };
+
+        for ((sender, transfer), to) in dropped {
+            // Tell whichever end is still here; `outgoing` is from their side.
+            let (other, outgoing) = if sender == connection_id {
+                (to, false)
+            } else {
+                (sender, true)
+            };
+            self.send_to_connection(
+                other,
+                &Self::dm_file_failure(
+                    connection_id,
+                    transfer,
+                    outgoing,
+                    "The other user disconnected",
+                ),
+            )
+            .await;
         }
     }
 
@@ -4113,6 +4422,39 @@ struct Upload {
     written: u64,
     /// Optional maximum size, enforced as bytes arrive.
     max: Option<u64>,
+}
+
+/// A user-to-user file transfer the server is relaying. The server never sees
+/// the file (the chunks are end-to-end ciphertext); it tracks only enough to
+/// refuse a sender that streams without consent or beyond what it offered.
+struct DmTransfer {
+    /// Recipient's connection id.
+    to: u16,
+
+    /// Plaintext size the sender offered, in bytes.
+    size: u64,
+
+    /// Whether the recipient has accepted. No chunk is relayed before this.
+    accepted: bool,
+
+    /// Chunk bytes relayed so far, as they arrive (so, encrypted).
+    relayed: u64,
+
+    /// Chunks relayed so far. Each carries the end-to-end encryption's
+    /// per-payload overhead on top of its plaintext, which `relayed` is allowed.
+    chunks: u64,
+}
+
+impl DmTransfer {
+    /// Whether one more chunk of `len` bytes still fits inside the offer. The
+    /// bytes counted are ciphertext, so each chunk is allowed the end-to-end
+    /// encryption's overhead above the plaintext total that was offered.
+    fn accepts_chunk(&self, len: u64) -> bool {
+        let allowance = self
+            .size
+            .saturating_add((self.chunks + 1).saturating_mul(conclave_common::dm::OVERHEAD as u64));
+        self.relayed.saturating_add(len) <= allowance
+    }
 }
 
 /// Finalize an upload: flush, ensure the destination is still free, then rename.

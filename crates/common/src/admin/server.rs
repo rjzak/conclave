@@ -186,7 +186,9 @@ pub enum ClientAdminMessagesEncrypted {
 /// Server-wide limits an administrator can view and change.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 pub struct ServerLimits {
-    /// Maximum accepted upload size in bytes, or `None` for uncapped.
+    /// Maximum accepted file size in bytes, applied both to uploads to the
+    /// shared directory and to files users send each other, or `None` for
+    /// uncapped.
     pub max_upload_size: Option<u64>,
 
     /// Maximum number of concurrent connections, or `None` for unlimited.

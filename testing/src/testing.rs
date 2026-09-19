@@ -165,3 +165,198 @@ fn version() {
     assert_eq!(*conclave_client::VERSION, *conclave_server::VERSION);
     assert_eq!(*conclave_tracker::VERSION, *conclave_server::VERSION);
 }
+
+/// Poll `check` until it returns a value or the deadline passes.
+async fn eventually<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
+    for _ in 0..200 {
+        if let Some(value) = check() {
+            return value;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("Timed out waiting for {what}");
+}
+
+/// Every file transfer in a direct-message conversation with `peer`, in the
+/// order the conversation shows them.
+fn transfers(
+    conn: &conclave_client::conn::ConclaveConnection,
+    peer: u16,
+) -> Vec<conclave_client::conn::FileTransfer> {
+    use conclave_client::conn::DmBody;
+
+    conn.dm_thread(peer)
+        .into_iter()
+        .filter_map(|msg| match msg.body {
+            DmBody::File(key) => conn.file_transfer(key),
+            DmBody::Text(_) | DmBody::Notice(_) => None,
+        })
+        .collect()
+}
+
+/// Two users send each other files over the direct-message protocol: one file
+/// is accepted and arrives byte for byte, one is declined, and one is refused
+/// by the server for exceeding its size limit.
+#[allow(clippy::too_many_lines)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direct_file_transfer() {
+    use conclave_client::conn::TransferState;
+
+    const PORT: u16 = 8091;
+
+    let tempdir = TempDir::new("conclave_dm_files").unwrap();
+    let server_db = tempdir.path().join(format!("dm_{}.db", Uuid::new_v4()));
+
+    let (server, _password) = conclave_server::State::new(
+        "File Server".into(),
+        "Description".into(),
+        LOCALHOST,
+        Some("localhost".into()),
+        PORT,
+        false,
+        server_db,
+    )
+    .unwrap();
+    let server = Arc::new(server);
+    let server_clone = server.clone();
+    let server_process = tokio::spawn(async move { server_clone.serve().await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Two clients with their own configs, so they hold distinct identity keys.
+    let connect = async |name: &str| {
+        let config = tempdir
+            .path()
+            .join(format!("{name}_{}.toml", Uuid::new_v4()));
+        let client = conclave_client::Client::new(config).unwrap();
+        let conn = client
+            .connect(
+                LOCALHOST.to_string().as_str(),
+                PORT,
+                true,
+                name.to_string(),
+                None,
+                None,
+                None,
+                String::new(),
+                std::collections::BTreeMap::new(),
+            )
+            .await
+            .unwrap();
+        (client, conn)
+    };
+    let (_alice_client, alice) = connect("alice").await;
+    let (_bob_client, bob) = connect("bob").await;
+
+    // Each side needs the other's connection id, which arrives with the roster.
+    let peer_id = async |conn: &conclave_client::conn::ConclaveConnection, name: &str| {
+        eventually(&format!("{name}'s connection id"), || {
+            conn.get_connected_users()
+                .into_iter()
+                .find(|user| user.display_name == name)
+                .map(|user| user.id)
+        })
+        .await
+    };
+    let bob_id = peer_id(&alice, "bob").await;
+    let alice_id = peer_id(&bob, "alice").await;
+
+    // Both advertised identity keys. A file transfer has no unencrypted mode,
+    // so this is what makes one possible at all: the name arriving intact below
+    // is itself evidence it was sealed to the shared key and opened again.
+    assert!(alice.dm_encrypted_with(bob_id));
+    assert!(bob.dm_encrypted_with(alice_id));
+
+    // A file large enough to span several chunks.
+    let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    let source = tempdir.path().join("greetings.bin");
+    std::fs::write(&source, &payload).unwrap();
+
+    // Wait for the `index`-th transfer in a conversation to reach a state.
+    let settled = async |conn: &conclave_client::conn::ConclaveConnection,
+                         peer: u16,
+                         index: usize,
+                         what: &str| {
+        eventually(what, || {
+            let transfer = transfers(conn, peer).into_iter().nth(index)?;
+            (transfer.state != TransferState::Offered
+                && transfer.state != TransferState::Transferring)
+                .then_some(transfer)
+        })
+        .await
+    };
+
+    // ── Accepted ──────────────────────────────────────────────────────────
+    alice.offer_file(bob_id, &source).await.unwrap();
+    let offered = eventually("bob to be offered a file", || {
+        transfers(&bob, alice_id).into_iter().next()
+    })
+    .await;
+    assert_eq!(offered.name, "greetings.bin");
+    assert_eq!(offered.size, payload.len() as u64);
+    assert_eq!(offered.state, TransferState::Offered);
+
+    let destination = tempdir.path().join("received.bin");
+    bob.accept_file(offered.key, destination.clone())
+        .await
+        .unwrap();
+
+    let received = settled(&bob, alice_id, 0, "the received file to finish").await;
+    assert_eq!(received.state, TransferState::Complete);
+    assert_eq!(std::fs::read(&destination).unwrap(), payload);
+    // The partial file is moved into place, not left behind.
+    assert!(!tempdir.path().join("received.bin.conclave-part").exists());
+
+    let sent = settled(&alice, bob_id, 0, "the sent file to finish").await;
+    assert_eq!(sent.state, TransferState::Complete);
+    assert_eq!(sent.progress, payload.len() as u64);
+
+    // ── Declined ──────────────────────────────────────────────────────────
+    bob.offer_file(alice_id, &source).await.unwrap();
+    let to_decline = eventually("alice to be offered a file", || {
+        transfers(&alice, bob_id).into_iter().nth(1)
+    })
+    .await;
+    alice.decline_file(to_decline.key).await.unwrap();
+    assert_eq!(
+        alice.file_transfer(to_decline.key).unwrap().state,
+        TransferState::Declined
+    );
+    let refused = settled(&bob, alice_id, 1, "bob to see the file declined").await;
+    assert_eq!(refused.state, TransferState::Declined);
+
+    // ── Over the server's limit ───────────────────────────────────────────
+    server.set_max_upload_size(Some(1024)).await.unwrap();
+    alice.offer_file(bob_id, &source).await.unwrap();
+    let rejected = settled(&alice, bob_id, 2, "the server to refuse the offer").await;
+    match rejected.state {
+        TransferState::Failed(reason) => assert!(reason.contains("1024"), "{reason}"),
+        state => panic!("Expected a refusal, got {state:?}"),
+    }
+    // The recipient was never told about a file the server would not carry.
+    assert_eq!(transfers(&bob, alice_id).len(), 2);
+
+    // ── Withdrawn ─────────────────────────────────────────────────────────
+    // Both users number their own transfers from zero, so by now each holds
+    // ids the other also holds; a cancel still has to reach the right one.
+    server.set_max_upload_size(None).await.unwrap();
+    bob.offer_file(alice_id, &source).await.unwrap();
+    let pending = eventually("alice to be offered another file", || {
+        transfers(&alice, bob_id).into_iter().nth(3)
+    })
+    .await;
+    assert_eq!(pending.state, TransferState::Offered);
+
+    let withdrawn = transfers(&bob, alice_id)[2].key;
+    bob.cancel_file(withdrawn).await.unwrap();
+    let seen = settled(&alice, bob_id, 3, "alice to see the offer withdrawn").await;
+    assert!(
+        matches!(seen.state, TransferState::Failed(_)),
+        "expected a withdrawal, got {:?}",
+        seen.state
+    );
+    // The completed transfer that shares its id with the cancelled one is
+    // untouched.
+    assert_eq!(transfers(&alice, bob_id)[0].state, TransferState::Complete);
+
+    server_process.abort();
+}

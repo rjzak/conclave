@@ -10,11 +10,12 @@ use conclave_common::server::{
     ChatEvent, ChatTopic, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser, ServerInformation,
     ServerMessagesEncrypted, UserDetails,
 };
+
 use std::collections::HashMap;
 use std::ops::Not;
-
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 
 /// Source of process-unique ids so two connections (even to the same server)
 /// can be told apart in the GUI.
@@ -57,6 +58,22 @@ pub enum ChatLine {
     },
 }
 
+/// What one entry in a direct-message conversation holds.
+#[derive(Clone, Debug)]
+pub enum DmBody {
+    /// A text message (or a placeholder if it could not be decrypted).
+    Text(String),
+
+    /// A file offered to, or by, the other user. The transfer's live state is
+    /// looked up with [`ConclaveConnection::file_transfer`] rather than copied
+    /// here, so the entry stays correct as the transfer progresses.
+    File(u64),
+
+    /// A note from this client about the conversation, such as a file that
+    /// could not be read. Never sent or received.
+    Notice(String),
+}
+
 /// A single direct message in a conversation with another user. History is not
 /// preserved, so a thread only accumulates while the connection is open.
 #[derive(Clone, Debug)]
@@ -67,11 +84,121 @@ pub struct DmMessage {
     /// Whether this side sent the message (`true`) or received it (`false`).
     pub from_me: bool,
 
-    /// Whether the message travelled end-to-end encrypted.
+    /// Whether the message travelled end-to-end encrypted. Always true for a
+    /// [`DmBody::File`], which has no unencrypted form, and meaningless for a
+    /// [`DmBody::Notice`], which never leaves this client.
     pub encrypted: bool,
 
-    /// Message text (or a placeholder if it could not be decrypted).
-    pub text: String,
+    /// What the entry holds: a message, or a file transfer.
+    pub body: DmBody,
+}
+
+/// How far along a user-to-user file transfer is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TransferState {
+    /// Offered; waiting for the recipient to accept or decline.
+    Offered,
+
+    /// Accepted, and the bytes are moving.
+    Transferring,
+
+    /// Every byte arrived (incoming) or was sent (outgoing).
+    Complete,
+
+    /// The recipient declined the file.
+    Declined,
+
+    /// The transfer ended early; the string says why.
+    Failed(String),
+}
+
+/// A file being sent to, or received from, another user alongside a
+/// conversation. Like the messages themselves, transfers live only as long as
+/// the connection. Every transfer is end-to-end encrypted — there is no
+/// unencrypted variant to distinguish — so a peer that advertised no identity
+/// key can neither be offered a file nor offer one that will be accepted.
+#[derive(Clone, Debug)]
+pub struct FileTransfer {
+    /// Local key, which a [`DmBody::File`] entry refers to.
+    pub key: u64,
+
+    /// The other user's connection id.
+    pub peer: u16,
+
+    /// Whether this client is the one sending the file.
+    pub outgoing: bool,
+
+    /// The file's name, with no directory part.
+    pub name: String,
+
+    /// The file's size in bytes, before encryption.
+    pub size: u64,
+
+    /// Bytes sent or received so far, before encryption.
+    pub progress: u64,
+
+    /// How far along the transfer is.
+    pub state: TransferState,
+
+    /// The local file: the one being sent (outgoing), or the one a received
+    /// file is written to, once the user has accepted it (incoming).
+    pub path: Option<PathBuf>,
+}
+
+impl FileTransfer {
+    /// Transfer id on the wire, chosen by whichever side is sending.
+    #[inline]
+    #[must_use]
+    pub const fn wire_id(&self) -> u32 {
+        // The key packs the id in the middle; see `transfer_key`.
+        #[allow(clippy::cast_possible_truncation)]
+        ((self.key >> 1) as u32)
+    }
+
+    /// Fraction of the file transferred so far, in `0.0..=1.0`.
+    #[inline]
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn fraction(&self) -> f32 {
+        if self.size == 0 {
+            return 1.0;
+        }
+        (self.progress as f32 / self.size as f32).clamp(0.0, 1.0)
+    }
+}
+
+/// Reduce a name a peer sent to something safe to show and to use as the
+/// default for a save dialog: the final path component only, never a path, a
+/// traversal, or an empty string.
+fn sanitize_file_name(name: &str) -> String {
+    let trimmed = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .trim_start_matches('.');
+    if trimmed.is_empty() {
+        "file".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Where an incoming file is written while it is still arriving. Keeping it
+/// beside the destination means the move into place is a rename on the same
+/// filesystem, and that a failed transfer never clobbers an existing file.
+fn partial_path(destination: &Path) -> PathBuf {
+    let mut name = destination.as_os_str().to_os_string();
+    name.push(".conclave-part");
+    PathBuf::from(name)
+}
+
+/// Key a transfer by the peer it is with, the id whichever side is sending
+/// chose, and the direction. Ids are only unique per sender, so the peer and
+/// the direction are both needed to tell two transfers apart.
+#[inline]
+const fn transfer_key(peer: u16, id: u32, outgoing: bool) -> u64 {
+    ((peer as u64) << 33) | ((id as u64) << 1) | (outgoing as u64)
 }
 
 /// A file download in progress or completed, accumulated from streamed chunks.
@@ -189,6 +316,19 @@ pub struct ConclaveConnection {
     /// is not already open; drained by the GUI each frame.
     pub(crate) dm_open_requests: Arc<std::sync::RwLock<Vec<u16>>>,
 
+    /// File transfers with other users, keyed by [`transfer_key`]. Holds only
+    /// each transfer's metadata: the bytes are streamed to or from disk.
+    pub(crate) transfers: Arc<std::sync::RwLock<HashMap<u64, FileTransfer>>>,
+
+    /// Open handle to the partial file each incoming transfer is being written
+    /// to. Chunks go straight to disk, so a large file never has to fit in
+    /// memory, and the destination is only replaced once the file is complete.
+    pub(crate) incoming_files: Arc<std::sync::RwLock<HashMap<u64, std::fs::File>>>,
+
+    /// Source of transfer ids for the files this client offers. Unique per
+    /// connection, which is all the protocol requires.
+    pub(crate) next_transfer_id: Arc<AtomicU32>,
+
     /// This client's ed25519 identity key, used to derive the shared key for
     /// end-to-end encrypted direct messages.
     pub(crate) signing_key: Arc<SigningKey>,
@@ -250,6 +390,9 @@ impl ConclaveConnection {
             file_notice: Arc::new(std::sync::RwLock::new(None)),
             dms: Arc::new(std::sync::RwLock::new(HashMap::new())),
             dm_open_requests: Arc::new(std::sync::RwLock::new(Vec::new())),
+            transfers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            incoming_files: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            next_transfer_id: Arc::new(AtomicU32::new(0)),
             signing_key: Arc::new(signing_key),
             listen_handle: Arc::new(tokio::spawn(tokio::time::sleep(
                 tokio::time::Duration::from_millis(1),
@@ -452,6 +595,40 @@ impl ConclaveConnection {
                         payload,
                     } => {
                         conn_clone.apply_direct_message(from, encrypted, &payload);
+                    }
+                    ClientMessagesEncrypted::DirectFileOffered {
+                        from,
+                        from_display_name: _,
+                        transfer,
+                        size,
+                        name,
+                    } => {
+                        conn_clone.apply_file_offer(from, transfer, size, &name);
+                    }
+                    ClientMessagesEncrypted::DirectFileAnswered {
+                        from,
+                        transfer,
+                        accept,
+                    } => {
+                        conn_clone.apply_file_answer(from, transfer, accept);
+                    }
+                    ClientMessagesEncrypted::DirectFileChunk {
+                        from,
+                        transfer,
+                        data,
+                    } => {
+                        conn_clone.apply_file_chunk(from, transfer, &data);
+                    }
+                    ClientMessagesEncrypted::DirectFileEnded { from, transfer } => {
+                        conn_clone.apply_file_end(from, transfer);
+                    }
+                    ClientMessagesEncrypted::DirectFileFailed {
+                        peer,
+                        transfer,
+                        outgoing,
+                        reason,
+                    } => {
+                        conn_clone.fail_transfer(transfer_key(peer, transfer, outgoing), &reason);
                     }
                     ClientMessagesEncrypted::SessionInfo { admin, .. } => {
                         conn_clone.is_admin.store(admin, Ordering::SeqCst);
@@ -714,7 +891,7 @@ impl ConclaveConnection {
                 time: Local::now(),
                 from_me: false,
                 encrypted,
-                text,
+                body: DmBody::Text(text),
             },
         );
         // Ask the GUI to open a window for this conversation if one is not
@@ -809,7 +986,7 @@ impl ConclaveConnection {
                 time: Local::now(),
                 from_me: true,
                 encrypted,
-                text: message,
+                body: DmBody::Text(message),
             },
         );
         let request = ServerMessagesEncrypted::DirectMessage {
@@ -818,6 +995,554 @@ impl ConclaveConnection {
             payload,
         };
         self.send_request(&request.to_vec()).await
+    }
+
+    /// A snapshot of one file transfer, if it is still known.
+    #[must_use]
+    pub fn file_transfer(&self, key: u64) -> Option<FileTransfer> {
+        self.transfers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .cloned()
+    }
+
+    /// Apply `change` to a transfer, if it is still known.
+    fn update_transfer(&self, key: u64, change: impl FnOnce(&mut FileTransfer)) {
+        if let Some(transfer) = self
+            .transfers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&key)
+        {
+            change(transfer);
+        }
+    }
+
+    /// End a transfer with a reason, discarding anything received for it. A
+    /// transfer that already finished is left alone, so a late notice (the peer
+    /// disconnecting, say) cannot undo a completed file.
+    fn fail_transfer(&self, key: u64, reason: &str) {
+        let partial = self
+            .incoming_files
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&key)
+            .is_some();
+        let mut ended = false;
+        self.update_transfer(key, |transfer| {
+            if matches!(
+                transfer.state,
+                TransferState::Offered | TransferState::Transferring
+            ) {
+                transfer.state = TransferState::Failed(reason.to_string());
+                ended = true;
+            }
+        });
+        // Only the half-written file goes; the destination the user chose is
+        // left as it was, since nothing was ever moved into place. An outgoing
+        // transfer's path is the user's own file, which is never touched.
+        if partial
+            && ended
+            && let Some(transfer) = self.file_transfer(key)
+            && !transfer.outgoing
+            && let Some(path) = transfer.path
+        {
+            let _ = std::fs::remove_file(partial_path(&path));
+        }
+    }
+
+    /// The end-to-end key shared with `peer`, if they advertised an identity key.
+    fn peer_shared_key(&self, peer: u16) -> Option<[u8; 32]> {
+        self.peer_verifying_key(peer)
+            .map(|their_key| dm::shared_key(&self.signing_key, &their_key))
+    }
+
+    /// Record an inbound file offer and surface the conversation so the user can
+    /// answer it.
+    ///
+    /// The name arrives encrypted to the key shared with `peer`, and there is no
+    /// flag that could say otherwise: an offer whose name does not decrypt is
+    /// not something this client can receive, so it is declined rather than
+    /// shown with an undecipherable name and a body nobody could read.
+    fn apply_file_offer(&self, peer: u16, id: u32, size: u64, name: &[u8]) {
+        let Some(name) = self
+            .peer_shared_key(peer)
+            .and_then(|key| dm::decrypt(&key, name).ok())
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        else {
+            self.push_dm(
+                peer,
+                DmMessage {
+                    time: Local::now(),
+                    from_me: false,
+                    encrypted: false,
+                    body: DmBody::Notice(
+                        "Declined a file that was not encrypted to this user".to_string(),
+                    ),
+                },
+            );
+            self.spawn_file_decline(peer, id);
+            return;
+        };
+        // Whatever the sender called it, only the final component is a name: a
+        // peer must not be able to steer where the file is written.
+        let name = sanitize_file_name(&name);
+
+        let key = transfer_key(peer, id, false);
+        self.transfers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                key,
+                FileTransfer {
+                    key,
+                    peer,
+                    outgoing: false,
+                    name,
+                    size,
+                    progress: 0,
+                    state: TransferState::Offered,
+                    path: None,
+                },
+            );
+        self.push_dm(
+            peer,
+            DmMessage {
+                time: Local::now(),
+                from_me: false,
+                encrypted: true,
+                body: DmBody::File(key),
+            },
+        );
+        // An offer needs an answer, so surface the conversation the same way an
+        // inbound message does.
+        self.dm_open_requests
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(peer);
+    }
+
+    /// Apply the recipient's answer to a file this client offered, starting the
+    /// send when they accepted.
+    fn apply_file_answer(&self, peer: u16, id: u32, accept: bool) {
+        let key = transfer_key(peer, id, true);
+        if !accept {
+            self.update_transfer(key, |transfer| {
+                if transfer.state == TransferState::Offered {
+                    transfer.state = TransferState::Declined;
+                }
+            });
+            return;
+        }
+        let mut start = false;
+        self.update_transfer(key, |transfer| {
+            if transfer.state == TransferState::Offered {
+                transfer.state = TransferState::Transferring;
+                start = true;
+            }
+        });
+        if start {
+            self.spawn_file_send(key);
+        }
+    }
+
+    /// Accumulate one chunk of an incoming file.
+    fn apply_file_chunk(&self, peer: u16, id: u32, data: &[u8]) {
+        let key = transfer_key(peer, id, false);
+        let Some(transfer) = self.file_transfer(key) else {
+            return;
+        };
+        if transfer.state != TransferState::Transferring {
+            return;
+        }
+        let Some(plaintext) = self
+            .peer_shared_key(peer)
+            .and_then(|shared| dm::decrypt(&shared, data).ok())
+        else {
+            self.fail_transfer(key, "A chunk of the file could not be decrypted");
+            self.spawn_file_cancel(peer, id, false);
+            return;
+        };
+
+        let received = plaintext.len() as u64;
+        if transfer.progress.saturating_add(received) > transfer.size {
+            self.fail_transfer(key, "The sender sent more than the file they offered");
+            self.spawn_file_cancel(peer, id, false);
+            return;
+        }
+        let written = self
+            .incoming_files
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&key)
+            .map(|file| std::io::Write::write_all(file, &plaintext));
+        match written {
+            Some(Ok(())) => self.update_transfer(key, |transfer| transfer.progress += received),
+            Some(Err(e)) => {
+                self.fail_transfer(key, &format!("Could not write the file: {e}"));
+                self.spawn_file_cancel(peer, id, false);
+            }
+            None => {
+                self.fail_transfer(key, "The file is no longer open for writing");
+                self.spawn_file_cancel(peer, id, false);
+            }
+        }
+    }
+
+    /// Finish an incoming file: close the partial file and move it to the
+    /// destination the user chose when they accepted the offer.
+    fn apply_file_end(&self, peer: u16, id: u32) {
+        let key = transfer_key(peer, id, false);
+        let Some(transfer) = self.file_transfer(key) else {
+            return;
+        };
+        if transfer.state != TransferState::Transferring {
+            return;
+        }
+        let file = self
+            .incoming_files
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&key);
+        // Flushed and closed before the rename, so nothing is still in flight.
+        let flushed = match file {
+            Some(mut file) => std::io::Write::flush(&mut file),
+            None => Ok(()),
+        };
+        let Some(destination) = transfer.path.clone() else {
+            self.fail_transfer(key, "No destination was chosen for the file");
+            return;
+        };
+
+        let outcome = flushed.and_then(|()| {
+            if transfer.progress == transfer.size {
+                std::fs::rename(partial_path(&destination), &destination)
+            } else {
+                Err(std::io::Error::other("the file arrived incomplete"))
+            }
+        });
+        match outcome {
+            Ok(()) => {
+                self.update_transfer(key, |transfer| transfer.state = TransferState::Complete);
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(partial_path(&destination));
+                self.update_transfer(key, |transfer| {
+                    transfer.state = TransferState::Failed(format!(
+                        "Could not save {}: {e}",
+                        destination.display()
+                    ));
+                });
+            }
+        }
+    }
+
+    /// Offer a local file to `peer`. Nothing is sent until they accept; the
+    /// server may refuse the offer outright if the file is over its limit.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the file cannot be read, or on a network error.
+    pub async fn offer_file(&self, peer: u16, path: &Path) -> Result<()> {
+        // A file is only ever sent end-to-end encrypted. Without the peer's
+        // identity key there is nothing to encrypt to, so the offer is refused
+        // here rather than falling back to handing the file to the server.
+        let Some(shared) = self.peer_shared_key(peer) else {
+            let reason =
+                "That user has no identity key, so a file cannot be encrypted to them".to_string();
+            self.push_dm(
+                peer,
+                DmMessage {
+                    time: Local::now(),
+                    from_me: true,
+                    encrypted: false,
+                    body: DmBody::Notice(reason.clone()),
+                },
+            );
+            return Err(anyhow!(reason));
+        };
+
+        let size = match std::fs::metadata(path) {
+            Ok(metadata) => metadata.len(),
+            Err(e) => {
+                // Nothing was offered, so there is no transfer to show as
+                // failed: say so in the conversation instead.
+                let reason = format!("Cannot read {}: {e}", path.display());
+                self.push_dm(
+                    peer,
+                    DmMessage {
+                        time: Local::now(),
+                        from_me: true,
+                        encrypted: false,
+                        body: DmBody::Notice(reason.clone()),
+                    },
+                );
+                return Err(anyhow!(reason));
+            }
+        };
+        let name = path.file_name().map_or_else(
+            || "file".to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+
+        let name_payload = dm::encrypt(&shared, name.as_bytes());
+
+        let id = self.next_transfer_id.fetch_add(1, Ordering::Relaxed);
+        let key = transfer_key(peer, id, true);
+        self.transfers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                key,
+                FileTransfer {
+                    key,
+                    peer,
+                    outgoing: true,
+                    name,
+                    size,
+                    progress: 0,
+                    state: TransferState::Offered,
+                    path: Some(path.to_path_buf()),
+                },
+            );
+        self.push_dm(
+            peer,
+            DmMessage {
+                time: Local::now(),
+                from_me: true,
+                encrypted: true,
+                body: DmBody::File(key),
+            },
+        );
+
+        let sent = self
+            .send_request(
+                &ServerMessagesEncrypted::DirectFileOffer {
+                    to: peer,
+                    transfer: id,
+                    size,
+                    name: name_payload,
+                }
+                .to_vec(),
+            )
+            .await;
+        if let Err(e) = &sent {
+            // The offer never reached the server, so nothing will ever answer
+            // it: show it as failed rather than waiting forever.
+            self.fail_transfer(key, &e.to_string());
+        }
+        sent
+    }
+
+    /// Accept an offered file, to be written to `destination` once it arrives.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn accept_file(&self, key: u64, destination: PathBuf) -> Result<()> {
+        let Some(transfer) = self.file_transfer(key) else {
+            return Err(anyhow!("That file transfer is no longer available"));
+        };
+        if transfer.outgoing || transfer.state != TransferState::Offered {
+            return Err(anyhow!("That file is not waiting to be accepted"));
+        }
+        // Open the partial file before accepting: a destination that cannot be
+        // written is worth finding out about before the sender starts.
+        let partial = partial_path(&destination);
+        let file = std::fs::File::create(&partial)
+            .map_err(|e| anyhow!("Cannot write {}: {e}", partial.display()))?;
+        self.incoming_files
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, file);
+        self.update_transfer(key, |transfer| {
+            transfer.path = Some(destination);
+            transfer.state = TransferState::Transferring;
+        });
+        self.send_request(
+            &ServerMessagesEncrypted::DirectFileAnswer {
+                to: transfer.peer,
+                transfer: transfer.wire_id(),
+                accept: true,
+            }
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// Decline an offered file.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn decline_file(&self, key: u64) -> Result<()> {
+        let Some(transfer) = self.file_transfer(key) else {
+            return Err(anyhow!("That file transfer is no longer available"));
+        };
+        if transfer.outgoing || transfer.state != TransferState::Offered {
+            return Err(anyhow!("That file is not waiting to be answered"));
+        }
+        self.update_transfer(key, |transfer| transfer.state = TransferState::Declined);
+        self.send_request(
+            &ServerMessagesEncrypted::DirectFileAnswer {
+                to: transfer.peer,
+                transfer: transfer.wire_id(),
+                accept: false,
+            }
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// Abandon a transfer that has not finished, from either end.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible.
+    pub async fn cancel_file(&self, key: u64) -> Result<()> {
+        let Some(transfer) = self.file_transfer(key) else {
+            return Err(anyhow!("That file transfer is no longer available"));
+        };
+        if !matches!(
+            transfer.state,
+            TransferState::Offered | TransferState::Transferring
+        ) {
+            return Err(anyhow!("That file transfer has already finished"));
+        }
+        self.fail_transfer(key, "Cancelled");
+        self.send_request(
+            &ServerMessagesEncrypted::DirectFileCancel {
+                to: transfer.peer,
+                transfer: transfer.wire_id(),
+                outgoing: transfer.outgoing,
+            }
+            .to_vec(),
+        )
+        .await
+    }
+
+    /// Decline an offer this client will not even show the user, ignoring a send
+    /// failure: the conversation already says why it was refused.
+    fn spawn_file_decline(&self, peer: u16, id: u32) {
+        let conn = self.clone();
+        tokio::spawn(async move {
+            let _ = conn
+                .send_request(
+                    &ServerMessagesEncrypted::DirectFileAnswer {
+                        to: peer,
+                        transfer: id,
+                        accept: false,
+                    }
+                    .to_vec(),
+                )
+                .await;
+        });
+    }
+
+    /// Tell the peer to abandon a transfer, ignoring a send failure: the caller
+    /// has already recorded locally why the transfer ended. `outgoing` says
+    /// whether this client is the one sending the file.
+    fn spawn_file_cancel(&self, peer: u16, id: u32, outgoing: bool) {
+        let conn = self.clone();
+        tokio::spawn(async move {
+            let _ = conn
+                .send_request(
+                    &ServerMessagesEncrypted::DirectFileCancel {
+                        to: peer,
+                        transfer: id,
+                        outgoing,
+                    }
+                    .to_vec(),
+                )
+                .await;
+        });
+    }
+
+    /// Stream an accepted file to its recipient, one encrypted chunk at a time,
+    /// off the connection's reader task.
+    fn spawn_file_send(&self, key: u64) {
+        let conn = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = conn.send_file(key).await {
+                let reason = e.to_string();
+                conn.fail_transfer(key, &reason);
+                if let Some(transfer) = conn.file_transfer(key) {
+                    conn.spawn_file_cancel(transfer.peer, transfer.wire_id(), true);
+                }
+            }
+        });
+    }
+
+    /// Read the file from disk and send it in chunks, ending with
+    /// [`ServerMessagesEncrypted::DirectFileEnd`].
+    async fn send_file(&self, key: u64) -> Result<()> {
+        use std::io::Read as _;
+
+        let transfer = self
+            .file_transfer(key)
+            .ok_or_else(|| anyhow!("That file transfer is no longer available"))?;
+        let source = transfer
+            .path
+            .clone()
+            .ok_or_else(|| anyhow!("The file to send is no longer known"))?;
+        // Derived once: the shared key costs a scalar multiplication, and every
+        // chunk of the file uses the same one. The peer had a key when the offer
+        // went out; if they have somehow lost one since, the file is not sent.
+        let shared = self
+            .peer_shared_key(transfer.peer)
+            .ok_or_else(|| anyhow!("That user has no identity key to encrypt the file to"))?;
+
+        let mut file = std::fs::File::open(&source)
+            .map_err(|e| anyhow!("Cannot read {}: {e}", source.display()))?;
+        let mut buffer = vec![0u8; conclave_common::server::DM_FILE_CHUNK_BYTES];
+        let mut sent = 0u64;
+        loop {
+            // The transfer can end under us: the peer may cancel, or disconnect.
+            if self
+                .file_transfer(key)
+                .is_none_or(|transfer| transfer.state != TransferState::Transferring)
+            {
+                return Ok(());
+            }
+            let read = match file.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(e) => return Err(anyhow!("Cannot read {}: {e}", source.display())),
+            };
+            // Never send more than was offered: the server counts the bytes
+            // against the offer and would drop the transfer.
+            let read = read.min(usize::try_from(transfer.size - sent).unwrap_or(read));
+            if read == 0 {
+                break;
+            }
+            let data = dm::encrypt(&shared, &buffer[..read]);
+            self.send_request(
+                &ServerMessagesEncrypted::DirectFileChunk {
+                    to: transfer.peer,
+                    transfer: transfer.wire_id(),
+                    data,
+                }
+                .to_vec(),
+            )
+            .await?;
+            sent += read as u64;
+            self.update_transfer(key, |transfer| transfer.progress = sent);
+        }
+
+        if sent != transfer.size {
+            return Err(anyhow!("{} changed while it was being sent", transfer.name));
+        }
+        self.send_request(
+            &ServerMessagesEncrypted::DirectFileEnd {
+                to: transfer.peer,
+                transfer: transfer.wire_id(),
+            }
+            .to_vec(),
+        )
+        .await?;
+        self.update_transfer(key, |transfer| transfer.state = TransferState::Complete);
+        Ok(())
     }
 
     /// The most recently received administrative chatroom list.
