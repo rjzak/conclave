@@ -15,12 +15,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueHint};
 
-pub const VERSION: &str = concat!(
-    "v",
-    env!("CONCLAVE_VERSION"),
-    " ",
-    env!("CONCLAVE_BUILD_DATE")
-);
+pub use conclave_common::VERSION_BANNER as VERSION;
 
 /// Conclave Tracker
 #[derive(Parser, Debug)]

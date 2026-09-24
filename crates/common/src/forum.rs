@@ -8,6 +8,7 @@
 //! names the post it replies to. Posts may optionally be signed by the author's
 //! ed25519 identity key so other users can verify authorship.
 
+use crate::group::GroupTag;
 use crate::net::{SigningKey, VerifyingKey};
 
 use chrono::{DateTime, Utc};
@@ -25,6 +26,11 @@ pub struct ForumTopic {
 
     /// Longer description of the topic
     pub description: String,
+
+    /// Groups the topic is restricted to; empty means every user on the server
+    /// can read it. A user only ever receives topics they may read, so this
+    /// says who *else* can see what they post here, not whether they may enter.
+    pub restricted_to: Vec<GroupTag>,
 }
 
 /// Summary of a discussion thread within a topic.

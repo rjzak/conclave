@@ -1,5 +1,6 @@
 [package]
 name = "conclave-common"
+build = "build.rs"
 description = "Common data structures for the Conclave communications environment"
 authors.workspace = true
 edition.workspace = true
@@ -35,6 +36,9 @@ tracing-layer-win-eventlog = { workspace = true }
 
 [target.'cfg(not(target_os = "haiku"))'.dependencies]
 home = { workspace = true }
+
+[build-dependencies]
+chrono = { workspace = true, features = ["now"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

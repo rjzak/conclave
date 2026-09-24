@@ -16,19 +16,17 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
 
 use anyhow::{Result, bail};
 use dashmap::DashMap;
-use semver::Version;
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
-/// Conclave version
-pub static VERSION: LazyLock<Version> =
-    LazyLock::new(|| Version::parse(env!("CONCLAVE_VERSION")).unwrap());
+/// The version of Conclave
+pub use conclave_common::VERSION;
 
 const DEFAULT_TRACKER_FILE: &str = "tracker.toml";
 

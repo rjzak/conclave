@@ -16,6 +16,7 @@ use conclave_common::admin::server::{
 use conclave_common::forum::{
     ForumPost, ForumSignature, ForumThreadInfo, ForumTopic, NewForumPost, NewForumThread,
 };
+use conclave_common::group::GroupTag;
 use conclave_common::net::{
     DEFAULT_REKEY_INTERVAL, DefaultEncryptedStream, EncryptedRead, EncryptedWrite, random_keypair,
 };
@@ -33,8 +34,8 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
 
 use anyhow::{Result, anyhow, bail, ensure};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
@@ -60,9 +61,8 @@ const DEFAULT_SERVER_CONFIG: &str = "server.toml";
 
 const SCHEMA: &str = include_str!("schema.sql");
 
-/// Conclave version
-pub static VERSION: LazyLock<Version> =
-    LazyLock::new(|| Version::parse(env!("CONCLAVE_VERSION")).unwrap());
+/// The version of Conclave
+pub use conclave_common::VERSION;
 
 /// Find the server config and database files from the common OS-specific Conclave config directory
 ///
@@ -3026,7 +3026,9 @@ impl State {
             return Vec::new();
         }
         let uid = user_id.map_or(-1_i64, i64::from);
-        self.sqlite
+        let mut gating = self.gating_groups("CHATROOM_GROUP", "room").await;
+        let mut rooms = self
+            .sqlite
             .conn(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT c.id, c.name FROM CHATROOM c \
@@ -3041,12 +3043,18 @@ impl State {
                     Ok(ChatroomInfo {
                         id: row.get(0)?,
                         name: row.get(1)?,
+                        restricted_to: Vec::new(),
                     })
                 })?
                 .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()
             })
             .await
-            .unwrap_or_default()
+            .unwrap_or_default();
+
+        for room in &mut rooms {
+            room.restricted_to = gating.remove(&u32::from(room.id)).unwrap_or_default();
+        }
+        rooms
     }
 
     /// Whether a user may access a specific chatroom.
@@ -3745,6 +3753,38 @@ impl State {
         Ok(())
     }
 
+    /// The groups gating each row of a `<thing>_GROUP` join table, keyed by the
+    /// thing's id, so a listing can say who a restricted room or topic is
+    /// visible to. `table` and `column` are literals from the callers below,
+    /// never anything a client supplies.
+    async fn gating_groups(
+        &self,
+        table: &'static str,
+        column: &'static str,
+    ) -> HashMap<u32, Vec<GroupTag>> {
+        let rows: Vec<(u32, String, Option<i64>)> = self
+            .sqlite
+            .conn(move |conn| {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT xg.{column}, g.name, g.color FROM {table} xg \
+                     JOIN GRP g ON g.id = xg.gid ORDER BY xg.{column}, g.name;"
+                ))?;
+                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                    .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()
+            })
+            .await
+            .unwrap_or_default();
+
+        let mut gating: HashMap<u32, Vec<GroupTag>> = HashMap::new();
+        for (id, name, color) in rows {
+            gating.entry(id).or_default().push(GroupTag {
+                name,
+                color: color.map(color_from_db),
+            });
+        }
+        gating
+    }
+
     /// The forum topics a user may access. Empty when forums are disabled. A
     /// topic with no group restriction is open to everyone; otherwise the user
     /// must be an admin or a member of one of the topic's groups.
@@ -3753,7 +3793,9 @@ impl State {
             return Vec::new();
         }
         let uid = user_id.map_or(-1_i64, i64::from);
-        self.sqlite
+        let mut gating = self.gating_groups("FORUM_TOPIC_GROUP", "topic").await;
+        let mut topics = self
+            .sqlite
             .conn(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT t.id, t.name, t.description FROM FORUM_TOPIC t \
@@ -3769,12 +3811,18 @@ impl State {
                         id: row.get(0)?,
                         name: row.get(1)?,
                         description: row.get(2)?,
+                        restricted_to: Vec::new(),
                     })
                 })?
                 .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()
             })
             .await
-            .unwrap_or_default()
+            .unwrap_or_default();
+
+        for topic in &mut topics {
+            topic.restricted_to = gating.remove(&topic.id).unwrap_or_default();
+        }
+        topics
     }
 
     /// Whether a user may access a specific forum topic.
@@ -4357,8 +4405,8 @@ impl State {
 
 /// In-memory tail of the most recent log output, shown in the GUI log window.
 #[cfg(feature = "gui")]
-static LOG_BUFFER: LazyLock<std::sync::Mutex<Vec<u8>>> =
-    LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+static LOG_BUFFER: std::sync::LazyLock<std::sync::Mutex<Vec<u8>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
 
 /// A `tracing` writer that appends formatted log lines to [`LOG_BUFFER`], keeping
 /// only the most recent output so memory stays bounded.
@@ -4497,8 +4545,8 @@ impl State {
                         inner_ui.add_space(16.0);
                         inner_ui.heading("Conclave Server");
                         inner_ui.add_space(8.0);
-                        inner_ui.label(format!("Version {}", env!("CONCLAVE_VERSION")));
-                        inner_ui.label(format!("Built {}", env!("CONCLAVE_BUILD_DATE")));
+                        inner_ui.label(format!("Version {}", conclave_common::VERSION_STRING));
+                        inner_ui.label(format!("Built {}", conclave_common::BUILD_DATE));
                     });
                 });
             },

@@ -8,7 +8,9 @@
 #![forbid(unsafe_code)]
 
 use std::path::PathBuf;
-use std::sync::Once;
+use std::sync::{LazyLock, Once};
+
+use semver::Version;
 
 /// Administrative data structures
 pub mod admin;
@@ -31,6 +33,9 @@ pub mod files;
 /// Data structures for the optional threaded-discussion (forum) feature
 pub mod forum;
 
+/// Group labels shown alongside whatever a group restricts.
+pub mod group;
+
 /// Serialization and deserialization utilities for cryptographic keys. Keys stored in config files
 /// are base64-encoded; the `_bytes` variants, along with the signature helpers, keep the same
 /// material as raw bytes for the ML-DSA types sent over the network, which have no `serde`
@@ -39,6 +44,32 @@ pub mod serde;
 
 /// Data structures for communicating with the server
 pub mod server;
+
+/// The version every Conclave binary reports, worked out once by this crate's
+/// build script and re-exported by the client, server and tracker crates so
+/// there is only ever one answer.
+///
+/// The git commit the build came from — and `dirty` when the working tree had
+/// uncommitted changes — ride along as semver build metadata, which comparisons
+/// ignore: a working build is the same version as the release it was built
+/// from, not an older one.
+pub static VERSION: LazyLock<Version> =
+    LazyLock::new(|| Version::parse(VERSION_STRING).expect("build script emits valid semver"));
+
+/// [`VERSION`] as the build script wrote it, for display and for the places
+/// that want it without parsing.
+pub const VERSION_STRING: &str = env!("CONCLAVE_VERSION");
+
+/// The date this was built (UTC, `YYYY-MM-DD`).
+pub const BUILD_DATE: &str = env!("CONCLAVE_BUILD_DATE");
+
+/// Version and build date as the binaries print them for `--version`.
+pub const VERSION_BANNER: &str = concat!(
+    "v",
+    env!("CONCLAVE_VERSION"),
+    " ",
+    env!("CONCLAVE_BUILD_DATE")
+);
 
 /// URL protocol
 pub const URL_PROTOCOL: &str = "conclave://";

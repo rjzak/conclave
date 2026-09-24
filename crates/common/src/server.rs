@@ -3,6 +3,7 @@
 use crate::admin::server::{ClientAdminMessagesEncrypted, ServerAdminMessagesEncrypted};
 use crate::files::FileEntry;
 use crate::forum::{ForumPost, ForumThreadInfo, ForumTopic, NewForumPost, NewForumThread};
+use crate::group::GroupTag;
 
 use std::collections::BTreeMap;
 
@@ -149,6 +150,11 @@ pub struct ChatroomInfo {
 
     /// Chatroom name
     pub name: String,
+
+    /// Groups the room is restricted to; empty means every user on the server
+    /// can join. A user only ever receives rooms they may join, so this says
+    /// who *else* is able to read the room, not whether they may enter.
+    pub restricted_to: Vec<GroupTag>,
 }
 
 /// A chatroom's current topic and who set it. Held only in server memory: it

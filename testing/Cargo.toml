@@ -14,6 +14,7 @@ conclave-client = { workspace = true }
 conclave-common = { workspace = true }
 conclave-server = { workspace = true }
 conclave-tracker = { workspace = true }
+semver = { workspace = true, features = ["std"] }
 tempdir = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
 uuid = { workspace = true, features = ["std", "v4"] }

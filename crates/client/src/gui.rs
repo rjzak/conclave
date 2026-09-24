@@ -4,6 +4,7 @@ use conclave_client::config::{BookmarkEntry, KnownHost, UserAuth};
 use conclave_client::conn::{ChatLine, ConclaveConnection, DmBody, FileTransfer, TransferState};
 use conclave_client::{Client, DiscoveredServer, discover_servers};
 use conclave_common::forum::ForumPost;
+use conclave_common::group::{GroupTag, audience};
 use conclave_common::server::{
     ChatroomInfo, ConnectedUser, IDLE_TIMEOUT_MINUTES, UserAuthentication, VerifyingKey,
 };
@@ -139,6 +140,79 @@ const LOCKED_SERVER_HINT: &str = "This server does not allow anonymous users —
 
 /// Padlock shown before the name of a server that requires an account.
 const LOCKED_SERVER_PREFIX: &str = "🔒 ";
+
+/// Padlock shown before the name of a chatroom or forum topic a group gates,
+/// the same mark [`server_list_name`] puts on a server that admits no guests.
+const RESTRICTED_PREFIX: &str = "🔒 ";
+
+/// A room or topic name as a list shows it: padlocked when a group restricts
+/// it, plain when everyone on the server can read it. An unmarked name is the
+/// signal that there is nothing to restrict.
+fn restricted_name(name: &str, restricted_to: &[GroupTag]) -> String {
+    if restricted_to.is_empty() {
+        name.to_string()
+    } else {
+        format!("{RESTRICTED_PREFIX}{name}")
+    }
+}
+
+/// The colour a group is drawn in: its own, or the theme's weak text when it
+/// has none.
+fn group_color(ui: &egui::Ui, group: &GroupTag) -> egui::Color32 {
+    group.color.map_or_else(
+        || ui.visuals().weak_text_color(),
+        |[r, g, b]| egui::Color32::from_rgb(r, g, b),
+    )
+}
+
+/// Chips naming the groups a room or topic is restricted to, each tinted with
+/// its group's own colour — the colour that already tints its members' names,
+/// so one colour means one group wherever it is seen. The names are spelled out
+/// beside the colour, which a legend-less tint alone could not say, and which a
+/// reader who cannot tell the colours apart still gets.
+///
+/// Draws nothing when nothing is restricted.
+fn group_chips(ui: &mut egui::Ui, restricted_to: &[GroupTag]) {
+    for group in restricted_to {
+        let color = group_color(ui, group);
+        egui::Frame::new()
+            .fill(color.gamma_multiply(0.20))
+            .stroke(egui::Stroke::new(1.0, color))
+            .corner_radius(6)
+            .inner_margin(egui::Margin::symmetric(5, 1))
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new(&group.name).small().color(color));
+            });
+    }
+}
+
+/// A line saying who can read what is written here, for wherever something is
+/// about to be posted. The open case is spelled out rather than left to the
+/// absence of a padlock: a room being more public than it looks is the mistake
+/// worth preventing.
+fn audience_line(ui: &mut egui::Ui, restricted_to: &[GroupTag]) {
+    ui.horizontal_wrapped(|ui| {
+        if restricted_to.is_empty() {
+            ui.label(
+                egui::RichText::new("🌐 Visible to everyone on this server")
+                    .small()
+                    .weak(),
+            );
+        } else {
+            ui.label(egui::RichText::new("🔒 Visible only to").small().weak());
+            group_chips(ui, restricted_to);
+        }
+    });
+}
+
+/// The groups gating `topic`, or nothing when the topic is unknown — which
+/// reads as open, the same as a topic nobody restricted.
+fn gating_for(topics: &[conclave_common::forum::ForumTopic], topic: u32) -> &[GroupTag] {
+    topics
+        .iter()
+        .find(|t| t.id == topic)
+        .map_or(&[], |t| t.restricted_to.as_slice())
+}
 
 /// Whether a user counts as idle (inactive for longer than the timeout), in
 /// which case their name is shown dulled.
@@ -1645,7 +1719,13 @@ impl ConclaveGUI {
                                         );
                                     }
                                     for room in &server.rooms {
-                                        if ui.button(&room.name).clicked()
+                                        if ui
+                                            .button(restricted_name(
+                                                &room.name,
+                                                &room.restricted_to,
+                                            ))
+                                            .on_hover_text(audience(&room.restricted_to))
+                                            .clicked()
                                             && let Ok(mut open) = self.open_chats.write()
                                         {
                                             open.insert((server.key.clone(), room.id));
@@ -1743,8 +1823,8 @@ impl ConclaveGUI {
                             ui.add_space(16.0);
                             ui.heading("Conclave");
                             ui.add_space(8.0);
-                            ui.label(format!("Version {}", env!("CONCLAVE_VERSION")));
-                            ui.label(format!("Built {}", env!("CONCLAVE_BUILD_DATE")));
+                            ui.label(format!("Version {}", conclave_common::VERSION_STRING));
+                            ui.label(format!("Built {}", conclave_common::BUILD_DATE));
                         });
                     });
                 },
@@ -3325,7 +3405,16 @@ impl ConclaveGUI {
                                                             );
                                                         }
                                                         for room in &rooms {
-                                                            if ui.button(&room.name).clicked() {
+                                                            if ui
+                                                                .button(restricted_name(
+                                                                    &room.name,
+                                                                    &room.restricted_to,
+                                                                ))
+                                                                .on_hover_text(audience(
+                                                                    &room.restricted_to,
+                                                                ))
+                                                                .clicked()
+                                                            {
                                                                 if let Ok(mut o) =
                                                                     open_chats.write()
                                                                 {
@@ -3649,11 +3738,18 @@ impl ConclaveGUI {
             };
             let conn = conn.clone();
             let key_owned = key.clone();
-            let room_name = conn
+            let room_info = conn
                 .chatrooms_available()
                 .into_iter()
-                .find(|r| r.id == room)
-                .map_or_else(|| format!("Room {room}"), |r| r.name);
+                .find(|r| r.id == room);
+            let restricted_to = room_info
+                .as_ref()
+                .map(|r| r.restricted_to.clone())
+                .unwrap_or_default();
+            let room_name = room_info.map_or_else(
+                || format!("Room {room}"),
+                |r| restricted_name(&r.name, &r.restricted_to),
+            );
             // Fold the current topic (and who set it) into the window title.
             let title = match conn.chat_room(room).and_then(|s| s.topic) {
                 Some(t) => format!(
@@ -3782,6 +3878,9 @@ impl ConclaveGUI {
                                 }
                             });
                         }
+                        // Who is able to read the room, under the topic that
+                        // says what it is for.
+                        audience_line(ui, &restricted_to);
                         ui.add_space(4.0);
                     });
 
@@ -4455,13 +4554,24 @@ impl ConclaveGUI {
                                 open_thread = Some(None);
                             }
                             if let Some(tid) = sel_topic {
-                                let tname = topics
-                                    .iter()
-                                    .find(|t| t.id == tid)
-                                    .map_or_else(|| format!("Topic {tid}"), |t| t.name.clone());
+                                let selected = topics.iter().find(|t| t.id == tid);
+                                let tname = selected.map_or_else(
+                                    || format!("Topic {tid}"),
+                                    |t| restricted_name(&t.name, &t.restricted_to),
+                                );
+                                let gating = selected.map(|t| t.restricted_to.as_slice());
                                 ui.label("›");
-                                if ui.selectable_label(sel_thread.is_none(), tname).clicked() {
+                                if ui
+                                    .selectable_label(sel_thread.is_none(), tname)
+                                    .on_hover_text(audience(gating.unwrap_or_default()))
+                                    .clicked()
+                                {
                                     open_thread = Some(None);
+                                }
+                                // The topic list has scrolled away by now, so
+                                // the breadcrumb keeps saying who is reading.
+                                if let Some(gating) = gating {
+                                    group_chips(ui, gating);
                                 }
                                 if let Some(th) = sel_thread {
                                     let subject = conn
@@ -4485,9 +4595,17 @@ impl ConclaveGUI {
                                 egui::ScrollArea::vertical().show(ui, |ui| {
                                     for topic in &topics {
                                         ui.horizontal(|ui| {
-                                            if ui.button(&topic.name).clicked() {
+                                            if ui
+                                                .button(restricted_name(
+                                                    &topic.name,
+                                                    &topic.restricted_to,
+                                                ))
+                                                .on_hover_text(audience(&topic.restricted_to))
+                                                .clicked()
+                                            {
                                                 open_topic = Some(Some(topic.id));
                                             }
+                                            group_chips(ui, &topic.restricted_to);
                                             if !topic.description.is_empty() {
                                                 ui.label(
                                                     egui::RichText::new(&topic.description).weak(),
@@ -4531,6 +4649,7 @@ impl ConclaveGUI {
                                     });
                                 ui.separator();
                                 ui.label(egui::RichText::new("New thread").strong());
+                                audience_line(ui, gating_for(&topics, topic));
                                 ui.add(
                                     egui::TextEdit::singleline(&mut nt_subject)
                                         .hint_text("Subject")
@@ -4553,7 +4672,7 @@ impl ConclaveGUI {
                                 });
                             }
                             // Thread view: posts + reply composer.
-                            (Some(_topic), Some(thread)) => {
+                            (Some(topic), Some(thread)) => {
                                 egui::ScrollArea::vertical()
                                     .max_height(320.0)
                                     .show(ui, |ui| match conn.forum_posts(thread) {
@@ -4589,6 +4708,7 @@ impl ConclaveGUI {
                                         reply_to = None;
                                     }
                                 });
+                                audience_line(ui, gating_for(&topics, topic));
                                 ui.add(
                                     egui::TextEdit::multiline(&mut reply_body)
                                         .hint_text("Reply")

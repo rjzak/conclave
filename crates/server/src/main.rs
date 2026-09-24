@@ -20,12 +20,7 @@ use clap::{Parser, Subcommand, ValueHint};
 use dialoguer::Password;
 use zeroize::Zeroize;
 
-pub const VERSION: &str = concat!(
-    "v",
-    env!("CONCLAVE_VERSION"),
-    " ",
-    env!("CONCLAVE_BUILD_DATE")
-);
+pub use conclave_common::VERSION_BANNER as VERSION;
 
 /// Conclave Server
 #[derive(Parser, Debug)]

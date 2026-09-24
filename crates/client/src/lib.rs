@@ -30,7 +30,7 @@ use conclave_common::tracker::{Advertise, Tracker, TrackerProtocol, TrackerWithK
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail, ensure};
 use dashmap::DashSet;
@@ -40,9 +40,8 @@ use tokio::net::TcpStream;
 use tokio::sync::RwLock;
 use tracing::{error, info, trace, warn};
 
-/// Conclave version
-pub static VERSION: LazyLock<Version> =
-    LazyLock::new(|| Version::parse(env!("CONCLAVE_VERSION")).unwrap());
+/// The version of Conclave
+pub use conclave_common::VERSION;
 
 /// Conclave client
 pub struct Client {

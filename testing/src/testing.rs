@@ -155,15 +155,35 @@ async fn integration() {
 
 #[test]
 fn version() {
-    // Ensure the calls to unwrap() in the semver parsing don't panic.
-    assert!(!conclave_client::VERSION.build.is_empty()); // Git hash
-    println!("Semver version: {:?}", conclave_client::VERSION);
-    let _ = conclave_client::VERSION.to_string();
-    let v = conclave_server::VERSION.to_string();
-    println!("Version: {v}");
-    let _ = conclave_tracker::VERSION.to_string();
-    assert_eq!(*conclave_client::VERSION, *conclave_server::VERSION);
-    assert_eq!(*conclave_tracker::VERSION, *conclave_server::VERSION);
+    // The version parses — conclave_common::VERSION would panic on first use
+    // otherwise — and carries the commit it was built from.
+    println!("Semver version: {:?}", *conclave_common::VERSION);
+    assert!(!conclave_common::VERSION.build.is_empty(), "no git hash");
+
+    // The commit (and `dirty`) are build metadata, not a pre-release: a working
+    // build is the same version as the release it came from, not older than it,
+    // so it is never mistaken for an out-of-date binary.
+    assert!(
+        conclave_common::VERSION.pre.is_empty(),
+        "version is a pre-release"
+    );
+    let released = semver::Version::new(
+        conclave_common::VERSION.major,
+        conclave_common::VERSION.minor,
+        conclave_common::VERSION.patch,
+    );
+    assert!(*conclave_common::VERSION >= released);
+
+    // Every crate reports that one version, by re-exporting it rather than
+    // working it out again, so no two binaries can disagree.
+    println!("Version: {}", *conclave_server::VERSION);
+    assert_eq!(*conclave_client::VERSION, *conclave_common::VERSION);
+    assert_eq!(*conclave_server::VERSION, *conclave_common::VERSION);
+    assert_eq!(*conclave_tracker::VERSION, *conclave_common::VERSION);
+
+    // What the binaries print for --version quotes the same numbers.
+    assert!(conclave_common::VERSION_BANNER.contains(conclave_common::VERSION_STRING));
+    assert!(conclave_common::VERSION_BANNER.contains(conclave_common::BUILD_DATE));
 }
 
 /// Poll `check` until it returns a value or the deadline passes.
@@ -578,6 +598,122 @@ async fn direct_messages_are_always_encrypted() {
             .iter()
             .any(|msg| matches!(&msg.body, DmBody::Text(text) if text == "still there?"))
     );
+
+    server_process.abort();
+}
+
+/// A room or topic tells the members who can see it what groups gate it, so the
+/// client can say who else is reading. An unrestricted one carries nothing,
+/// which is what "everyone on this server" looks like on the wire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rooms_and_topics_name_the_groups_that_gate_them() {
+    const PORT: u16 = 8094;
+
+    let tempdir = TempDir::new("conclave_gating").unwrap();
+    let server_db = tempdir.path().join(format!("gating_{}.db", Uuid::new_v4()));
+
+    let (server, password) = conclave_server::State::new(
+        "Gating Server".into(),
+        "Description".into(),
+        LOCALHOST,
+        Some("localhost".into()),
+        PORT,
+        false,
+        server_db,
+    )
+    .unwrap();
+    let server = Arc::new(server);
+
+    // One coloured group, with the admin account in it.
+    server
+        .create_group("Engineering".into(), None, Some([0x33, 0x88, 0xcc]))
+        .await
+        .unwrap();
+    let gid = server
+        .admin_list_groups()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|g| g.name == "Engineering")
+        .expect("the group just created")
+        .id;
+    let (admin_uid, _) = server
+        .authenticate_user(("admin".to_string(), password.to_string()).into())
+        .await
+        .unwrap();
+    server.add_user_to_group(admin_uid, gid).await.unwrap();
+
+    server.set_chat_enabled(true).await.unwrap();
+    server.set_forums_enabled(true).await.unwrap();
+    server
+        .create_chatroom("Lobby".into(), vec![])
+        .await
+        .unwrap();
+    server
+        .create_chatroom("Standup".into(), vec![gid])
+        .await
+        .unwrap();
+    server
+        .create_forum_topic("Announcements".into(), String::new(), vec![])
+        .await
+        .unwrap();
+    server
+        .create_forum_topic("Roadmap".into(), String::new(), vec![gid])
+        .await
+        .unwrap();
+
+    let server_clone = server.clone();
+    let server_process = tokio::spawn(async move { server_clone.serve().await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let config = tempdir
+        .path()
+        .join(format!("admin_{}.toml", Uuid::new_v4()));
+    let client = conclave_client::Client::new(config).unwrap();
+    let conn = client
+        .connect(
+            LOCALHOST.to_string().as_str(),
+            PORT,
+            true,
+            "admin".to_string(),
+            Some(("admin".to_string(), password.to_string()).into()),
+            None,
+            None,
+            String::new(),
+            std::collections::BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+
+    // Three rooms: the server's built-in Public one, plus the two created here.
+    let rooms = eventually("the room list", || {
+        let rooms = conn.chatrooms_available();
+        (rooms.len() == 3).then_some(rooms)
+    })
+    .await;
+    let topics = eventually("the topic list", || {
+        let topics = conn.forum_topics();
+        (topics.len() == 2).then_some(topics)
+    })
+    .await;
+
+    // Open to everyone: nothing to name.
+    let lobby = rooms.iter().find(|r| r.name == "Lobby").unwrap();
+    assert!(lobby.restricted_to.is_empty());
+    let announcements = topics.iter().find(|t| t.name == "Announcements").unwrap();
+    assert!(announcements.restricted_to.is_empty());
+
+    // Gated: the group arrives by name and colour, not as an id the client
+    // could not render.
+    let standup = rooms.iter().find(|r| r.name == "Standup").unwrap();
+    assert_eq!(standup.restricted_to.len(), 1);
+    assert_eq!(standup.restricted_to[0].name, "Engineering");
+    assert_eq!(standup.restricted_to[0].color, Some([0x33, 0x88, 0xcc]));
+
+    let roadmap = topics.iter().find(|t| t.name == "Roadmap").unwrap();
+    assert_eq!(roadmap.restricted_to.len(), 1);
+    assert_eq!(roadmap.restricted_to[0].name, "Engineering");
+    assert_eq!(roadmap.restricted_to[0].color, Some([0x33, 0x88, 0xcc]));
 
     server_process.abort();
 }

@@ -951,6 +951,7 @@ dependencies = [
  "conclave-common",
  "conclave-server",
  "conclave-tracker",
+ "semver",
  "tempdir",
  "tokio",
  "uuid",
@@ -961,7 +962,6 @@ name = "conclave-tracker"
 version = "0.0.2"
 dependencies = [
  "anyhow",
- "chrono",
  "clap",
  "conclave-common",
  "dashmap",

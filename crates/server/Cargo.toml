@@ -54,7 +54,6 @@ wgpu = { workspace = true, features = ["metal"], optional = true }
 wgpu = { workspace = true, features = ["dx12"], optional = true }
 
 [build-dependencies]
-chrono = { workspace = true, features = ["now"] }
 winresource = { workspace = true, features = ["toml"] }
 
 [dev-dependencies]

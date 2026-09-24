@@ -1,77 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use chrono::Utc;
-
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "windows" {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("server.ico").set_language(0x0009);
         res.compile().unwrap();
     }
-
-    // Manually get Git information
-    // Adapted from https://github.com/ratatui/async-template/blob/main/ratatui-counter/build.rs
-
-    let git_output = std::process::Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .output()
-        .ok();
-    let git_dir = git_output
-        .as_ref()
-        .and_then(|output| std::str::from_utf8(&output.stdout).ok().map(str::trim));
-
-    // Tell cargo to rebuild if the head or any relevant refs change.
-    if let Some(git_dir) = git_dir {
-        let git_path = std::path::Path::new(git_dir);
-        let refs_path = git_path.join("refs");
-        if git_path.join("HEAD").exists() {
-            println!("cargo:rerun-if-changed={}/HEAD", git_dir);
-        }
-        if git_path.join("packed-refs").exists() {
-            println!("cargo:rerun-if-changed={}/packed-refs", git_dir);
-        }
-        if refs_path.join("heads").exists() {
-            println!("cargo:rerun-if-changed={}/refs/heads", git_dir);
-        }
-        if refs_path.join("tags").exists() {
-            println!("cargo:rerun-if-changed={}/refs/tags", git_dir);
-        }
-        let git_short_hash_cmd = std::process::Command::new("git")
-            .args(["rev-parse", "--short", "HEAD"])
-            .output()
-            .ok();
-        let git_short_hash = git_short_hash_cmd
-            .as_ref()
-            .and_then(|output| std::str::from_utf8(&output.stdout).ok().map(str::trim));
-
-        let git_short_hash = if let Some(git_short_hash) = git_short_hash {
-            assert!(!git_short_hash.is_empty());
-            format!("+{git_short_hash}")
-        } else {
-            String::new()
-        };
-
-        let git_dirty_cmd = std::process::Command::new("git")
-            .args(["describe", "--all", "--dirty"])
-            .output()
-            .ok();
-        let git_dirty = git_dirty_cmd
-            .as_ref()
-            .and_then(|output| std::str::from_utf8(&output.stdout).ok().map(str::trim));
-        let dirty = git_dirty.map(|d| d.contains("dirty")).unwrap_or(false);
-        let dirty = if dirty { "-dirty" } else { "" };
-
-        let conclave_version = format!("{}{}{}", env!("CARGO_PKG_VERSION"), dirty, git_short_hash);
-        println!("cargo:rustc-env=CONCLAVE_VERSION={}", conclave_version);
-    } else {
-        println!(
-            "cargo:rustc-env=CONCLAVE_VERSION=v{}",
-            env!("CARGO_PKG_VERSION")
-        );
-    }
-
-    println!(
-        "cargo:rustc-env=CONCLAVE_BUILD_DATE={}",
-        Utc::now().format("%Y-%m-%d")
-    );
 }
