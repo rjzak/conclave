@@ -2786,14 +2786,8 @@ impl ConclaveGUI {
                                             password: pass.clone(),
                                         }
                                     });
-                                match Client::fetch_server_info(
-                                    &host,
-                                    port,
-                                    key,
-                                    &display,
-                                    handshake_auth,
-                                )
-                                .await
+                                match Client::fetch_server_info(&host, port, key, handshake_auth)
+                                    .await
                                 {
                                     Ok(info) => info.name,
                                     Err(e) => {
@@ -3521,18 +3515,12 @@ impl ConclaveGUI {
                                                         }
                                                     }
                                                     // Open a direct-message window (not
-                                                    // to oneself); a lock marks that the
-                                                    // peer's key allows E2E encryption.
-                                                    if user.display_name != own_name {
-                                                        let dm_label =
-                                                            if conn.dm_encrypted_with(user.id) {
-                                                                "🔒 Message"
-                                                            } else {
-                                                                "Message"
-                                                            };
-                                                        if ui.small_button(dm_label).clicked() {
-                                                            open_dm_request = Some(user.id);
-                                                        }
+                                                    // to oneself); the lock marks that
+                                                    // every conversation is E2E encrypted.
+                                                    if user.display_name != own_name
+                                                        && ui.small_button("🔒 Message").clicked()
+                                                    {
+                                                        open_dm_request = Some(user.id);
                                                     }
                                                 });
                                                 ui.end_row();
@@ -3974,8 +3962,10 @@ impl ConclaveGUI {
                 .into_iter()
                 .find(|u| u.id == peer)
                 .map_or_else(|| format!("#{peer}"), |u| u.display_name);
-            let encrypted = conn.dm_encrypted_with(peer);
+            // A fingerprint means the peer is still on the roster, so there is a
+            // key to encrypt to. Once they leave, nothing more can be sent.
             let fingerprint = conn.peer_key_fingerprint(peer);
+            let present = fingerprint.is_some();
             let title = format!("DM {peer_name} — {server_name}");
             let close_reqs = self.dm_window_close_requests.clone();
             let active_server = self.active_server.clone();
@@ -4007,23 +3997,21 @@ impl ConclaveGUI {
                     // Top: encryption status and the peer's key fingerprint.
                     egui::Panel::top(format!("dm_status:{key_owned}:{peer}")).show(ctx, |ui| {
                         ui.add_space(2.0);
-                        if encrypted {
+                        ui.label(
+                            egui::RichText::new("🔒 End-to-end encrypted")
+                                .color(egui::Color32::from_rgb(0x33, 0xaa, 0x33))
+                                .strong(),
+                        );
+                        if let Some(fp) = &fingerprint {
                             ui.label(
-                                egui::RichText::new("🔒 End-to-end encrypted")
-                                    .color(egui::Color32::from_rgb(0x33, 0xaa, 0x33))
-                                    .strong(),
+                                egui::RichText::new(format!("Key: {fp}"))
+                                    .weak()
+                                    .monospace()
+                                    .small(),
                             );
-                            if let Some(fp) = &fingerprint {
-                                ui.label(
-                                    egui::RichText::new(format!("Key: {fp}"))
-                                        .weak()
-                                        .monospace()
-                                        .small(),
-                                );
-                            }
                         } else {
                             ui.label(
-                                egui::RichText::new("🔓 Not encrypted — peer has no key")
+                                egui::RichText::new("This user has disconnected")
                                     .color(egui::Color32::from_rgb(0xcc, 0x88, 0x00)),
                             );
                         }
@@ -4047,14 +4035,14 @@ impl ConclaveGUI {
                             }
                             // The peer decides whether to accept; nothing leaves
                             // this machine until they do. A file is only ever
-                            // sent encrypted, so a peer with no key cannot be
+                            // sent encrypted, so a peer who has left cannot be
                             // offered one at all.
-                            let attach = ui.add_enabled(encrypted, egui::Button::new("📎"));
-                            let attach = if encrypted {
+                            let attach = ui.add_enabled(present, egui::Button::new("📎"));
+                            let attach = if present {
                                 attach.on_hover_text("Offer a file to this user")
                             } else {
                                 attach.on_disabled_hover_text(
-                                    "This user has no key, so a file cannot be encrypted to them",
+                                    "This user has disconnected, so a file cannot be encrypted to them",
                                 )
                             };
                             if attach.clicked() {

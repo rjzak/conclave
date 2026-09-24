@@ -84,11 +84,6 @@ pub struct DmMessage {
     /// Whether this side sent the message (`true`) or received it (`false`).
     pub from_me: bool,
 
-    /// Whether the message travelled end-to-end encrypted. Always true for a
-    /// [`DmBody::File`], which has no unencrypted form, and meaningless for a
-    /// [`DmBody::Notice`], which never leaves this client.
-    pub encrypted: bool,
-
     /// What the entry holds: a message, or a file transfer.
     pub body: DmBody,
 }
@@ -114,9 +109,7 @@ pub enum TransferState {
 
 /// A file being sent to, or received from, another user alongside a
 /// conversation. Like the messages themselves, transfers live only as long as
-/// the connection. Every transfer is end-to-end encrypted — there is no
-/// unencrypted variant to distinguish — so a peer that advertised no identity
-/// key can neither be offered a file nor offer one that will be accepted.
+/// the connection.
 #[derive(Clone, Debug)]
 pub struct FileTransfer {
     /// Local key, which a [`DmBody::File`] entry refers to.
@@ -591,10 +584,9 @@ impl ConclaveConnection {
                     ClientMessagesEncrypted::DirectMessageReceived {
                         from,
                         from_display_name: _,
-                        encrypted,
                         payload,
                     } => {
-                        conn_clone.apply_direct_message(from, encrypted, &payload);
+                        conn_clone.apply_direct_message(from, &payload);
                     }
                     ClientMessagesEncrypted::DirectFileOffered {
                         from,
@@ -868,29 +860,26 @@ impl ConclaveConnection {
             .cloned()
     }
 
-    /// Record an inbound direct message from `peer`, decrypting it when it
-    /// arrived end-to-end encrypted.
-    fn apply_direct_message(&self, peer: u16, encrypted: bool, payload: &[u8]) {
-        let text = if encrypted {
-            match self.peer_verifying_key(peer) {
-                Some(their_key) => {
-                    let key = dm::shared_key(&self.signing_key, &their_key);
-                    dm::decrypt(&key, payload).map_or_else(
-                        |_| "[unable to decrypt]".to_string(),
-                        |bytes| String::from_utf8_lossy(&bytes).into_owned(),
-                    )
-                }
-                None => "[unable to decrypt]".to_string(),
-            }
-        } else {
-            String::from_utf8_lossy(payload).into_owned()
-        };
+    /// Record an inbound direct message from `peer`, decrypting it to the key
+    /// shared with them.
+    ///
+    /// Every direct message is end-to-end encrypted, and nothing on the wire can
+    /// claim otherwise, so a payload that does not decrypt was not encrypted to
+    /// this user: it is marked as such rather than displayed as whatever bytes
+    /// arrived.
+    fn apply_direct_message(&self, peer: u16, payload: &[u8]) {
+        let text = self
+            .peer_shared_key(peer)
+            .and_then(|key| dm::decrypt(&key, payload).ok())
+            .map_or_else(
+                || "[unable to decrypt]".to_string(),
+                |bytes| String::from_utf8_lossy(&bytes).into_owned(),
+            );
         self.push_dm(
             peer,
             DmMessage {
                 time: Local::now(),
                 from_me: false,
-                encrypted,
                 body: DmBody::Text(text),
             },
         );
@@ -912,26 +901,19 @@ impl ConclaveConnection {
             .push(message);
     }
 
-    /// The identity public key `peer` advertised, if any.
+    /// The identity public key `peer` presented, if they are still connected.
     fn peer_public_key(&self, peer: u16) -> Option<[u8; 32]> {
         self.connected_users
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .find(|user| user.id == peer)
-            .and_then(|user| user.public_key)
+            .map(|user| user.public_key)
     }
 
     /// `peer`'s identity key parsed into a [`VerifyingKey`], if usable.
     fn peer_verifying_key(&self, peer: u16) -> Option<VerifyingKey> {
         VerifyingKey::from_bytes(&self.peer_public_key(peer)?).ok()
-    }
-
-    /// Whether direct messages with `peer` can be end-to-end encrypted (the peer
-    /// provided a usable identity key).
-    #[must_use]
-    pub fn dm_encrypted_with(&self, peer: u16) -> bool {
-        self.peer_verifying_key(peer).is_some()
     }
 
     /// A hex fingerprint of `peer`'s identity key, for out-of-band verification.
@@ -964,20 +946,27 @@ impl ConclaveConnection {
             .unwrap_or_default()
     }
 
-    /// Send a direct message to `peer`. It is end-to-end encrypted when the peer
-    /// provided an identity key; otherwise it is relayed as plaintext (still
-    /// over the encrypted link to the server).
+    /// Send an end-to-end encrypted direct message to `peer`.
     ///
     /// # Errors
     ///
-    /// Network errors are possible.
+    /// Fails if `peer` has left, leaving no key to encrypt to, or on a network
+    /// error. There is deliberately no plaintext fallback: a message that cannot
+    /// be encrypted is not sent at all.
     pub async fn send_dm(&self, peer: u16, message: String) -> Result<()> {
-        let (encrypted, payload) = match self.peer_verifying_key(peer) {
-            Some(their_key) => {
-                let key = dm::shared_key(&self.signing_key, &their_key);
-                (true, dm::encrypt(&key, message.as_bytes()))
-            }
-            None => (false, message.clone().into_bytes()),
+        let Some(shared) = self.peer_shared_key(peer) else {
+            let reason =
+                "That user is no longer connected, so the message cannot be encrypted to them"
+                    .to_string();
+            self.push_dm(
+                peer,
+                DmMessage {
+                    time: Local::now(),
+                    from_me: true,
+                    body: DmBody::Notice(reason.clone()),
+                },
+            );
+            return Err(anyhow!(reason));
         };
         // Record locally first so the message appears immediately.
         self.push_dm(
@@ -985,14 +974,12 @@ impl ConclaveConnection {
             DmMessage {
                 time: Local::now(),
                 from_me: true,
-                encrypted,
-                body: DmBody::Text(message),
+                body: DmBody::Text(message.clone()),
             },
         );
         let request = ServerMessagesEncrypted::DirectMessage {
             to: peer,
-            encrypted,
-            payload,
+            payload: dm::encrypt(&shared, message.as_bytes()),
         };
         self.send_request(&request.to_vec()).await
     }
@@ -1052,7 +1039,7 @@ impl ConclaveConnection {
         }
     }
 
-    /// The end-to-end key shared with `peer`, if they advertised an identity key.
+    /// The end-to-end key shared with `peer`, if they are still connected.
     fn peer_shared_key(&self, peer: u16) -> Option<[u8; 32]> {
         self.peer_verifying_key(peer)
             .map(|their_key| dm::shared_key(&self.signing_key, &their_key))
@@ -1061,10 +1048,10 @@ impl ConclaveConnection {
     /// Record an inbound file offer and surface the conversation so the user can
     /// answer it.
     ///
-    /// The name arrives encrypted to the key shared with `peer`, and there is no
-    /// flag that could say otherwise: an offer whose name does not decrypt is
-    /// not something this client can receive, so it is declined rather than
-    /// shown with an undecipherable name and a body nobody could read.
+    /// The name arrives encrypted to the key shared with `peer`: an offer whose
+    /// name does not decrypt is not something this client can receive, so it is
+    /// declined rather than shown with an undecipherable name and a body nobody
+    /// could read.
     fn apply_file_offer(&self, peer: u16, id: u32, size: u64, name: &[u8]) {
         let Some(name) = self
             .peer_shared_key(peer)
@@ -1076,7 +1063,6 @@ impl ConclaveConnection {
                 DmMessage {
                     time: Local::now(),
                     from_me: false,
-                    encrypted: false,
                     body: DmBody::Notice(
                         "Declined a file that was not encrypted to this user".to_string(),
                     ),
@@ -1111,7 +1097,6 @@ impl ConclaveConnection {
             DmMessage {
                 time: Local::now(),
                 from_me: false,
-                encrypted: true,
                 body: DmBody::File(key),
             },
         );
@@ -1245,18 +1230,17 @@ impl ConclaveConnection {
     ///
     /// Fails if the file cannot be read, or on a network error.
     pub async fn offer_file(&self, peer: u16, path: &Path) -> Result<()> {
-        // A file is only ever sent end-to-end encrypted. Without the peer's
-        // identity key there is nothing to encrypt to, so the offer is refused
-        // here rather than falling back to handing the file to the server.
+        // A file is only ever sent end-to-end encrypted. Once the peer has left
+        // there is no key to encrypt to, so the offer is refused here rather
+        // than falling back to handing the file to the server.
         let Some(shared) = self.peer_shared_key(peer) else {
-            let reason =
-                "That user has no identity key, so a file cannot be encrypted to them".to_string();
+            let reason = "That user is no longer connected, so a file cannot be encrypted to them"
+                .to_string();
             self.push_dm(
                 peer,
                 DmMessage {
                     time: Local::now(),
                     from_me: true,
-                    encrypted: false,
                     body: DmBody::Notice(reason.clone()),
                 },
             );
@@ -1274,7 +1258,6 @@ impl ConclaveConnection {
                     DmMessage {
                         time: Local::now(),
                         from_me: true,
-                        encrypted: false,
                         body: DmBody::Notice(reason.clone()),
                     },
                 );
@@ -1311,7 +1294,6 @@ impl ConclaveConnection {
             DmMessage {
                 time: Local::now(),
                 from_me: true,
-                encrypted: true,
                 body: DmBody::File(key),
             },
         );

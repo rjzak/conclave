@@ -1907,6 +1907,52 @@ impl State {
                                 };
                                 match stream.recv().await {
                                     Ok(bytes) => match ServerMessagesEncrypted::from_bytes(&bytes) {
+                                        // Describing the server is not joining it:
+                                        // no identity key is needed and no roster
+                                        // entry is made. The server still only
+                                        // describes itself to a caller it would
+                                        // admit, so the same credentials rule
+                                        // applies as when connecting.
+                                        Ok(ServerMessagesEncrypted::ServerInformationQuery(
+                                            auth,
+                                        )) => {
+                                            let admitted = if let Some(auth) = auth {
+                                                let uname = auth.username.clone();
+                                                self_clone
+                                                    .authenticate_user(auth)
+                                                    .await
+                                                    .map_err(|_| {
+                                                        warn!(
+                                                            "Authentication failed for: username {uname} from {client}"
+                                                        );
+                                                        ServerError::AuthenticationFailed
+                                                    })
+                                                    .map(|_| ())
+                                            } else if self_clone
+                                                .allow_anonymous
+                                                .load(Ordering::Relaxed)
+                                            {
+                                                Ok(())
+                                            } else {
+                                                Err(ServerError::AuthenticationRequired)
+                                            };
+                                            let response = match admitted {
+                                                Ok(()) => {
+                                                    ClientMessagesEncrypted::ServerInformationResponse(
+                                                        self_clone.server_information().await,
+                                                    )
+                                                }
+                                                Err(error) => ClientMessagesEncrypted::Error(error),
+                                            };
+                                            if let Err(e) = stream.send(&response.to_vec()).await {
+                                                error!(
+                                                    "Failed to send server info to {client}: {e}"
+                                                );
+                                            }
+                                            // Nothing was registered, so there is
+                                            // nothing to tear down: dropping the
+                                            // stream ends it.
+                                        }
                                         Ok(
                                             ServerMessagesEncrypted::ServerAuthenticationRequest(
                                                 AuthRequest {
@@ -1919,6 +1965,29 @@ impl State {
                                                 },
                                             ),
                                         ) => {
+                                            // Joining is what requires an identity
+                                            // key: peers derive the direct-message
+                                            // and file encryption key from it, so a
+                                            // member without one could only be
+                                            // written to in the clear.
+                                            let Some(client_key) =
+                                                stream.client_key().map(VerifyingKey::to_bytes)
+                                            else {
+                                                warn!(
+                                                    "Rejecting {client}: no identity key offered"
+                                                );
+                                                let error_message = ClientMessagesEncrypted::Error(
+                                                    ServerError::IdentityKeyRequired,
+                                                )
+                                                .to_vec();
+                                                if let Err(e) = stream.send(&error_message).await {
+                                                    error!(
+                                                        "Failed to send key rejection to {client}: {e}"
+                                                    );
+                                                }
+                                                continue;
+                                            };
+
                                             // Drop oversized avatars rather than
                                             // relaying abuse to every peer.
                                             let avatar = avatar.filter(|bytes| {
@@ -2020,14 +2089,6 @@ impl State {
                                                 Some(uid) => self_clone.user_color(uid).await,
                                                 None => None,
                                             };
-                                            // The client's verified identity key (if it
-                                            // provided one), so peers can end-to-end
-                                            // encrypt direct messages to this user.
-                                            let public_key = write
-                                                .read()
-                                                .await
-                                                .client_key()
-                                                .map(VerifyingKey::to_bytes);
                                             let user = Arc::new(ConnectedUser {
                                                 id,
                                                 display_name,
@@ -2036,7 +2097,7 @@ impl State {
                                                 idle: Duration::default(),
                                                 color,
                                                 user_id,
-                                                public_key,
+                                                public_key: client_key,
                                                 timezone: user_local_time,
                                                 avatar,
                                             });
@@ -2473,17 +2534,11 @@ impl State {
                     }
                 }
 
-                Ok(ServerMessagesEncrypted::DirectMessage {
-                    to,
-                    encrypted,
-                    payload,
-                }) => {
-                    // Relay to the recipient verbatim; when `encrypted` the
-                    // payload is end-to-end ciphertext the server cannot read.
+                Ok(ServerMessagesEncrypted::DirectMessage { to, payload }) => {
+                    // Relay the encrypted message to the recipient
                     let delivery = ClientMessagesEncrypted::DirectMessageReceived {
                         from: user.id,
                         from_display_name: user.display_name.clone(),
-                        encrypted,
                         payload,
                     };
                     self.send_to_connection(to, &delivery).await;

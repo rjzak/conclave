@@ -371,6 +371,10 @@ impl Client {
     /// encrypted handshake, without keeping the connection. Requires the
     /// server's key; supply credentials if the server does not allow guests.
     ///
+    /// This only asks the server to describe itself, so no identity key is
+    /// presented and the caller never appears on the server's roster. Joining a
+    /// server is what requires a key — see [`Client::connect`].
+    ///
     /// # Errors
     ///
     /// Networking or authentication errors may result.
@@ -378,7 +382,6 @@ impl Client {
         host: &str,
         port: u16,
         key: VerifyingKey,
-        display_name: &str,
         auth: Option<UserAuthentication>,
     ) -> Result<ServerInformation> {
         let mut stream = TcpStream::connect(format!("{host}:{port}")).await?;
@@ -389,18 +392,8 @@ impl Client {
         let mut encrypted_stream: DefaultEncryptedStream =
             EncryptedStream::connect(stream, &key, None).await?;
 
-        let login = ServerMessagesEncrypted::ServerAuthenticationRequest(AuthRequest {
-            display_name: display_name.to_string(),
-            timezone: None,
-            avatar: None,
-            // A transient info fetch does not register a durable roster entry, so
-            // no profile or links are shared here.
-            profile: String::new(),
-            urls: BTreeMap::new(),
-            auth,
-        })
-        .to_vec();
-        encrypted_stream.send(&login).await?;
+        let query = ServerMessagesEncrypted::ServerInformationQuery(auth).to_vec();
+        encrypted_stream.send(&query).await?;
 
         let response = encrypted_stream.recv().await?;
         match ClientMessagesEncrypted::from_bytes(&response)? {

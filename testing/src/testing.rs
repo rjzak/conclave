@@ -260,12 +260,6 @@ async fn direct_file_transfer() {
     let bob_id = peer_id(&alice, "bob").await;
     let alice_id = peer_id(&bob, "alice").await;
 
-    // Both advertised identity keys. A file transfer has no unencrypted mode,
-    // so this is what makes one possible at all: the name arriving intact below
-    // is itself evidence it was sealed to the shared key and opened again.
-    assert!(alice.dm_encrypted_with(bob_id));
-    assert!(bob.dm_encrypted_with(alice_id));
-
     // A file large enough to span several chunks.
     let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
     let source = tempdir.path().join("greetings.bin");
@@ -357,6 +351,233 @@ async fn direct_file_transfer() {
     // The completed transfer that shares its id with the cancelled one is
     // untouched.
     assert_eq!(transfers(&alice, bob_id)[0].state, TransferState::Complete);
+
+    server_process.abort();
+}
+
+/// A client may ask a server to describe itself without presenting an identity
+/// key, but joining requires one: every peer's key is what direct messages and
+/// files are encrypted to, so admitting a keyless member would mean admitting
+/// someone nobody could write to in confidence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn identity_key_required_to_join() {
+    use conclave_common::net::{DefaultEncryptedStream, EncryptedStream};
+    use conclave_common::server::{
+        AuthRequest, ClientMessagesEncrypted, ServerError, ServerMessagesEncrypted, unencrypted,
+    };
+
+    const PORT: u16 = 8092;
+
+    let tempdir = TempDir::new("conclave_keyless").unwrap();
+    let server_db = tempdir
+        .path()
+        .join(format!("keyless_{}.db", Uuid::new_v4()));
+
+    let (server, password) = conclave_server::State::new(
+        "Keyless Server".into(),
+        "Description".into(),
+        LOCALHOST,
+        Some("localhost".into()),
+        PORT,
+        false,
+        server_db,
+    )
+    .unwrap();
+    // Guests are admitted, so authentication is not what turns anything away
+    // until the last section below.
+    assert!(server.anonymous_clients_allowed());
+    let server = Arc::new(server);
+    let server_clone = server.clone();
+    let server_process = tokio::spawn(async move { server_clone.serve().await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let host = LOCALHOST.to_string();
+    let key = conclave_client::Client::fetch_server_key(&host, PORT)
+        .await
+        .unwrap();
+
+    // A keyless handshake, which the transport is happy to make: it is Conclave
+    // that decides what such a connection may do.
+    let keyless = async || {
+        let mut stream = tokio::net::TcpStream::connect(format!("{host}:{PORT}"))
+            .await
+            .unwrap();
+        unencrypted::ClientToServer::GoCrypto
+            .send(&mut stream)
+            .await
+            .unwrap();
+        let encrypted: DefaultEncryptedStream =
+            EncryptedStream::connect(stream, &key, None).await.unwrap();
+        encrypted
+    };
+
+    // ── Describing the server needs no key ────────────────────────────────
+    let info = conclave_client::Client::fetch_server_info(&host, PORT, key, None)
+        .await
+        .unwrap();
+    assert_eq!(info.name, "Keyless Server");
+    // Asking about a server is not joining it, so nothing was added to the
+    // roster and the count the server reports stays at zero.
+    assert_eq!(info.users_connected, 0);
+    assert!(server.connected_users().await.is_empty());
+
+    // ── Joining does not ──────────────────────────────────────────────────
+    let mut encrypted = keyless().await;
+    let join = ServerMessagesEncrypted::ServerAuthenticationRequest(AuthRequest {
+        display_name: "keyless".to_string(),
+        timezone: None,
+        avatar: None,
+        profile: String::new(),
+        urls: std::collections::BTreeMap::new(),
+        auth: None,
+    })
+    .to_vec();
+    encrypted.send(&join).await.unwrap();
+    assert!(matches!(
+        ClientMessagesEncrypted::from_bytes(&encrypted.recv().await.unwrap()).unwrap(),
+        ClientMessagesEncrypted::Error(ServerError::IdentityKeyRequired)
+    ));
+
+    // And the connection is over: nothing further is answered, and the would-be
+    // member never appears.
+    let _ = encrypted.send(&join).await;
+    assert!(encrypted.recv().await.is_err());
+    assert!(server.connected_users().await.is_empty());
+
+    // ── A server that admits no guests describes itself to no guests ──────
+    // Not needing a key is not the same as needing nothing: the query answers
+    // only a caller the server would let in.
+    server.anonymous_clients_enabled(false).await.unwrap();
+    let refused = conclave_client::Client::fetch_server_info(&host, PORT, key, None).await;
+    assert_eq!(
+        refused.unwrap_err().to_string(),
+        ServerError::AuthenticationRequired.to_string()
+    );
+    let credentialed = conclave_client::Client::fetch_server_info(
+        &host,
+        PORT,
+        key,
+        Some(("admin".to_string(), password.to_string()).into()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(credentialed.name, "Keyless Server");
+
+    server_process.abort();
+}
+
+/// Direct messages round-trip through the end-to-end encryption, and there is
+/// no path that sends one any other way: once the recipient is gone, so is the
+/// key to seal it with, and the message is refused rather than relayed in the
+/// clear.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direct_messages_are_always_encrypted() {
+    use conclave_client::conn::DmBody;
+
+    const PORT: u16 = 8093;
+
+    let tempdir = TempDir::new("conclave_dm_text").unwrap();
+    let server_db = tempdir.path().join(format!("dm_{}.db", Uuid::new_v4()));
+
+    let (server, _password) = conclave_server::State::new(
+        "Message Server".into(),
+        "Description".into(),
+        LOCALHOST,
+        Some("localhost".into()),
+        PORT,
+        false,
+        server_db,
+    )
+    .unwrap();
+    let server = Arc::new(server);
+    let server_clone = server.clone();
+    let server_process = tokio::spawn(async move { server_clone.serve().await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Two clients with their own configs, so they hold distinct identity keys.
+    let connect = async |name: &str| {
+        let config = tempdir
+            .path()
+            .join(format!("{name}_{}.toml", Uuid::new_v4()));
+        let client = conclave_client::Client::new(config).unwrap();
+        let conn = client
+            .connect(
+                LOCALHOST.to_string().as_str(),
+                PORT,
+                true,
+                name.to_string(),
+                None,
+                None,
+                None,
+                String::new(),
+                std::collections::BTreeMap::new(),
+            )
+            .await
+            .unwrap();
+        (client, conn)
+    };
+    let (_alice_client, alice) = connect("alice").await;
+    let (_bob_client, bob) = connect("bob").await;
+
+    let peer_id = async |conn: &conclave_client::conn::ConclaveConnection, name: &str| {
+        eventually(&format!("{name}'s connection id"), || {
+            conn.get_connected_users()
+                .into_iter()
+                .find(|user| user.display_name == name)
+                .map(|user| user.id)
+        })
+        .await
+    };
+    let bob_id = peer_id(&alice, "bob").await;
+    let alice_id = peer_id(&bob, "alice").await;
+
+    // The text arriving intact is evidence of the round trip: the server relays
+    // only ciphertext, which bob opens with the key derived from alice's.
+    alice
+        .send_dm(bob_id, "hello bob".to_string())
+        .await
+        .unwrap();
+    let received = eventually("bob to receive the message", || {
+        bob.dm_thread(alice_id).into_iter().next()
+    })
+    .await;
+    assert!(!received.from_me);
+    match received.body {
+        DmBody::Text(text) => assert_eq!(text, "hello bob"),
+        body => panic!("Expected a message, got {body:?}"),
+    }
+
+    // Once bob leaves, his key goes with him from alice's roster.
+    bob.disconnect().await.unwrap();
+    eventually("bob to leave the roster", || {
+        alice
+            .get_connected_users()
+            .iter()
+            .all(|user| user.id != bob_id)
+            .then_some(())
+    })
+    .await;
+
+    // With nothing to encrypt to, the message is refused outright — the old
+    // plaintext fallback is gone — and the conversation says why.
+    assert!(
+        alice
+            .send_dm(bob_id, "still there?".to_string())
+            .await
+            .is_err()
+    );
+    let thread = alice.dm_thread(bob_id);
+    assert!(
+        matches!(thread.last().map(|msg| &msg.body), Some(DmBody::Notice(_))),
+        "expected a notice, got {:?}",
+        thread.last()
+    );
+    // Nothing was appended as a sent message.
+    assert!(
+        !thread
+            .iter()
+            .any(|msg| matches!(&msg.body, DmBody::Text(text) if text == "still there?"))
+    );
 
     server_process.abort();
 }

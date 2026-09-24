@@ -266,9 +266,8 @@ pub struct ConnectedUser {
     /// User's ID, if authenticated.
     pub user_id: Option<u32>,
 
-    /// The user's ed25519 identity public key (compressed), if they connected
-    /// with one. Lets other users end-to-end encrypt direct messages to them.
-    pub public_key: Option<[u8; 32]>,
+    /// The user's ed25519 identity public key to enable E2E direct messages.
+    pub public_key: [u8; 32],
 
     /// The user's timezone as whole hours relative to GMT (e.g. `-5`, `2`), if
     /// shared. Other users compute the difference against their own.
@@ -365,8 +364,22 @@ pub enum ServerMessagesEncrypted {
     /// Ask the server for information about itself
     ServerInformationRequest,
 
+    /// Ask the server to describe itself without joining it, so a client can
+    /// look a server up before deciding to connect. Unlike
+    /// [`ServerMessagesEncrypted::ServerAuthenticationRequest`] this needs no
+    /// identity key and adds no roster entry — the connection is answered and
+    /// closed. Credentials are still supplied when the server admits no guests,
+    /// since it will not describe itself to a caller it would not admit.
+    ServerInformationQuery(Option<UserAuthentication>),
+
     /// User tries to authenticate, describing how they wish to appear (see
     /// [`AuthRequest`]). The server responds with Server Information on success.
+    ///
+    /// This is what joins a server, so it requires an identity key: the
+    /// handshake must have carried one, or the server answers
+    /// [`ServerError::IdentityKeyRequired`] instead. Peers derive the key that
+    /// direct messages and files are encrypted to from it, so a member without
+    /// one could only be written to in the clear.
     ServerAuthenticationRequest(AuthRequest),
 
     /// Ask the server for a list of connected users
@@ -479,15 +492,11 @@ pub enum ServerMessagesEncrypted {
         path: String,
     },
 
-    /// Send a direct message to another connected user, by connection id. The
-    /// server relays `payload` verbatim without inspecting it; when `encrypted`
-    /// is set it is end-to-end ciphertext the server cannot read.
+    /// Send an encrypted  direct message to another connected user, by connection id.
     DirectMessage {
         /// Recipient's connection id
         to: u16,
-        /// Whether `payload` is end-to-end encrypted
-        encrypted: bool,
-        /// Message bytes (UTF-8 plaintext, or [`crate::dm`] ciphertext)
+        /// Message bytes as [`crate::dm`] ciphertext
         payload: Vec<u8>,
     },
 
@@ -495,12 +504,6 @@ pub enum ServerMessagesEncrypted {
     /// against its upload limit and relays the offer as
     /// [`ClientMessagesEncrypted::DirectFileOffered`]; nothing is sent until the
     /// recipient answers with [`ServerMessagesEncrypted::DirectFileAnswer`].
-    ///
-    /// Unlike a direct message, which falls back to plaintext for a peer that
-    /// advertised no identity key, a file transfer is always end-to-end
-    /// encrypted: a client with no key to encrypt to cannot offer a file at all.
-    /// There is deliberately no flag saying otherwise, so nothing in the relayed
-    /// message can ask the recipient to accept an unencrypted file.
     DirectFileOffer {
         /// Recipient's connection id
         to: u16,
@@ -722,9 +725,7 @@ pub enum ClientMessagesEncrypted {
         from: u16,
         /// Sender's display name
         from_display_name: String,
-        /// Whether `payload` is end-to-end encrypted
-        encrypted: bool,
-        /// Message bytes (UTF-8 plaintext, or [`crate::dm`] ciphertext)
+        /// Message bytes, as [`crate::dm`] ciphertext
         payload: Vec<u8>,
     },
 
@@ -826,6 +827,12 @@ pub enum ServerError {
     /// No authentication provided when this is required
     AuthenticationRequired,
 
+    /// The client tried to join without having presented an identity key during
+    /// the handshake. Conclave requires one of every member so that direct
+    /// messages and files are always end-to-end encrypted. Asking a server to
+    /// describe itself does not need one.
+    IdentityKeyRequired,
+
     /// The action requires administrator privileges
     NotAuthorized,
 
@@ -841,6 +848,9 @@ impl std::fmt::Display for ServerError {
         match self {
             ServerError::AuthenticationFailed => write!(f, "Authentication failed"),
             ServerError::AuthenticationRequired => write!(f, "Authentication required"),
+            ServerError::IdentityKeyRequired => {
+                write!(f, "An identity key is required to connect")
+            }
             ServerError::NotAuthorized => write!(f, "Administrator privileges required"),
             ServerError::AtCapacity => write!(f, "Server at capacity"),
             ServerError::ActionFailed(reason) => write!(f, "{reason}"),
