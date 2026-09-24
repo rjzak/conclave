@@ -364,6 +364,15 @@ pub struct State {
     #[cfg(feature = "gui")]
     log: bool,
 
+    /// Show the version window
+    #[cfg(feature = "gui")]
+    show_version: bool,
+
+    /// Set when the version window has been closed, so the next File ▸ Version
+    /// opens it again rather than finding it already open.
+    #[cfg(feature = "gui")]
+    version_closed: Arc<AtomicBool>,
+
     /// Initial password
     #[cfg(feature = "gui")]
     password: Option<Arc<RwLock<Zeroizing<String>>>>,
@@ -371,6 +380,11 @@ pub struct State {
     /// Whether the password has been acknowledged
     #[cfg(feature = "gui")]
     password_acknowledged: Arc<AtomicBool>,
+
+    /// Why the last admin-password regeneration failed, shown until the next
+    /// attempt. `None` when the last attempt succeeded or none has been made.
+    #[cfg(feature = "gui")]
+    password_error: Option<String>,
 }
 
 impl std::fmt::Debug for State {
@@ -504,9 +518,15 @@ impl State {
                 #[cfg(feature = "gui")]
                 log: false,
                 #[cfg(feature = "gui")]
+                show_version: false,
+                #[cfg(feature = "gui")]
+                version_closed: Arc::new(AtomicBool::new(false)),
+                #[cfg(feature = "gui")]
                 password: Some(Arc::new(RwLock::new(new_admin_password.clone()))),
                 #[cfg(feature = "gui")]
                 password_acknowledged: Arc::new(AtomicBool::new(false)),
+                #[cfg(feature = "gui")]
+                password_error: None,
             },
             new_admin_password,
         ))
@@ -687,9 +707,15 @@ impl State {
             #[cfg(feature = "gui")]
             log: false,
             #[cfg(feature = "gui")]
+            show_version: false,
+            #[cfg(feature = "gui")]
+            version_closed: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "gui")]
             password: None,
             #[cfg(feature = "gui")]
             password_acknowledged: Arc::new(AtomicBool::new(true)),
+            #[cfg(feature = "gui")]
+            password_error: None,
         })
     }
 
@@ -808,6 +834,24 @@ impl State {
             })
             .await?;
         Ok(())
+    }
+
+    /// Replace the admin password with a freshly generated one, returning it so
+    /// it can be shown to the administrator once. The previous password stops
+    /// working as soon as this returns.
+    ///
+    /// Generated the same way as the password [`State::new`] hands back, for an
+    /// administrator who has no way to type one in — a GUI server has no prompt
+    /// to confirm a chosen password at, where the command line has
+    /// `admin reset-admin-password`.
+    ///
+    /// # Errors
+    ///
+    /// Might return an SQL error if the database update fails.
+    pub async fn regenerate_admin_password(&self) -> Result<Zeroizing<String>> {
+        let password = Zeroizing::new(Uuid::new_v4().to_string());
+        self.reset_admin_password(&password).await?;
+        Ok(password)
     }
 
     /// Whether anonymous clients are allowed to connect to the server.
@@ -4376,11 +4420,144 @@ pub fn init_gui_tracing() {
 }
 
 #[cfg(feature = "gui")]
-impl eframe::App for State {
-    fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
+impl State {
+    /// The menu bar: what the server can be asked to do, as opposed to what the
+    /// main window reports.
+    fn menu_bar(&mut self, ui: &mut eframe::egui::Ui) {
+        eframe::egui::Panel::top("server_menu_bar").show(ui, |ui| {
+            eframe::egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    ui.checkbox(&mut self.log, "Log window");
+                    if ui.button("Version").clicked() {
+                        self.show_version = true;
+                    }
+                    ui.separator();
+                    if ui.button("Quit").clicked() {
+                        ui.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+                    }
+                });
+                ui.menu_button("Admin", |ui| {
+                    // Regenerating is only offered in the GUI: a GUI server has
+                    // nowhere to type a password of one's own, where the command
+                    // line has `admin reset-admin-password` to prompt for one.
+                    // The submenu is the confirmation — regenerating stops the
+                    // current password working.
+                    ui.menu_button("Reset admin password…", |ui| {
+                        ui.label("The current password stops working.");
+                        if ui.button("Generate a new password").clicked() {
+                            self.regenerate_admin_password_for_gui();
+                        }
+                    });
+                });
+            });
+        });
+    }
+
+    /// Generate a new admin password and hand it to the window that shows one,
+    /// or remember why it could not be changed.
+    fn regenerate_admin_password_for_gui(&mut self) {
+        match futures::executor::block_on(self.regenerate_admin_password()) {
+            Ok(password) => {
+                // Shown by the same window the first-run password uses, which
+                // reappears because nothing has acknowledged this one yet.
+                self.password = Some(Arc::new(RwLock::new(password)));
+                self.password_acknowledged.store(false, Ordering::Relaxed);
+                self.password_error = None;
+                info!("Admin password regenerated");
+            }
+            Err(e) => {
+                error!("Failed to regenerate the admin password: {e}");
+                self.password_error = Some(e.to_string());
+            }
+        }
+    }
+
+    /// What this server is running, for an administrator who cannot ask the
+    /// binary on the command line because the GUI is all they have.
+    fn version_window(&self, ui: &mut eframe::egui::Ui) {
+        if !self.show_version {
+            return;
+        }
+
+        let closed = self.version_closed.clone();
+        ui.show_viewport_deferred(
+            eframe::egui::ViewportId::from_hash_of("conclave_server_version"),
+            eframe::egui::ViewportBuilder::default()
+                .with_title("About Conclave Server")
+                .with_inner_size([300.0, 150.0])
+                .with_resizable(false),
+            move |context, _class| {
+                if context.input(|i| i.viewport().close_requested()) {
+                    closed.store(true, Ordering::Relaxed);
+                    context.request_repaint_of(eframe::egui::ViewportId::ROOT);
+                    context.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+                }
+                eframe::egui::CentralPanel::default().show(context, |inner_ui| {
+                    inner_ui.vertical_centered(|inner_ui| {
+                        inner_ui.add_space(16.0);
+                        inner_ui.heading("Conclave Server");
+                        inner_ui.add_space(8.0);
+                        inner_ui.label(format!("Version {}", env!("CONCLAVE_VERSION")));
+                        inner_ui.label(format!("Built {}", env!("CONCLAVE_BUILD_DATE")));
+                    });
+                });
+            },
+        );
+    }
+
+    /// The one window that ever shows an admin password, whether it is the one
+    /// generated on first run or a later replacement. It stays up until the
+    /// administrator confirms having read it, and the password is zeroized as
+    /// soon as they do.
+    fn admin_password_window(&self, ui: &mut eframe::egui::Ui) {
         use zeroize::Zeroize;
 
+        let Some(password) = &self.password else {
+            return;
+        };
+        if self.password_acknowledged.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let text_buff = password.clone();
+        let acknowledged = self.password_acknowledged.clone();
+        ui.show_viewport_deferred(
+            eframe::egui::ViewportId::from_hash_of("conclave_server_admin_password"),
+            eframe::egui::ViewportBuilder::default()
+                .with_title("Conclave Server Admin Password")
+                .with_resizable(false)
+                .with_close_button(false)
+                .with_inner_size([320.0, 100.0]),
+            move |context, _class| {
+                let text_buff_str = futures::executor::block_on(text_buff.read()).clone();
+                eframe::egui::CentralPanel::default().show(context, |inner_ui| {
+                    inner_ui.label(
+                        "Below is the admin password for this server. Take note, as it \
+                         will not appear again.",
+                    );
+                    inner_ui.text_edit_singleline(&mut text_buff_str.as_str());
+
+                    if inner_ui.button("Confirm").clicked() {
+                        acknowledged.store(true, Ordering::Relaxed);
+                        futures::executor::block_on(text_buff.write()).zeroize();
+                    }
+                });
+            },
+        );
+    }
+}
+
+#[cfg(feature = "gui")]
+impl eframe::App for State {
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
         ui.request_repaint();
+
+        // A closed window is reopened by the menu, not left thinking it is open.
+        if self.version_closed.swap(false, Ordering::Relaxed) {
+            self.show_version = false;
+        }
+
+        self.menu_bar(ui);
 
         let connections = futures::executor::block_on(self.connections.read()).len();
         eframe::egui::CentralPanel::default().show(ui, |ui| {
@@ -4391,69 +4568,54 @@ impl eframe::App for State {
             ));
             ui.separator();
             eframe::egui::widgets::global_theme_preference_buttons(ui);
-            ui.checkbox(&mut self.log, "Log window");
 
-            if let Some(password) = &self.password
-                && !self.password_acknowledged.load(Ordering::Relaxed)
-            {
-                let text_buff = password.clone();
-                let acknowledged = self.password_acknowledged.clone();
-                ui.show_viewport_deferred(
-                    eframe::egui::ViewportId::from_hash_of("conclave_server_admin_password"),
-                    eframe::egui::ViewportBuilder::default()
-                        .with_title("Conclave Server Admin Password")
-                        .with_resizable(false)
-                        .with_close_button(false)
-                        .with_inner_size([320.0, 100.0]),
-                    move |context, _class| {
-                        let text_buff_str = futures::executor::block_on(text_buff.read()).clone();
-                        eframe::egui::CentralPanel::default().show(context, |inner_ui| {
-                            inner_ui.label("Below is the initial admin password for this server.");
-                            inner_ui.text_edit_singleline(&mut text_buff_str.as_str());
-
-                            if inner_ui.button("Confirm").clicked() {
-                                acknowledged.store(true, Ordering::Relaxed);
-                                futures::executor::block_on(text_buff.write()).zeroize();
-                            }
-                        });
-                    },
-                );
-            }
-
-            if self.log {
-                ui.show_viewport_deferred(
-                    eframe::egui::ViewportId::from_hash_of("conclave_server_log"),
-                    eframe::egui::ViewportBuilder::default()
-                        .with_title("Conclave Server Log")
-                        .with_resizable(true)
-                        .with_clamp_size_to_monitor_size(true)
-                        .with_close_button(false)
-                        .with_inner_size([480.0, 320.0]),
-                    |context, _class| {
-                        eframe::egui::CentralPanel::default().show(context, |inner_ui| {
-                            let log = {
-                                let guard = LOG_BUFFER
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                String::from_utf8_lossy(&guard).into_owned()
-                            };
-                            eframe::egui::ScrollArea::vertical()
-                                .auto_shrink([false, false])
-                                .stick_to_bottom(true)
-                                .show(inner_ui, |inner_ui| {
-                                    inner_ui.add(
-                                        eframe::egui::TextEdit::multiline(&mut log.as_str())
-                                            .desired_width(f32::INFINITY)
-                                            .font(eframe::egui::TextStyle::Monospace),
-                                    );
-                                });
-                        });
-                        // Repaint periodically so new log lines appear live.
-                        context.request_repaint_after(std::time::Duration::from_millis(500));
-                    },
-                );
+            if let Some(error) = &self.password_error {
+                // The window is narrow, so the whole reason may not fit: it is
+                // in the log either way.
+                ui.colored_label(
+                    eframe::egui::Color32::from_rgb(0xcc, 0x33, 0x33),
+                    "Password unchanged — see the log.",
+                )
+                .on_hover_text(error);
             }
         });
+
+        self.admin_password_window(ui);
+        self.version_window(ui);
+
+        if self.log {
+            ui.show_viewport_deferred(
+                eframe::egui::ViewportId::from_hash_of("conclave_server_log"),
+                eframe::egui::ViewportBuilder::default()
+                    .with_title("Conclave Server Log")
+                    .with_resizable(true)
+                    .with_clamp_size_to_monitor_size(true)
+                    .with_close_button(false)
+                    .with_inner_size([480.0, 320.0]),
+                |context, _class| {
+                    eframe::egui::CentralPanel::default().show(context, |inner_ui| {
+                        let log = {
+                            let guard = LOG_BUFFER
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            String::from_utf8_lossy(&guard).into_owned()
+                        };
+                        eframe::egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .stick_to_bottom(true)
+                            .show(inner_ui, |inner_ui| {
+                                inner_ui.add(
+                                    eframe::egui::TextEdit::multiline(&mut log.as_str())
+                                        .desired_width(f32::INFINITY)
+                                        .font(eframe::egui::TextStyle::Monospace),
+                                );
+                            });
+                    });
+                    // Repaint periodically so new log lines appear live.
+                    context.request_repaint_after(std::time::Duration::from_millis(500));
+                },
+            );
+        }
     }
 }
 
@@ -4749,6 +4911,40 @@ mod tests {
             bytes.push(0);
         }
         bytes
+    }
+
+    /// Test admin password changing
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn regenerated_admin_password_replaces_the_old_one() {
+        let tempdir = tempdir::TempDir::new("conclave_testing").unwrap();
+        let server_db = tempdir
+            .path()
+            .join(format!("testing_server_{}.db", uuid::Uuid::new_v4()));
+
+        let (state, first) = crate::State::new(
+            "Testing Server".into(),
+            "Description".into(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            None,
+            1011,
+            false,
+            server_db,
+        )
+        .unwrap();
+
+        let as_admin = |password: &str| {
+            state.authenticate_user(("admin".to_string(), password.to_string()).into())
+        };
+        let (_, admin) = as_admin(&first).await.unwrap();
+        assert!(admin);
+
+        let second = state.regenerate_admin_password().await.unwrap();
+        assert_ne!(second.as_str(), first.as_str());
+        assert!(as_admin(&second).await.is_ok());
+        assert!(
+            as_admin(&first).await.is_err(),
+            "the old password still authenticates"
+        );
     }
 
     #[test]

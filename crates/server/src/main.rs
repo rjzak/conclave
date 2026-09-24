@@ -196,7 +196,7 @@ fn main() -> eframe::Result {
                 width: 182,
                 height: 221,
             })
-            .with_inner_size([240.0, 97.0])
+            .with_inner_size([240.0, 110.0])
             .with_resizable(false),
         ..Default::default()
     };
