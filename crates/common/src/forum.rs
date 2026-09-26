@@ -7,9 +7,14 @@
 //! subject and a tree of posts: the opening post has no parent, and every reply
 //! names the post it replies to. Posts may optionally be signed by the author's
 //! ed25519 identity key so other users can verify authorship.
+//!
+//! A thread may also carry a poll, attached when the thread is started. The
+//! poll itself is not a forum idea — see [`crate::poll`] — so the same question
+//! and the same anonymous tally could be asked somewhere else later.
 
 use crate::group::GroupTag;
 use crate::net::{SigningKey, VerifyingKey};
+use crate::poll::NewPoll;
 
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Signer, Verifier};
@@ -56,6 +61,10 @@ pub struct ForumThreadInfo {
 
     /// Number of replies (posts excluding the opening post)
     pub reply_count: u32,
+
+    /// Whether the thread carries a poll, so the list can say so before the
+    /// thread is opened and the poll itself fetched.
+    pub has_poll: bool,
 }
 
 /// An ed25519 signature over a post body, plus the signer's public key.
@@ -142,6 +151,11 @@ pub struct NewForumThread {
 
     /// Optional signature over the body
     pub signature: Option<ForumSignature>,
+
+    /// A poll to attach to the thread. A thread carries at most one, and only
+    /// the person starting the thread may attach it; there is no way to add one
+    /// afterwards, which keeps a poll's terms fixed from its first vote.
+    pub poll: Option<NewPoll>,
 }
 
 /// A request to reply within a thread.

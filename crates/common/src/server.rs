@@ -4,6 +4,7 @@ use crate::admin::server::{ClientAdminMessagesEncrypted, ServerAdminMessagesEncr
 use crate::files::FileEntry;
 use crate::forum::{ForumPost, ForumThreadInfo, ForumTopic, NewForumPost, NewForumThread};
 use crate::group::GroupTag;
+use crate::poll::{Poll, PollVote};
 
 use std::collections::BTreeMap;
 
@@ -453,6 +454,11 @@ pub enum ServerMessagesEncrypted {
         post: u32,
     },
 
+    /// Cast a ballot in a thread's poll. Exactly one option unless the poll is
+    /// multiple-choice, and only once: a vote cannot be changed, because what
+    /// it was is never recorded.
+    ForumPollVote(PollVote),
+
     /// List a shared directory. `path` is relative to the share root, using `/`
     /// separators; an empty string is the root.
     FileListRequest {
@@ -665,6 +671,8 @@ pub enum ClientMessagesEncrypted {
         thread: u32,
         /// Posts in the thread, in creation order
         posts: Vec<ForumPost>,
+        /// The thread's poll, as this user may see it, if it has one
+        poll: Option<Poll>,
     },
 
     /// A new thread was created in a topic the user may see.
@@ -679,6 +687,16 @@ pub enum ClientMessagesEncrypted {
     ForumPostEvent {
         /// The new post
         post: ForumPost,
+    },
+
+    /// A thread's poll changed — someone voted, or the reader just did. Sent
+    /// to each viewer separately because what a poll looks like depends on who
+    /// is looking: whether they have voted, and whether they may see the tally.
+    ForumPollUpdate {
+        /// Thread the poll belongs to
+        thread: u32,
+        /// The poll, as this user may see it
+        poll: Poll,
     },
 
     /// A post was deleted from a thread the user has open.

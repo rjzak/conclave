@@ -5,6 +5,10 @@ use conclave_client::conn::{ChatLine, ConclaveConnection, DmBody, FileTransfer, 
 use conclave_client::{Client, DiscoveredServer, discover_servers};
 use conclave_common::forum::ForumPost;
 use conclave_common::group::{GroupTag, audience};
+use conclave_common::poll::{
+    MAX_POLL_OPTION, MAX_POLL_OPTIONS, MAX_POLL_QUESTION, MIN_POLL_OPTIONS, NewPoll, Poll,
+    PollDuration,
+};
 use conclave_common::server::{
     ChatroomInfo, ConnectedUser, IDLE_TIMEOUT_MINUTES, UserAuthentication, VerifyingKey,
 };
@@ -15,6 +19,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
+use chrono::Utc;
 use eframe::{Frame, egui};
 use sha2::{Digest, Sha256};
 use tracing::error;
@@ -1162,6 +1167,276 @@ fn render_forum_posts(
             render_forum_posts(ui, key, posts, Some(post.id), depth + 1, is_admin, actions);
         }
     }
+}
+
+/// The poll being composed alongside a new thread, kept in the window's
+/// temporary state so it survives a repaint but not the window closing.
+#[derive(Clone, Debug)]
+struct PollDraft {
+    /// Whether the author asked for a poll at all
+    enabled: bool,
+    /// The question
+    question: String,
+    /// The options, including the blank ones still waiting to be filled in
+    options: Vec<String>,
+    /// Whether voters may pick more than one option
+    multiple_choices: bool,
+    /// How many days the poll runs for
+    days: u16,
+    /// Whether everyone sees the tally before the poll closes
+    public_results: bool,
+}
+
+impl Default for PollDraft {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            question: String::new(),
+            options: vec![String::new(), String::new()],
+            multiple_choices: false,
+            days: 7,
+            public_results: true,
+        }
+    }
+}
+
+impl PollDraft {
+    /// The poll to attach to the thread, or `None` when none was asked for or
+    /// what was typed is not yet a poll.
+    fn to_poll(&self) -> Option<NewPoll> {
+        if !self.enabled {
+            return None;
+        }
+        let poll = NewPoll {
+            question: self.question.clone(),
+            options: self.options.clone(),
+            multiple_choices: self.multiple_choices,
+            duration: PollDuration::days(self.days).ok()?,
+            public_results: self.public_results,
+        };
+        poll.validate().ok().map(|()| poll)
+    }
+
+    /// Why the poll is not ready to send, for the line under the form. `None`
+    /// once it is (or when no poll was asked for).
+    fn problem(&self) -> Option<String> {
+        if !self.enabled {
+            return None;
+        }
+        let duration = match PollDuration::days(self.days) {
+            Ok(duration) => duration,
+            Err(e) => return Some(e.to_string()),
+        };
+        NewPoll {
+            question: self.question.clone(),
+            options: self.options.clone(),
+            multiple_choices: self.multiple_choices,
+            duration,
+            public_results: self.public_results,
+        }
+        .validate()
+        .err()
+        .map(|e| e.to_string())
+    }
+}
+
+/// Draw the optional poll section of the new-thread form, editing `draft` in
+/// place.
+fn poll_composer(ui: &mut egui::Ui, draft: &mut PollDraft) {
+    ui.checkbox(&mut draft.enabled, "Attach a poll");
+    if !draft.enabled {
+        return;
+    }
+
+    ui.group(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut draft.question)
+                .hint_text("Question")
+                .char_limit(MAX_POLL_QUESTION)
+                .desired_width(f32::INFINITY),
+        );
+
+        let mut remove: Option<usize> = None;
+        for (i, option) in draft.options.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(option)
+                        .hint_text(format!("Option {}", i + 1))
+                        .char_limit(MAX_POLL_OPTION)
+                        .desired_width(ui.available_width() - 30.0),
+                );
+                // Below the minimum there is nothing to take away: a poll needs
+                // at least two options to be a poll.
+                if ui
+                    .add_enabled(i >= MIN_POLL_OPTIONS, egui::Button::new("✖").small())
+                    .on_hover_text("Remove this option")
+                    .clicked()
+                {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove {
+            draft.options.remove(i);
+        }
+        if draft.options.len() < MAX_POLL_OPTIONS && ui.small_button("➕ Add option").clicked() {
+            draft.options.push(String::new());
+        }
+
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut draft.multiple_choices, "Allow multiple choices");
+            ui.separator();
+            ui.label("Closes in");
+            ui.add(
+                egui::DragValue::new(&mut draft.days)
+                    .speed(1.0)
+                    .range(1..=365),
+            );
+            ui.label(if draft.days == 1 { "day" } else { "days" });
+        });
+
+        ui.checkbox(
+            &mut draft.public_results,
+            "Show results to everyone before it closes",
+        )
+        .on_hover_text(
+            "Off: only you see the tally until the poll closes, then everyone does.\n\
+             Either way, nobody ever sees who voted for which option.",
+        );
+
+        if let Some(problem) = draft.problem() {
+            ui.label(
+                egui::RichText::new(problem)
+                    .small()
+                    .color(egui::Color32::from_rgb(0xd0, 0x45, 0x37)),
+            );
+        }
+    });
+}
+
+/// Draw the ballot: one option each, and the button that casts it. `picked` is
+/// the ballot being assembled; `vote` is set when the user asks to cast it, so
+/// the caller can send it once the borrow ends.
+fn poll_ballot(ui: &mut egui::Ui, poll: &Poll, picked: &mut Vec<u32>, vote: &mut bool) {
+    for option in &poll.options {
+        let chosen = picked.contains(&option.id);
+        if poll.multiple_choice {
+            let mut checked = chosen;
+            if ui.checkbox(&mut checked, &option.text).changed() {
+                if checked {
+                    picked.push(option.id);
+                } else {
+                    picked.retain(|id| *id != option.id);
+                }
+            }
+        } else if ui.radio(chosen, &option.text).clicked() {
+            picked.clear();
+            picked.push(option.id);
+        }
+    }
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(!picked.is_empty(), egui::Button::new("Vote"))
+            .on_hover_text("A vote cannot be changed afterwards")
+            .clicked()
+        {
+            *vote = true;
+        }
+        ui.label(
+            egui::RichText::new(if poll.multiple_choice {
+                "Pick as many as you like"
+            } else {
+                "Pick one"
+            })
+            .weak()
+            .small(),
+        );
+    });
+}
+
+/// Draw the tally, one bar per option. Percentages are of the people who voted,
+/// so a multiple-choice poll's bars can add up to more than a whole.
+fn poll_tally(ui: &mut egui::Ui, poll: &Poll) {
+    let ballots = poll.total_voters.unwrap_or(0);
+    for option in &poll.options {
+        let count = option.votes.unwrap_or(0);
+        #[allow(clippy::cast_precision_loss)]
+        let fraction = if ballots == 0 {
+            0.0
+        } else {
+            count as f32 / ballots as f32
+        };
+        ui.add(
+            egui::ProgressBar::new(fraction.clamp(0.0, 1.0))
+                .desired_height(16.0)
+                .text(format!(
+                    "{} — {count} ({:.0}%)",
+                    option.text,
+                    fraction * 100.0
+                )),
+        );
+    }
+    ui.label(
+        egui::RichText::new(format!(
+            "{ballots} voter{}",
+            if ballots == 1 { "" } else { "s" }
+        ))
+        .weak()
+        .small(),
+    );
+}
+
+/// Draw a thread's poll: the ballot while this user may still vote, the tally
+/// once they may see it, and otherwise a note saying when they will.
+fn render_poll(ui: &mut egui::Ui, poll: &Poll, picked: &mut Vec<u32>, vote: &mut bool) {
+    let now = Utc::now();
+
+    ui.group(|ui| {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("📊").size(16.0));
+            ui.label(egui::RichText::new(&poll.question).strong());
+        });
+
+        if poll.can_vote(now) {
+            poll_ballot(ui, poll, picked, vote);
+        } else if poll.results_visible() {
+            poll_tally(ui, poll);
+        } else {
+            // The author kept the tally to themselves until the close date, so
+            // the counts were never sent: there is nothing here to hide.
+            for option in &poll.options {
+                ui.label(format!("• {}", option.text));
+            }
+            ui.label(
+                egui::RichText::new(
+                    "Results are hidden until the poll closes, by its author's choice.",
+                )
+                .weak()
+                .small(),
+            );
+        }
+
+        ui.horizontal(|ui| {
+            let closes = poll.closes_at.format("%Y-%m-%d %H:%M UTC");
+            ui.label(
+                egui::RichText::new(if poll.is_open(now) {
+                    format!("Closes {closes}")
+                } else {
+                    format!("Closed {closes}")
+                })
+                .weak()
+                .small(),
+            );
+            if poll.voted {
+                ui.label(egui::RichText::new("· you voted").weak().small());
+            }
+        });
+        ui.label(
+            egui::RichText::new("Votes are anonymous: nobody can see who chose what.")
+                .weak()
+                .small(),
+        );
+    });
 }
 
 /// A server chosen by the user, awaiting login credentials.
@@ -4517,6 +4792,8 @@ impl ConclaveGUI {
                     let nt_body_id = egui::Id::new(format!("forum_nt_body:{key_owned}"));
                     let nt_md_id = egui::Id::new(format!("forum_nt_md:{key_owned}"));
                     let nt_sign_id = egui::Id::new(format!("forum_nt_sign:{key_owned}"));
+                    let nt_poll_id = egui::Id::new(format!("forum_nt_poll:{key_owned}"));
+                    let pick_id = egui::Id::new(format!("forum_poll_pick:{key_owned}"));
                     let reply_to_id = egui::Id::new(format!("forum_reply_to:{key_owned}"));
                     let reply_body_id = egui::Id::new(format!("forum_reply_body:{key_owned}"));
                     let reply_md_id = egui::Id::new(format!("forum_reply_md:{key_owned}"));
@@ -4530,6 +4807,10 @@ impl ConclaveGUI {
                         ctx.data(|d| d.get_temp(nt_body_id).unwrap_or_default());
                     let mut nt_md: bool = ctx.data(|d| d.get_temp(nt_md_id).unwrap_or(false));
                     let mut nt_sign: bool = ctx.data(|d| d.get_temp(nt_sign_id).unwrap_or(false));
+                    let mut nt_poll: PollDraft =
+                        ctx.data(|d| d.get_temp(nt_poll_id).unwrap_or_default());
+                    let mut picked: Vec<u32> =
+                        ctx.data(|d| d.get_temp(pick_id).unwrap_or_default());
                     let mut reply_to: Option<u32> = ctx.data(|d| d.get_temp(reply_to_id)).flatten();
                     let mut reply_body: String =
                         ctx.data(|d| d.get_temp(reply_body_id).unwrap_or_default());
@@ -4545,6 +4826,7 @@ impl ConclaveGUI {
                     let mut post_actions: Vec<ForumAction> = Vec::new();
                     let mut create_thread = false;
                     let mut send_reply = false;
+                    let mut cast_vote = false;
 
                     egui::CentralPanel::default().show(ctx, |ui| {
                         // Breadcrumb navigation.
@@ -4626,7 +4908,12 @@ impl ConclaveGUI {
                                         }
                                         for th in &threads {
                                             ui.horizontal(|ui| {
-                                                if ui.button(&th.subject).clicked() {
+                                                let label = if th.has_poll {
+                                                    format!("📊 {}", th.subject)
+                                                } else {
+                                                    th.subject.clone()
+                                                };
+                                                if ui.button(label).clicked() {
                                                     open_thread = Some(Some(th.id));
                                                 }
                                                 ui.label(
@@ -4661,11 +4948,16 @@ impl ConclaveGUI {
                                         .desired_rows(3)
                                         .desired_width(f32::INFINITY),
                                 );
+                                poll_composer(ui, &mut nt_poll);
                                 ui.horizontal(|ui| {
                                     ui.checkbox(&mut nt_md, "Markdown");
                                     ui.checkbox(&mut nt_sign, "Sign");
-                                    let can =
-                                        !nt_subject.trim().is_empty() && !nt_body.trim().is_empty();
+                                    // A poll that was asked for but is not yet
+                                    // a valid poll holds the thread back, so it
+                                    // cannot be posted without the poll on it.
+                                    let can = !nt_subject.trim().is_empty()
+                                        && !nt_body.trim().is_empty()
+                                        && nt_poll.problem().is_none();
                                     if ui.add_enabled(can, egui::Button::new("Create")).clicked() {
                                         create_thread = true;
                                     }
@@ -4673,6 +4965,18 @@ impl ConclaveGUI {
                             }
                             // Thread view: posts + reply composer.
                             (Some(topic), Some(thread)) => {
+                                if let Some(poll) = conn.forum_poll(thread) {
+                                    // Bounded: a poll with the full sixteen
+                                    // options must not push the posts out of
+                                    // the window.
+                                    egui::ScrollArea::vertical()
+                                        .id_salt(format!("forum_poll_scroll:{key_owned}"))
+                                        .max_height(220.0)
+                                        .show(ui, |ui| {
+                                            render_poll(ui, &poll, &mut picked, &mut cast_vote);
+                                        });
+                                    ui.separator();
+                                }
                                 egui::ScrollArea::vertical()
                                     .max_height(320.0)
                                     .show(ui, |ui| match conn.forum_posts(thread) {
@@ -4757,6 +5061,9 @@ impl ConclaveGUI {
                     // Keep the thread subscription in sync with the selection.
                     let current_open: Option<u32> = ctx.data(|d| d.get_temp(opened_id)).flatten();
                     if current_open != sel_thread {
+                        // A ballot half-assembled in one thread's poll has no
+                        // meaning in the next one's.
+                        picked.clear();
                         if let Some(old) = current_open {
                             let c = conn.clone();
                             tokio::spawn(async move {
@@ -4790,9 +5097,26 @@ impl ConclaveGUI {
                         let subject = std::mem::take(&mut nt_subject);
                         let body = std::mem::take(&mut nt_body);
                         let (md, sign) = (nt_md, nt_sign);
+                        let poll = nt_poll.to_poll();
+                        nt_poll = PollDraft::default();
                         let c = conn.clone();
                         tokio::spawn(async move {
-                            let _ = c.new_forum_thread(topic, subject, body, md, sign).await;
+                            let _ = c
+                                .new_forum_thread(topic, subject, body, md, sign, poll)
+                                .await;
+                        });
+                    }
+
+                    if cast_vote
+                        && let Some(thread) = sel_thread
+                        && let Some(poll) = conn.forum_poll(thread)
+                    {
+                        // The ballot goes as picked; the server decides whether
+                        // it counts and pushes back the poll as it now stands.
+                        let options = std::mem::take(&mut picked);
+                        let c = conn.clone();
+                        tokio::spawn(async move {
+                            let _ = c.vote_forum_poll(poll.id, options).await;
                         });
                     }
 
@@ -4820,6 +5144,8 @@ impl ConclaveGUI {
                         d.insert_temp(nt_body_id, nt_body);
                         d.insert_temp(nt_md_id, nt_md);
                         d.insert_temp(nt_sign_id, nt_sign);
+                        d.insert_temp(nt_poll_id, nt_poll);
+                        d.insert_temp(pick_id, picked);
                         d.insert_temp(reply_to_id, reply_to);
                         d.insert_temp(reply_body_id, reply_body);
                         d.insert_temp(reply_md_id, reply_md);
@@ -5059,5 +5385,75 @@ impl ConclaveGUI {
                 });
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use conclave_common::poll::PollOption;
+
+    fn poll(votes: Option<u32>, has_voted: bool, multiple_choice: bool) -> Poll {
+        Poll {
+            id: 1,
+            question: "Where are we going?".to_string(),
+            options: vec![
+                PollOption {
+                    id: 1,
+                    text: "Tacos".to_string(),
+                    votes,
+                },
+                PollOption {
+                    id: 2,
+                    text: "Pizza".to_string(),
+                    votes,
+                },
+            ],
+            multiple_choice,
+            closes_at: Utc::now() + chrono::Duration::days(2),
+            public_results: votes.is_some(),
+            total_voters: votes.map(|_| 3),
+            voted: has_voted,
+        }
+    }
+
+    /// Every state a poll can be drawn in: a ballot waiting to be cast, a
+    /// tally, and a poll whose results are withheld.
+    #[test]
+    fn a_poll_draws_in_each_of_its_states() {
+        for (poll, mut picked) in [
+            (poll(None, false, false), Vec::new()),
+            (poll(None, false, true), vec![1]),
+            (poll(Some(2), true, false), Vec::new()),
+            (poll(None, true, false), Vec::new()),
+        ] {
+            let mut vote = false;
+            egui::__run_test_ui(|ui| render_poll(ui, &poll, &mut picked, &mut vote));
+            assert!(!vote, "nothing was clicked, so no ballot should be cast");
+        }
+    }
+
+    /// The composer refuses to hand over a poll until what was typed is one,
+    /// and says why in the meantime.
+    #[test]
+    fn the_composer_withholds_an_unfinished_poll() {
+        let mut draft = PollDraft::default();
+        egui::__run_test_ui(|ui| poll_composer(ui, &mut draft));
+        // Not asked for: nothing to attach and nothing to complain about.
+        assert!(draft.to_poll().is_none());
+        assert!(draft.problem().is_none());
+
+        draft.enabled = true;
+        egui::__run_test_ui(|ui| poll_composer(ui, &mut draft));
+        assert!(draft.to_poll().is_none());
+        assert!(draft.problem().is_some());
+
+        draft.question = "What are we having?".to_string();
+        draft.options = vec!["Tacos".to_string(), "Pizza".to_string()];
+        egui::__run_test_ui(|ui| poll_composer(ui, &mut draft));
+        assert!(draft.problem().is_none());
+        let poll = draft.to_poll().expect("a finished poll");
+        assert_eq!(poll.duration.whole_days(), 7);
+        assert!(poll.public_results);
     }
 }

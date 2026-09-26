@@ -113,6 +113,40 @@ CREATE TABLE FORUM_POST (
     FOREIGN KEY (author_user) REFERENCES USER(id)
 );
 
+-- An optional poll attached to a thread
+CREATE TABLE FORUM_POLL (
+    id INTEGER PRIMARY KEY,
+    thread integer NOT NULL UNIQUE,
+    question text NOT NULL,
+    multiple_choice boolean DEFAULT FALSE NOT NULL,
+    public_results boolean DEFAULT TRUE NOT NULL,
+    author_user integer NOT NULL,
+    author_key blob NOT NULL,
+    closes_at DATETIME NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    FOREIGN KEY (thread) REFERENCES FORUM_THREAD(id) ON DELETE CASCADE,
+    FOREIGN KEY (author_user) REFERENCES USER(id)
+);
+
+-- One choice on a poll. The tally lives here, as a counter.
+CREATE TABLE FORUM_POLL_OPTION (
+    id INTEGER PRIMARY KEY,
+    poll integer NOT NULL,
+    position integer NOT NULL, -- display order
+    text text NOT NULL,
+    votes integer DEFAULT 0 NOT NULL,
+    FOREIGN KEY (poll) REFERENCES FORUM_POLL(id) ON DELETE CASCADE
+);
+
+-- Records THAT someone voted, never what they voted for.
+CREATE TABLE FORUM_POLL_VOTER (
+    poll integer NOT NULL,
+    voter blob NOT NULL, -- voter's ed25519 identity key, which anonymous users have too
+    voted_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    PRIMARY KEY (poll, voter),
+    FOREIGN KEY (poll) REFERENCES FORUM_POLL(id) ON DELETE CASCADE
+);
+
 INSERT INTO USER VALUES(0, 'admin', NULL, CURRENT_TIMESTAMP, false);
 -- The admin group is red (16711680 = 0xFF0000); red is reserved for admins.
 INSERT INTO GRP VALUES(0, 'admin', 'Administrative users', NULL, 16711680);

@@ -36,6 +36,9 @@ pub mod forum;
 /// Group labels shown alongside whatever a group restricts.
 pub mod group;
 
+/// Polls: a question, a handful of options, and an anonymous tally
+pub mod poll;
+
 /// Serialization and deserialization utilities for cryptographic keys. Keys stored in config files
 /// are base64-encoded; the `_bytes` variants, along with the signature helpers, keep the same
 /// material as raw bytes for the ML-DSA types sent over the network, which have no `serde`

@@ -717,3 +717,214 @@ async fn rooms_and_topics_name_the_groups_that_gate_them() {
 
     server_process.abort();
 }
+
+/// A poll reports a tally and never a voter. The creator sees the count from
+/// the start when they kept it private; everyone else sees the options and
+/// nothing more until it closes. A ballot is counted once, and a ballot the
+/// poll's terms do not allow is not counted at all.
+#[allow(clippy::too_many_lines)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_poll_tallies_votes_without_recording_voters() {
+    use conclave_common::poll::{NewPoll, PollDuration};
+
+    const PORT: u16 = 8095;
+
+    let tempdir = TempDir::new("conclave_poll").unwrap();
+    let server_db = tempdir.path().join(format!("poll_{}.db", Uuid::new_v4()));
+
+    let (server, password) = conclave_server::State::new(
+        "Poll Server".into(),
+        "Description".into(),
+        LOCALHOST,
+        Some("localhost".into()),
+        PORT,
+        false,
+        server_db,
+    )
+    .unwrap();
+    let server = Arc::new(server);
+
+    server.set_forums_enabled(true).await.unwrap();
+    server
+        .create_forum_topic("Lunch".into(), String::new(), vec![])
+        .await
+        .unwrap();
+
+    let server_clone = server.clone();
+    let server_process = tokio::spawn(async move { server_clone.serve().await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // The poll's author, and a second identity to vote with: separate clients,
+    // so separate identity keys, which is what a voter is known by.
+    let author = conclave_client::Client::new(
+        tempdir
+            .path()
+            .join(format!("author_{}.toml", Uuid::new_v4())),
+    )
+    .unwrap()
+    .connect(
+        LOCALHOST.to_string().as_str(),
+        PORT,
+        true,
+        "admin".to_string(),
+        Some(("admin".to_string(), password.to_string()).into()),
+        None,
+        None,
+        String::new(),
+        std::collections::BTreeMap::new(),
+    )
+    .await
+    .unwrap();
+
+    let voter = conclave_client::Client::new(
+        tempdir
+            .path()
+            .join(format!("voter_{}.toml", Uuid::new_v4())),
+    )
+    .unwrap()
+    .connect(
+        LOCALHOST.to_string().as_str(),
+        PORT,
+        true,
+        "Guest".to_string(),
+        None,
+        None,
+        None,
+        String::new(),
+        std::collections::BTreeMap::new(),
+    )
+    .await
+    .unwrap();
+
+    let topic = eventually("the topic list", || {
+        author.forum_topics().first().map(|t| t.id)
+    })
+    .await;
+
+    // Results kept private: only the author sees the count before it closes.
+    author
+        .new_forum_thread(
+            topic,
+            "Lunch on Friday".into(),
+            "Pick one.".into(),
+            false,
+            false,
+            Some(NewPoll {
+                question: "What are we having?".into(),
+                options: vec![
+                    "Tacos".into(),
+                    "Pasta".into(),
+                    "Pizza".into(),
+                    "Sushi".into(),
+                ],
+                multiple_choices: false,
+                duration: PollDuration::days(2).unwrap(),
+                public_results: false,
+            }),
+        )
+        .await
+        .unwrap();
+
+    // The thread list says a thread carries a poll before it is opened.
+    let thread = eventually("the new thread", || {
+        author
+            .forum_threads(topic)
+            .into_iter()
+            .find(|t| t.subject == "Lunch on Friday")
+    })
+    .await;
+    assert!(thread.has_poll);
+    let thread = thread.id;
+
+    voter.request_forum_threads(topic).await.unwrap();
+    author.open_forum_thread(thread).await.unwrap();
+    voter.open_forum_thread(thread).await.unwrap();
+
+    let author_view = eventually("the author's poll", || author.forum_poll(thread)).await;
+    let voter_view = eventually("the voter's poll", || voter.forum_poll(thread)).await;
+
+    // The author kept the results private, so the author has them and the
+    // voter does not — not as zeroes to be hidden, but not at all.
+    assert!(author_view.results_visible());
+    assert_eq!(author_view.total_voters, Some(0));
+    assert!(!voter_view.results_visible());
+    assert!(voter_view.options.iter().all(|o| o.votes.is_none()));
+    assert_eq!(voter_view.total_voters, None);
+    assert_eq!(voter_view.options.len(), 4);
+    assert!(!voter_view.voted);
+
+    let pizza = voter_view
+        .options
+        .iter()
+        .find(|o| o.text == "Pizza")
+        .unwrap()
+        .id;
+    let tacos = voter_view
+        .options
+        .iter()
+        .find(|o| o.text == "Tacos")
+        .unwrap()
+        .id;
+
+    // Two choices on a single-choice poll is not a ballot: it is turned away
+    // before the voter is written down, so it costs them nothing.
+    voter
+        .vote_forum_poll(voter_view.id, vec![pizza, tacos])
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(author.forum_poll(thread).unwrap().total_voters, Some(0));
+    assert!(!voter.forum_poll(thread).unwrap().voted);
+
+    voter
+        .vote_forum_poll(voter_view.id, vec![pizza])
+        .await
+        .unwrap();
+    let after_one = eventually("the first vote", || {
+        author
+            .forum_poll(thread)
+            .filter(|p| p.total_voters == Some(1))
+    })
+    .await;
+    let pizza_votes = |poll: &conclave_common::poll::Poll| {
+        poll.options.iter().find(|o| o.id == pizza).unwrap().votes
+    };
+    assert_eq!(pizza_votes(&after_one), Some(1));
+
+    // The voter is told they voted, and still not told the tally: which option
+    // they chose is not recorded anywhere, so it cannot be read back to them.
+    let ballot_cast = eventually("the voter's updated poll", || {
+        voter.forum_poll(thread).filter(|p| p.voted)
+    })
+    .await;
+    assert!(!ballot_cast.results_visible());
+
+    // A second ballot from the same identity changes nothing.
+    voter
+        .vote_forum_poll(voter_view.id, vec![tacos])
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let unchanged = author.forum_poll(thread).unwrap();
+    assert_eq!(unchanged.total_voters, Some(1));
+    assert_eq!(pizza_votes(&unchanged), Some(1));
+
+    // A different identity is a different voter.
+    author
+        .vote_forum_poll(voter_view.id, vec![tacos])
+        .await
+        .unwrap();
+    let both = eventually("the second vote", || {
+        author
+            .forum_poll(thread)
+            .filter(|p| p.total_voters == Some(2))
+    })
+    .await;
+    assert_eq!(pizza_votes(&both), Some(1));
+    assert_eq!(
+        both.options.iter().find(|o| o.id == tacos).unwrap().votes,
+        Some(1)
+    );
+
+    server_process.abort();
+}

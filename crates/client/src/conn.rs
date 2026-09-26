@@ -6,6 +6,7 @@ use conclave_common::forum::{
     ForumPost, ForumSignature, ForumThreadInfo, ForumTopic, NewForumPost, NewForumThread,
 };
 use conclave_common::net::{DefaultEncryptedStream, EncryptedWrite, SigningKey, VerifyingKey};
+use conclave_common::poll::{NewPoll, Poll, PollVote};
 use conclave_common::server::{
     ChatEvent, ChatTopic, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser, ServerInformation,
     ServerMessagesEncrypted, UserDetails,
@@ -281,6 +282,10 @@ pub struct ConclaveConnection {
     /// Posts within each open thread, keyed by thread id.
     pub(crate) forum_posts: Arc<std::sync::RwLock<HashMap<u32, Vec<ForumPost>>>>,
 
+    /// The poll attached to each open thread that has one, keyed by thread id,
+    /// as this user is allowed to see it.
+    pub(crate) forum_polls: Arc<std::sync::RwLock<HashMap<u32, Poll>>>,
+
     /// The server's banner image (a PNG), if it has one set.
     pub(crate) server_banner: Arc<std::sync::RwLock<Option<Vec<u8>>>>,
 
@@ -374,6 +379,7 @@ impl ConclaveConnection {
             admin_forum_topics: Arc::new(std::sync::RwLock::new(Vec::new())),
             forum_threads: Arc::new(std::sync::RwLock::new(HashMap::new())),
             forum_posts: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            forum_polls: Arc::new(std::sync::RwLock::new(HashMap::new())),
             server_banner: Arc::new(std::sync::RwLock::new(None)),
             file_listing: Arc::new(std::sync::RwLock::new(None)),
             download: Arc::new(std::sync::RwLock::new(None)),
@@ -481,12 +487,31 @@ impl ConclaveConnection {
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .insert(topic, threads);
                     }
-                    ClientMessagesEncrypted::ForumThreadResponse { thread, posts } => {
+                    ClientMessagesEncrypted::ForumThreadResponse {
+                        thread,
+                        posts,
+                        poll,
+                    } => {
                         conn_clone
                             .forum_posts
                             .write()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .insert(thread, posts);
+                        let mut polls = conn_clone
+                            .forum_polls
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        match poll {
+                            Some(poll) => polls.insert(thread, poll),
+                            None => polls.remove(&thread),
+                        };
+                    }
+                    ClientMessagesEncrypted::ForumPollUpdate { thread, poll } => {
+                        conn_clone
+                            .forum_polls
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert(thread, poll);
                     }
                     ClientMessagesEncrypted::ForumThreadEvent { topic, thread } => {
                         let mut map = conn_clone
@@ -1871,6 +1896,21 @@ impl ConclaveConnection {
             .cloned()
     }
 
+    /// The poll attached to an open thread, as this user may see it. `None`
+    /// when the thread has no poll or has not been opened yet.
+    ///
+    /// A poll whose creator kept the results private arrives with no counts at
+    /// all until it closes, so there is nothing here for a client to hide, and
+    /// no version of this carries who voted for what.
+    #[must_use]
+    pub fn forum_poll(&self, thread: u32) -> Option<Poll> {
+        self.forum_polls
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&thread)
+            .cloned()
+    }
+
     /// Request the forum topics this user may access.
     ///
     /// # Errors
@@ -1912,16 +1952,24 @@ impl ConclaveConnection {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&thread);
+        self.forum_polls
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&thread);
         self.send_request(&ServerMessagesEncrypted::ForumThreadClose { thread }.to_vec())
             .await
     }
 
-    /// Start a new thread. When `sign` is set, the body is signed with this
-    /// client's identity key.
+    /// Start a new thread, optionally with a poll attached. When `sign` is set,
+    /// the body is signed with this client's identity key.
+    ///
+    /// A poll can only be attached here, as the thread is started, and its
+    /// terms are fixed from that moment.
     ///
     /// # Errors
     ///
-    /// Network errors are possible.
+    /// Returns an error if a poll is given and it is not a poll the server
+    /// would accept. Network errors are possible.
     pub async fn new_forum_thread(
         &self,
         topic: u32,
@@ -1929,7 +1977,11 @@ impl ConclaveConnection {
         body: String,
         markdown: bool,
         sign: bool,
+        poll: Option<NewPoll>,
     ) -> Result<()> {
+        if let Some(poll) = &poll {
+            poll.validate()?;
+        }
         let signature = sign.then(|| ForumSignature::sign(&self.signing_key, &body));
         self.send_request(
             &ServerMessagesEncrypted::ForumNewThread(NewForumThread {
@@ -1938,8 +1990,27 @@ impl ConclaveConnection {
                 body,
                 markdown,
                 signature,
+                poll,
             })
             .to_vec(),
+        )
+        .await
+    }
+
+    /// Cast a ballot in a thread's poll: one option, or several when the poll
+    /// is multiple-choice.
+    ///
+    /// A vote cannot be taken back or changed. Nothing records which option an
+    /// identity chose — only that it voted — so there would be nothing to
+    /// undo. The updated poll arrives as an ordinary poll update.
+    ///
+    /// # Errors
+    ///
+    /// Network errors are possible. The server reports a closed poll, a second
+    /// ballot or a malformed one as an error message rather than here.
+    pub async fn vote_forum_poll(&self, poll: u32, options: Vec<u32>) -> Result<()> {
+        self.send_request(
+            &ServerMessagesEncrypted::ForumPollVote(PollVote { poll, options }).to_vec(),
         )
         .await
     }

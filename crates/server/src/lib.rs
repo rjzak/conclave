@@ -20,6 +20,7 @@ use conclave_common::group::GroupTag;
 use conclave_common::net::{
     DEFAULT_REKEY_INTERVAL, DefaultEncryptedStream, EncryptedRead, EncryptedWrite, random_keypair,
 };
+use conclave_common::poll::{NewPoll, Poll, PollOption, PollVote};
 use conclave_common::server::{
     AuthRequest, ChatEvent, ChatTopic, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser,
     IDLE_TIMEOUT_MINUTES, MAX_AVATAR_BYTES, MAX_BANNER_BYTES, ServerError, ServerInformation,
@@ -2482,6 +2483,34 @@ impl State {
                     }
                 }
 
+                Ok(ServerMessagesEncrypted::ForumPollVote(vote)) => {
+                    // The thread has to be reachable before the poll is, so a
+                    // gated topic gates its polls without a rule of its own.
+                    let thread = self.thread_of_poll(vote.poll).await;
+                    let reachable = match thread {
+                        Some(thread) => {
+                            self.can_access_thread(thread, user.user_id, user.admin)
+                                .await
+                        }
+                        None => false,
+                    };
+                    if reachable {
+                        match self.forum_poll_vote(vote, user.public_key).await {
+                            Ok(thread) => self.broadcast_poll(thread).await,
+                            Err(e) => {
+                                reply(
+                                    &write,
+                                    &addr,
+                                    &ClientMessagesEncrypted::Error(ServerError::ActionFailed(
+                                        e.to_string(),
+                                    )),
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
+
                 Ok(ServerMessagesEncrypted::ForumDeletePost { post }) => {
                     if user.admin {
                         match self.delete_forum_post(post).await {
@@ -3739,6 +3768,25 @@ impl State {
     pub async fn delete_forum_topic(&self, id: u32) -> Result<()> {
         self.sqlite
             .conn(move |conn| {
+                // Foreign keys are per-connection in SQLite and the pool does
+                // not turn them on, so the cascades are spelled out here.
+                conn.execute(
+                    "DELETE FROM FORUM_POLL_VOTER WHERE poll IN \
+                     (SELECT pl.id FROM FORUM_POLL pl JOIN FORUM_THREAD th ON th.id = pl.thread \
+                      WHERE th.topic = ?1);",
+                    [id],
+                )?;
+                conn.execute(
+                    "DELETE FROM FORUM_POLL_OPTION WHERE poll IN \
+                     (SELECT pl.id FROM FORUM_POLL pl JOIN FORUM_THREAD th ON th.id = pl.thread \
+                      WHERE th.topic = ?1);",
+                    [id],
+                )?;
+                conn.execute(
+                    "DELETE FROM FORUM_POLL WHERE thread IN \
+                     (SELECT id FROM FORUM_THREAD WHERE topic = ?1);",
+                    [id],
+                )?;
                 conn.execute(
                     "DELETE FROM FORUM_POST WHERE thread IN \
                      (SELECT id FROM FORUM_THREAD WHERE topic = ?1);",
@@ -3899,7 +3947,8 @@ impl State {
                 let mut stmt = conn.prepare(
                     "SELECT th.id, th.topic, th.subject, th.author_name, th.created_at, \
                             COALESCE(MAX(p.created_at), th.created_at) AS last_activity, \
-                            COUNT(CASE WHEN p.reply_to IS NOT NULL THEN 1 END) AS reply_count \
+                            COUNT(CASE WHEN p.reply_to IS NOT NULL THEN 1 END) AS reply_count, \
+                            EXISTS(SELECT 1 FROM FORUM_POLL pl WHERE pl.thread = th.id) AS has_poll \
                      FROM FORUM_THREAD th LEFT JOIN FORUM_POST p ON p.thread = th.id \
                      WHERE th.topic = ?1 GROUP BY th.id ORDER BY last_activity DESC;",
                 )?;
@@ -3912,6 +3961,7 @@ impl State {
                         created_at: row.get(4)?,
                         last_activity: row.get(5)?,
                         reply_count: row.get(6)?,
+                        has_poll: row.get(7)?,
                     })
                 })?
                 .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()
@@ -3927,7 +3977,8 @@ impl State {
                 conn.query_row(
                     "SELECT th.id, th.topic, th.subject, th.author_name, th.created_at, \
                             COALESCE(MAX(p.created_at), th.created_at) AS last_activity, \
-                            COUNT(CASE WHEN p.reply_to IS NOT NULL THEN 1 END) AS reply_count \
+                            COUNT(CASE WHEN p.reply_to IS NOT NULL THEN 1 END) AS reply_count, \
+                            EXISTS(SELECT 1 FROM FORUM_POLL pl WHERE pl.thread = th.id) AS has_poll \
                      FROM FORUM_THREAD th LEFT JOIN FORUM_POST p ON p.thread = th.id \
                      WHERE th.id = ?1 GROUP BY th.id;",
                     [thread],
@@ -3940,6 +3991,7 @@ impl State {
                             created_at: row.get(4)?,
                             last_activity: row.get(5)?,
                             reply_count: row.get(6)?,
+                            has_poll: row.get(7)?,
                         })
                     },
                 )
@@ -3981,13 +4033,20 @@ impl State {
             "Thread subject cannot be empty"
         );
         ensure!(!new.body.trim().is_empty(), "Post body cannot be empty");
+        if let Some(poll) = &new.poll {
+            // Checked before anything is written: a thread that was asked to
+            // carry a poll should not appear without one.
+            poll.validate()?;
+        }
 
         let topic = new.topic;
         let author_user = user.user_id;
         let author_name = user.display_name.clone();
+        let author_key = user.public_key.to_vec();
         let subject = new.subject;
         let body = new.body;
         let markdown = new.markdown;
+        let poll = new.poll;
         let (public_key, signature) = split_signature(new.signature.as_ref());
 
         let thread_id = self
@@ -4013,6 +4072,9 @@ impl State {
                         signature
                     ],
                 )?;
+                if let Some(poll) = poll {
+                    insert_poll(conn, thread_id, &poll, author_user, &author_key)?;
+                }
                 Ok(thread_id)
             })
             .await?;
@@ -4121,9 +4183,14 @@ impl State {
             .or_default()
             .insert(connection_id);
         let posts = self.forum_posts(thread).await;
+        let poll = self.poll_for_viewer(thread, user.public_key).await;
         self.send_to_connection(
             connection_id,
-            &ClientMessagesEncrypted::ForumThreadResponse { thread, posts },
+            &ClientMessagesEncrypted::ForumThreadResponse {
+                thread,
+                posts,
+                poll,
+            },
         )
         .await;
     }
@@ -4187,6 +4254,226 @@ impl State {
                 && let Err(e) = writer.write().await.send(&bytes).await
             {
                 error!("Failed to send forum thread event: {e}");
+            }
+        }
+    }
+
+    // ── Polls ─────────────────────────────────────────────────────────────
+
+    /// A thread's poll as one viewer may see it, or `None` when the thread has
+    /// no poll.
+    ///
+    /// The tally rides along only when that viewer is entitled to it: its
+    /// creator always, everybody once voting has closed, and everybody sooner
+    /// when the creator chose to make the results public. A viewer who is not
+    /// entitled receives options with no counts at all rather than counts a
+    /// client is trusted to hide.
+    ///
+    /// What never rides along, for anyone, is who voted for what: the database
+    /// does not record it, so there is nothing here to leave out.
+    async fn poll_for_viewer(&self, thread: u32, viewer: [u8; 32]) -> Option<Poll> {
+        let now = Utc::now();
+        let viewer = viewer.to_vec();
+        self.sqlite
+            .conn(move |conn| {
+                let Some((id, question, multiple_choice, public_results, author_key, closes_at)) =
+                    conn.query_row(
+                        "SELECT id, question, multiple_choice, public_results, author_key, \
+                                closes_at FROM FORUM_POLL WHERE thread = ?1;",
+                        [thread],
+                        |row| {
+                            Ok((
+                                row.get::<_, u32>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, bool>(2)?,
+                                row.get::<_, bool>(3)?,
+                                row.get::<_, Vec<u8>>(4)?,
+                                row.get::<_, DateTime<Utc>>(5)?,
+                            ))
+                        },
+                    )
+                    .optional()?
+                else {
+                    return Ok(None);
+                };
+
+                let results_visible = public_results || now >= closes_at || author_key == viewer;
+
+                let has_voted = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM FORUM_POLL_VOTER \
+                     WHERE poll = ?1 AND voter = ?2);",
+                    params![id, viewer],
+                    |row| row.get::<_, bool>(0),
+                )?;
+
+                let mut stmt = conn.prepare(
+                    "SELECT id, text, votes FROM FORUM_POLL_OPTION WHERE poll = ?1 \
+                     ORDER BY position, id;",
+                )?;
+                let options = stmt
+                    .query_map([id], |row| {
+                        let votes: u32 = row.get(2)?;
+                        Ok(PollOption {
+                            id: row.get(0)?,
+                            text: row.get(1)?,
+                            votes: results_visible.then_some(votes),
+                        })
+                    })?
+                    .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()?;
+
+                let total_voters: u32 = conn.query_row(
+                    "SELECT COUNT(*) FROM FORUM_POLL_VOTER WHERE poll = ?1;",
+                    [id],
+                    |row| row.get(0),
+                )?;
+
+                Ok(Some(Poll {
+                    id,
+                    question,
+                    options,
+                    multiple_choice,
+                    closes_at,
+                    public_results,
+                    total_voters: results_visible.then_some(total_voters),
+                    voted: has_voted,
+                }))
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// The thread a poll belongs to, if the poll exists.
+    async fn thread_of_poll(&self, poll: u32) -> Option<u32> {
+        self.sqlite
+            .conn(move |conn| {
+                conn.query_row(
+                    "SELECT thread FROM FORUM_POLL WHERE id = ?1;",
+                    [poll],
+                    |row| row.get::<_, u32>(0),
+                )
+                .optional()
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Record one ballot. Returns the thread the poll belongs to.
+    ///
+    /// The voter is named by their identity key rather than their account, so
+    /// an anonymous user votes once too, and the row that says they voted holds
+    /// nothing about what they chose: the tally moves as counters on the
+    /// options. That is also why a ballot cannot be recast — there is no record
+    /// of what a second one would have to undo.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the poll has closed, if the ballot does not match
+    /// the poll's terms, if this voter has already voted, or on a database
+    /// failure.
+    async fn forum_poll_vote(&self, vote: PollVote, voter: [u8; 32]) -> Result<u32> {
+        let poll = vote.poll;
+        let mut options = vote.options;
+        let picked = options.len();
+        options.sort_unstable();
+        options.dedup();
+        ensure!(!options.is_empty(), "Pick an option before voting");
+        ensure!(options.len() == picked, "The same option was picked twice");
+
+        let (thread, multiple_choice, closes_at, valid): (u32, bool, DateTime<Utc>, Vec<u32>) = {
+            let chosen = options.clone();
+            self.sqlite
+                .conn(move |conn| {
+                    let (thread, multiple_choice, closes_at) = conn.query_row(
+                        "SELECT thread, multiple_choice, closes_at FROM FORUM_POLL WHERE id = ?1;",
+                        [poll],
+                        |row| {
+                            Ok((
+                                row.get::<_, u32>(0)?,
+                                row.get::<_, bool>(1)?,
+                                row.get::<_, DateTime<Utc>>(2)?,
+                            ))
+                        },
+                    )?;
+                    let mut stmt =
+                        conn.prepare("SELECT id FROM FORUM_POLL_OPTION WHERE poll = ?1;")?;
+                    let known = stmt
+                        .query_map([poll], |row| row.get::<_, u32>(0))?
+                        .collect::<async_sqlite::rusqlite::Result<Vec<u32>>>()?;
+                    let valid = chosen.into_iter().filter(|o| known.contains(o)).collect();
+                    Ok((thread, multiple_choice, closes_at, valid))
+                })
+                .await?
+        };
+
+        ensure!(Utc::now() < closes_at, "This poll has closed");
+        ensure!(
+            valid.len() == options.len(),
+            "That option does not belong to this poll"
+        );
+        ensure!(
+            multiple_choice || options.len() == 1,
+            "This poll takes a single choice"
+        );
+
+        let voter = voter.to_vec();
+        let cast = self
+            .sqlite
+            .conn_mut(move |conn| {
+                let tx = conn.transaction()?;
+                // The voter roll is the gate: an identity already on it has
+                // voted, and the tally below is left untouched.
+                let first_ballot = tx.execute(
+                    "INSERT OR IGNORE INTO FORUM_POLL_VOTER(poll, voter) VALUES(?1, ?2);",
+                    params![poll, voter],
+                )? == 1;
+                if !first_ballot {
+                    tx.rollback()?;
+                    return Ok(false);
+                }
+                for option in &options {
+                    tx.execute(
+                        "UPDATE FORUM_POLL_OPTION SET votes = votes + 1 \
+                         WHERE id = ?1 AND poll = ?2;",
+                        params![option, poll],
+                    )?;
+                }
+                tx.commit()?;
+                Ok(true)
+            })
+            .await?;
+        ensure!(cast, "You have already voted in this poll");
+
+        Ok(thread)
+    }
+
+    /// Push a thread's poll to everyone with the thread open, rendered once per
+    /// viewer: whether someone has voted, and whether they may see the tally,
+    /// differ from viewer to viewer, so there is no one message to broadcast.
+    async fn broadcast_poll(&self, thread: u32) {
+        let ids = self
+            .forum_viewers
+            .read()
+            .await
+            .get(&thread)
+            .cloned()
+            .unwrap_or_default();
+        let targets: Vec<_> = self
+            .connections
+            .read()
+            .await
+            .iter()
+            .filter(|c| ids.contains(&c.connection_id))
+            .map(|c| (c.conn.clone(), c.user.public_key))
+            .collect();
+        for (writer, key) in targets {
+            let Some(poll) = self.poll_for_viewer(thread, key).await else {
+                continue;
+            };
+            let bytes = ClientMessagesEncrypted::ForumPollUpdate { thread, poll }.to_vec();
+            if let Err(e) = writer.write().await.send(&bytes).await {
+                error!("Failed to send poll update: {e}");
             }
         }
     }
@@ -4759,6 +5046,41 @@ fn split_signature(signature: Option<&ForumSignature>) -> (Option<Vec<u8>>, Opti
         Some(sig) => (Some(sig.public_key.to_vec()), Some(sig.signature.clone())),
         None => (None, None),
     }
+}
+
+/// Write a poll and its options for a thread being created. Runs inside the
+/// same statement batch as the thread and its opening post, so a thread asked
+/// to carry a poll never turns up without one.
+fn insert_poll(
+    conn: &Connection,
+    thread: i64,
+    poll: &NewPoll,
+    author_user: Option<u32>,
+    author_key: &[u8],
+) -> async_sqlite::rusqlite::Result<()> {
+    let closes_at = poll.duration.closes_after(Utc::now());
+    conn.execute(
+        "INSERT INTO FORUM_POLL(thread, question, multiple_choice, public_results, \
+                                author_user, author_key, closes_at) \
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7);",
+        params![
+            thread,
+            poll.question.trim(),
+            poll.multiple_choices,
+            poll.public_results,
+            author_user,
+            author_key,
+            closes_at
+        ],
+    )?;
+    let poll_id = conn.last_insert_rowid();
+    for (position, text) in poll.trimmed_options().iter().enumerate() {
+        conn.execute(
+            "INSERT INTO FORUM_POLL_OPTION(poll, position, text) VALUES(?1, ?2, ?3);",
+            params![poll_id, i64::try_from(position).unwrap_or_default(), text],
+        )?;
+    }
+    Ok(())
 }
 
 /// Build a [`ForumPost`] from a `FORUM_POST` row selected as
