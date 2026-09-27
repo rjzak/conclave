@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use conclave_common::dm;
+use conclave_common::dm::{self, DmPayload};
 use conclave_common::files::{DirAcl, FileEntry, ShareInfo};
 use conclave_common::forum::{
     ForumPost, ForumSignature, ForumThreadInfo, ForumTopic, NewForumPost, NewForumThread,
@@ -116,6 +116,19 @@ pub enum DmBody {
     Notice(String),
 }
 
+/// One emoji one side of a conversation put on a message, as this client saw it.
+///
+/// A conversation has two people in it, so a reaction is either the reader's or
+/// the other person's and there is nothing more to record.
+#[derive(Clone, Debug)]
+pub struct DmReaction {
+    /// The emoji.
+    pub emoji: char,
+
+    /// Whether this side put it there.
+    pub mine: bool,
+}
+
 /// A single direct message in a conversation with another user. History is not
 /// preserved, so a thread only accumulates while the connection is open.
 #[derive(Clone, Debug)]
@@ -126,8 +139,51 @@ pub struct DmMessage {
     /// Whether this side sent the message (`true`) or received it (`false`).
     pub from_me: bool,
 
+    /// The number the sending side gave this message, which a reaction names.
+    /// `None` for the entries nobody can react to: this client's own notices,
+    /// and file transfers.
+    pub id: Option<u32>,
+
     /// What the entry holds: a message, or a file transfer.
     pub body: DmBody,
+
+    /// Emoji put on this message, in the order they arrived.
+    pub reactions: Vec<DmReaction>,
+}
+
+impl DmMessage {
+    /// An entry nothing can react to: a notice, or a file transfer.
+    fn entry(from_me: bool, body: DmBody) -> Self {
+        Self {
+            time: Local::now(),
+            from_me,
+            id: None,
+            body,
+            reactions: Vec::new(),
+        }
+    }
+
+    /// Something one side said, numbered by that side so a reaction can name it.
+    fn said(from_me: bool, id: u32, text: String) -> Self {
+        Self {
+            time: Local::now(),
+            from_me,
+            id: Some(id),
+            body: DmBody::Text(text),
+            reactions: Vec::new(),
+        }
+    }
+
+    /// This message's reactions counted per emoji, with the other side's named
+    /// `peer`. Counted here because a conversation is not kept anywhere else.
+    #[must_use]
+    pub fn reaction_tallies(&self, peer: &str) -> Vec<ReactionTally> {
+        tally_reactions(
+            self.reactions
+                .iter()
+                .map(|r| (r.emoji, peer.to_string(), r.mine)),
+        )
+    }
 }
 
 /// How far along a user-to-user file transfer is.
@@ -368,6 +424,10 @@ pub struct ConclaveConnection {
     /// connection, which is all the protocol requires.
     pub(crate) next_transfer_id: Arc<AtomicU32>,
 
+    /// Number given to the next direct message this client sends, so a reaction
+    /// has something to name. Conversations are not kept, so neither are these.
+    pub(crate) next_dm_id: Arc<AtomicU32>,
+
     /// This client's ed25519 identity key, used to derive the shared key for
     /// end-to-end encrypted direct messages.
     pub(crate) signing_key: Arc<SigningKey>,
@@ -433,6 +493,7 @@ impl ConclaveConnection {
             transfers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             incoming_files: Arc::new(std::sync::RwLock::new(HashMap::new())),
             next_transfer_id: Arc::new(AtomicU32::new(0)),
+            next_dm_id: Arc::new(AtomicU32::new(0)),
             signing_key: Arc::new(signing_key),
             listen_handle: Arc::new(tokio::spawn(tokio::time::sleep(
                 tokio::time::Duration::from_millis(1),
@@ -1013,27 +1074,91 @@ impl ConclaveConnection {
     /// this user: it is marked as such rather than displayed as whatever bytes
     /// arrived.
     fn apply_direct_message(&self, peer: u16, payload: &[u8]) {
-        let text = self
+        let opened = self
             .peer_shared_key(peer)
-            .and_then(|key| dm::decrypt(&key, payload).ok())
-            .map_or_else(
-                || "[unable to decrypt]".to_string(),
-                |bytes| String::from_utf8_lossy(&bytes).into_owned(),
-            );
-        self.push_dm(
-            peer,
-            DmMessage {
-                time: Local::now(),
-                from_me: false,
-                body: DmBody::Text(text),
-            },
-        );
+            .and_then(|key| dm::decrypt(&key, payload).ok());
+        let payload = match opened.as_deref().map(DmPayload::from_bytes) {
+            Some(Ok(payload)) => payload,
+            // Two different failures, and a reader can act on the difference:
+            // one means the peer's key is not the one we hold, the other that
+            // they are speaking a dialect this client does not know.
+            Some(Err(_)) => {
+                self.push_dm(
+                    peer,
+                    DmMessage::entry(
+                        false,
+                        DmBody::Notice("[not a message this client understands]".to_string()),
+                    ),
+                );
+                return;
+            }
+            None => {
+                self.push_dm(
+                    peer,
+                    DmMessage::entry(false, DmBody::Notice("[unable to decrypt]".to_string())),
+                );
+                return;
+            }
+        };
+
+        match payload {
+            DmPayload::Text { id, text } => self.push_dm(peer, DmMessage::said(false, id, text)),
+            DmPayload::Reaction { target, emoji, add } => {
+                // `own` is written from the sender's side, so the message they
+                // mean is theirs exactly when it is not this side's.
+                self.apply_dm_reaction(peer, target.id, !target.own, emoji, add, false);
+                // A reaction alone does not demand a window: it is a reply to
+                // something already on screen.
+                return;
+            }
+        }
+
         // Ask the GUI to open a window for this conversation if one is not
         // already showing.
         self.dm_open_requests
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(peer);
+    }
+
+    /// Add or remove one emoji on a message in the conversation with `peer`.
+    ///
+    /// `from_me` picks the side of the conversation the target belongs to, in
+    /// this client's own terms, and `mine` says whose reaction it is.
+    fn apply_dm_reaction(
+        &self,
+        peer: u16,
+        id: u32,
+        from_me: bool,
+        emoji: char,
+        add: bool,
+        mine: bool,
+    ) {
+        let mut threads = self
+            .dms
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(message) = threads.get_mut(&peer).and_then(|thread| {
+            thread
+                .iter_mut()
+                .find(|m| m.id == Some(id) && m.from_me == from_me)
+        }) else {
+            // A reaction to something this side never saw has nothing to
+            // attach to, as with a message that arrived before the window did.
+            return;
+        };
+        let existing = message
+            .reactions
+            .iter()
+            .position(|r| r.emoji == emoji && r.mine == mine);
+        match (add, existing) {
+            // Idempotent both ways, like the chat and forum paths.
+            (true, None) => message.reactions.push(DmReaction { emoji, mine }),
+            (false, Some(i)) => {
+                message.reactions.remove(i);
+            }
+            (true, Some(_)) | (false, None) => {}
+        }
     }
 
     /// Append a direct message to the conversation with `peer`.
@@ -1103,28 +1228,59 @@ impl ConclaveConnection {
             let reason =
                 "That user is no longer connected, so the message cannot be encrypted to them"
                     .to_string();
-            self.push_dm(
-                peer,
-                DmMessage {
-                    time: Local::now(),
-                    from_me: true,
-                    body: DmBody::Notice(reason.clone()),
-                },
-            );
+            self.push_dm(peer, DmMessage::entry(true, DmBody::Notice(reason.clone())));
             return Err(anyhow!(reason));
         };
-        // Record locally first so the message appears immediately.
-        self.push_dm(
-            peer,
-            DmMessage {
-                time: Local::now(),
-                from_me: true,
-                body: DmBody::Text(message.clone()),
-            },
-        );
+        // Numbered so a reaction can name it, and recorded locally first so the
+        // message appears immediately.
+        let id = self.next_dm_id.fetch_add(1, Ordering::Relaxed);
+        self.push_dm(peer, DmMessage::said(true, id, message.clone()));
+        let payload = DmPayload::Text { id, text: message };
         let request = ServerMessagesEncrypted::DirectMessage {
             to: peer,
-            payload: dm::encrypt(&shared, message.as_bytes()),
+            payload: dm::encrypt(&shared, &payload.to_vec()),
+        };
+        self.send_request(&request.to_vec()).await
+    }
+
+    /// Put an emoji on a message in the conversation with `peer`, or take it
+    /// back. `message` is the number the message carries and `from_me` which
+    /// side sent it, both as this client holds them.
+    ///
+    /// The reaction travels inside the same sealed envelope as a message, so the
+    /// relaying server cannot tell a reaction from something said, let alone
+    /// read the emoji.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `emoji` is not an emoji, if `peer` has left, leaving no key to
+    /// encrypt to, or on a network error.
+    pub async fn react_dm(
+        &self,
+        peer: u16,
+        message: u32,
+        from_me: bool,
+        emoji: char,
+        add: bool,
+    ) -> Result<()> {
+        validate_emoji(emoji)?;
+        let shared = self.peer_shared_key(peer).ok_or_else(|| {
+            anyhow!("That user is no longer connected, so the reaction cannot be encrypted to them")
+        })?;
+        // Shown straight away, as with a message.
+        self.apply_dm_reaction(peer, message, from_me, emoji, add, true);
+        let payload = DmPayload::Reaction {
+            // Written from this side's point of view; the other side flips it.
+            target: dm::DmMessageRef {
+                id: message,
+                own: from_me,
+            },
+            emoji,
+            add,
+        };
+        let request = ServerMessagesEncrypted::DirectMessage {
+            to: peer,
+            payload: dm::encrypt(&shared, &payload.to_vec()),
         };
         self.send_request(&request.to_vec()).await
     }
@@ -1205,13 +1361,12 @@ impl ConclaveConnection {
         else {
             self.push_dm(
                 peer,
-                DmMessage {
-                    time: Local::now(),
-                    from_me: false,
-                    body: DmBody::Notice(
+                DmMessage::entry(
+                    false,
+                    DmBody::Notice(
                         "Declined a file that was not encrypted to this user".to_string(),
                     ),
-                },
+                ),
             );
             self.spawn_file_decline(peer, id);
             return;
@@ -1237,14 +1392,7 @@ impl ConclaveConnection {
                     path: None,
                 },
             );
-        self.push_dm(
-            peer,
-            DmMessage {
-                time: Local::now(),
-                from_me: false,
-                body: DmBody::File(key),
-            },
-        );
+        self.push_dm(peer, DmMessage::entry(false, DmBody::File(key)));
         // An offer needs an answer, so surface the conversation the same way an
         // inbound message does.
         self.dm_open_requests
@@ -1381,14 +1529,7 @@ impl ConclaveConnection {
         let Some(shared) = self.peer_shared_key(peer) else {
             let reason = "That user is no longer connected, so a file cannot be encrypted to them"
                 .to_string();
-            self.push_dm(
-                peer,
-                DmMessage {
-                    time: Local::now(),
-                    from_me: true,
-                    body: DmBody::Notice(reason.clone()),
-                },
-            );
+            self.push_dm(peer, DmMessage::entry(true, DmBody::Notice(reason.clone())));
             return Err(anyhow!(reason));
         };
 
@@ -1398,14 +1539,7 @@ impl ConclaveConnection {
                 // Nothing was offered, so there is no transfer to show as
                 // failed: say so in the conversation instead.
                 let reason = format!("Cannot read {}: {e}", path.display());
-                self.push_dm(
-                    peer,
-                    DmMessage {
-                        time: Local::now(),
-                        from_me: true,
-                        body: DmBody::Notice(reason.clone()),
-                    },
-                );
+                self.push_dm(peer, DmMessage::entry(true, DmBody::Notice(reason.clone())));
                 return Err(anyhow!(reason));
             }
         };
@@ -1434,14 +1568,7 @@ impl ConclaveConnection {
                     path: Some(path.to_path_buf()),
                 },
             );
-        self.push_dm(
-            peer,
-            DmMessage {
-                time: Local::now(),
-                from_me: true,
-                body: DmBody::File(key),
-            },
-        );
+        self.push_dm(peer, DmMessage::entry(true, DmBody::File(key)));
 
         let sent = self
             .send_request(

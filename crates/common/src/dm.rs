@@ -18,6 +18,7 @@ use anyhow::{Result, anyhow};
 use chacha20poly1305::aead::{Aead, Generate};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha384};
 
 use crate::net::{SigningKey, VerifyingKey};
@@ -101,6 +102,74 @@ pub fn fingerprint(public_key: &[u8; 32]) -> String {
     out
 }
 
+/// Which message in a conversation a reaction is about.
+///
+/// A conversation has two sides, each numbering its own messages from zero, so a
+/// number alone is ambiguous: `own` says which side's numbering to read it in.
+/// It is written from the point of view of whoever *sent* the reaction, so the
+/// receiving side flips it — their "my message" is the reader's "theirs".
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DmMessageRef {
+    /// The number the message's author gave it.
+    pub id: u32,
+
+    /// Whether the message belongs to whoever sent this reaction.
+    pub own: bool,
+}
+
+/// What a direct message's ciphertext holds once opened.
+///
+/// Sealed messages all look alike from outside, which is the point: a reaction
+/// is not distinguishable from a message, and neither is readable.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum DmPayload {
+    /// Something somebody said.
+    Text {
+        /// The sender's own number for this message, which a reaction can name.
+        /// Unique within what that sender has sent this session, which is as
+        /// long as a conversation lasts.
+        id: u32,
+
+        /// The message.
+        text: String,
+    },
+
+    /// An emoji put on an earlier message in this conversation, or taken back.
+    Reaction {
+        /// The message reacted to.
+        target: DmMessageRef,
+
+        /// The emoji.
+        emoji: char,
+
+        /// Whether the reaction was added or taken back.
+        add: bool,
+    },
+}
+
+impl DmPayload {
+    /// The bytes to seal for this payload.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: these types always serialize.
+    #[must_use]
+    pub fn to_vec(&self) -> Vec<u8> {
+        postcard::to_stdvec(self).expect("a DM payload always serializes")
+    }
+
+    /// Read a payload out of opened ciphertext.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the bytes are not a payload this version understands — a peer
+    /// speaking an older or newer dialect, rather than a decryption failure,
+    /// which is worth telling apart when reporting it.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        postcard::from_bytes(bytes).map_err(|e| anyhow!("Unrecognised direct message: {e}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{decrypt, encrypt, fingerprint, shared_key};
@@ -146,6 +215,55 @@ mod tests {
             let sealed = encrypt(&key, &vec![0u8; len]);
             assert_eq!(sealed.len(), len + super::OVERHEAD);
         }
+    }
+
+    #[test]
+    fn a_payload_round_trips_through_the_envelope() {
+        use super::{DmMessageRef, DmPayload};
+
+        let (alice_secret, alice_public) = random_keypair();
+        let (bob_secret, bob_public) = random_keypair();
+        let to_bob = shared_key(&alice_secret, &bob_public);
+        let to_alice = shared_key(&bob_secret, &alice_public);
+
+        let text = DmPayload::Text {
+            id: 7,
+            text: "hello bob".to_string(),
+        };
+        let sealed = encrypt(&to_bob, &text.to_vec());
+        // The words are not in the ciphertext, which is the whole point.
+        assert!(!sealed.windows(9).any(|w| w == b"hello bob"));
+        let opened = DmPayload::from_bytes(&decrypt(&to_alice, &sealed).unwrap()).unwrap();
+        assert!(matches!(opened, DmPayload::Text { id: 7, text } if text == "hello bob"));
+
+        let reaction = DmPayload::Reaction {
+            target: DmMessageRef { id: 7, own: false },
+            emoji: '★',
+            add: true,
+        };
+        let sealed = encrypt(&to_bob, &reaction.to_vec());
+        // Nor is the emoji: a relay sees a sealed payload either way and cannot
+        // tell a reaction from something said, let alone which emoji it was.
+        let star = '★'.to_string().into_bytes();
+        assert!(!sealed.windows(star.len()).any(|w| w == star.as_slice()));
+        let opened = DmPayload::from_bytes(&decrypt(&to_alice, &sealed).unwrap()).unwrap();
+        assert!(matches!(
+            opened,
+            DmPayload::Reaction {
+                target: DmMessageRef { id: 7, own: false },
+                emoji: '★',
+                add: true
+            }
+        ));
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_payload_are_told_apart_from_a_bad_key() {
+        use super::DmPayload;
+
+        // Decryption succeeding and the contents making no sense are different
+        // failures, and the second one says so.
+        assert!(DmPayload::from_bytes(&[0xFF, 0xFF, 0xFF, 0xFF]).is_err());
     }
 
     #[test]

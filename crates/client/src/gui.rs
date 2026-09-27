@@ -4660,6 +4660,9 @@ impl ConclaveGUI {
                         ui.add_space(4.0);
                     });
 
+                    // A reaction is sent once the thread is no longer borrowed.
+                    let mut react: Option<(u32, bool, ReactionClick)> = None;
+
                     // Center: the conversation.
                     egui::CentralPanel::default().show(ctx, |ui| {
                         egui::ScrollArea::vertical()
@@ -4667,38 +4670,64 @@ impl ConclaveGUI {
                             .stick_to_bottom(true)
                             .show(ui, |ui| {
                                 for msg in &thread {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label(
-                                            egui::RichText::new(
-                                                msg.time.format("%H:%M:%S").to_string(),
-                                            )
-                                            .weak()
-                                            .monospace(),
-                                        );
-                                        let who = if msg.from_me {
-                                            "You"
-                                        } else {
-                                            peer_name.as_str()
-                                        };
-                                        match &msg.body {
-                                            DmBody::Text(text) => {
-                                                ui.label(
-                                                    egui::RichText::new(format!("{who}:")).strong(),
-                                                );
-                                                ui.label(text);
-                                            }
-                                            // The transfer is looked up fresh so
-                                            // the row tracks its progress.
-                                            DmBody::File(key) => {
-                                                if let Some(transfer) = conn.file_transfer(*key) {
-                                                    dm_file_entry(ui, &conn, who, &transfer);
+                                    // A message and its reactions are two rows
+                                    // of one entry, with no gap between them,
+                                    // as in a chatroom.
+                                    ui.scope(|ui| {
+                                        ui.spacing_mut().item_spacing.y = 0.0;
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    msg.time.format("%H:%M:%S").to_string(),
+                                                )
+                                                .weak()
+                                                .monospace(),
+                                            );
+                                            let who = if msg.from_me {
+                                                "You"
+                                            } else {
+                                                peer_name.as_str()
+                                            };
+                                            match &msg.body {
+                                                DmBody::Text(text) => {
+                                                    ui.label(
+                                                        egui::RichText::new(format!("{who}:"))
+                                                            .strong(),
+                                                    );
+                                                    ui.label(text);
+                                                }
+                                                // The transfer is looked up fresh
+                                                // so the row tracks its progress.
+                                                DmBody::File(key) => {
+                                                    if let Some(transfer) =
+                                                        conn.file_transfer(*key)
+                                                    {
+                                                        dm_file_entry(ui, &conn, who, &transfer);
+                                                    }
+                                                }
+                                                DmBody::Notice(notice) => {
+                                                    ui.label(
+                                                        egui::RichText::new(notice)
+                                                            .weak()
+                                                            .italics(),
+                                                    );
                                                 }
                                             }
-                                            DmBody::Notice(notice) => {
-                                                ui.label(
-                                                    egui::RichText::new(notice).weak().italics(),
-                                                );
-                                            }
+                                        });
+                                        // Only something said can be reacted to:
+                                        // a notice is this client talking to
+                                        // itself, and a transfer is not a remark.
+                                        if let Some(id) = msg.id {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.add_space(AVATAR_EDGE);
+                                                let tallies =
+                                                    msg.reaction_tallies(peer_name.as_str());
+                                                if let Some(click) =
+                                                    compact_reaction_row(ui, &tallies)
+                                                {
+                                                    react = Some((id, msg.from_me, click));
+                                                }
+                                            });
                                         }
                                     });
                                 }
@@ -4716,6 +4745,14 @@ impl ConclaveGUI {
                         let conn = conn.clone();
                         tokio::spawn(async move {
                             let _ = conn.offer_file(peer, &path).await;
+                        });
+                    }
+                    if let Some((message, from_me, click)) = react {
+                        let conn = conn.clone();
+                        tokio::spawn(async move {
+                            let _ = conn
+                                .react_dm(peer, message, from_me, click.emoji, click.add)
+                                .await;
                         });
                     }
                     ctx.data_mut(|d| d.insert_temp(input_id, input));

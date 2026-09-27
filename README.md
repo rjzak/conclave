@@ -47,8 +47,8 @@ The tracker and server may be graphical desktop applications (`--features=gui`) 
 
 * A user connects to the server in a variety of ways (see above)
 * Server administration via the client, if authenticated and authorised.
-* **Ephemeral** group chats
-* **Ephemeral** direct messages, end-to-end encrypted
+* **Ephemeral** group chats, with reactions
+* **Ephemeral** direct messages, end-to-end encrypted, with reactions
 * Sending files to another user directly, end-to-end encrypted, subject to their acceptance
 * File sharing
 * Message boards; any permanent message should be under a message board topic. Allows for polls, reactions.

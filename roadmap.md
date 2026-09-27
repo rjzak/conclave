@@ -27,6 +27,7 @@
 - [X] Add reactions to:
   - [X] forums
   - [X] chat
+  - [X] direct messages
   - [X] determine the type of reaction: emoji, custom image, something else? 
 
 ## Possible Future Features

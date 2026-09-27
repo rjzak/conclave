@@ -1123,8 +1123,11 @@ async fn reactions_tally_emoji_and_name_who_left_them() {
 
     grace.chat_react(0, message, '♡', true).await.unwrap();
 
-    // Both ends count it, and each recognises whose it is.
-    let tallies = async |conn: &conclave_client::conn::ConclaveConnection| {
+    // Both ends count it, and each recognises whose it is. A client does not
+    // count its own reaction until the server echoes it back to the room, so
+    // each side is waited for separately: one having it says nothing about the
+    // other, which is what made an earlier version of this test flaky.
+    let tallies = |conn: &conclave_client::conn::ConclaveConnection| {
         let me = conn.my_connection_id();
         conn.chat_room(0)
             .map(|room| {
@@ -1136,24 +1139,28 @@ async fn reactions_tally_emoji_and_name_who_left_them() {
             .unwrap_or_default()
     };
     let on_adas_screen = eventually("the reaction reaching Ada", || {
-        let room = ada.chat_room(0)?;
-        let me = ada.my_connection_id();
-        room.lines
-            .iter()
-            .flat_map(|line| line.reaction_tallies(me))
-            .next()
+        tallies(&ada).into_iter().next()
     })
     .await;
     assert_eq!(on_adas_screen.emoji, '♡');
     assert_eq!(on_adas_screen.who, vec!["Grace".to_string()]);
     assert!(!on_adas_screen.mine);
-    assert!(tallies(&grace).await[0].mine);
+
+    // Waiting on `mine` also waits for the user list, which is where a client
+    // finds the connection id that tells its own reactions from anyone else's.
+    let on_graces_screen = eventually("Grace to count her own reaction", || {
+        tallies(&grace).into_iter().find(|r| r.mine)
+    })
+    .await;
+    assert_eq!(on_graces_screen.emoji, '♡');
+    assert_eq!(on_graces_screen.count(), 1);
 
     // The same reaction twice is still one reaction.
     grace.chat_react(0, message, '♡', true).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    assert_eq!(tallies(&ada).await.len(), 1);
-    assert_eq!(tallies(&ada).await[0].count(), 1);
+    let counted = tallies(&ada);
+    assert_eq!(counted.len(), 1, "one emoji, not two: {counted:?}");
+    assert_eq!(counted[0].count(), 1, "one person, counted once");
 
     // And taking it back leaves nothing behind.
     grace.chat_react(0, message, '♡', false).await.unwrap();
@@ -1285,8 +1292,10 @@ async fn a_shared_display_name_does_not_share_reactions() {
     let mine = star(&first).expect("the first Ada's reaction still stands");
     assert_eq!(mine.count(), 1);
     assert!(mine.mine);
-    // And from the other Ada's side it is still somebody else's.
-    let theirs = star(&second).expect("still there for the second Ada too");
+    // And from the other Ada's side it is still somebody else's. Waited for
+    // rather than assumed: each viewer is sent the post's reactions separately,
+    // so one side holding them says nothing about the other.
+    let theirs = eventually("the second Ada's view of it", || star(&second)).await;
     assert!(!theirs.mine);
     assert_eq!(theirs.who, vec!["Ada".to_string()]);
 
@@ -1337,10 +1346,18 @@ async fn a_shared_display_name_does_not_share_reactions() {
     // because a reaction is the connection's, not the name's.
     second.chat_react(0, message, '★', false).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-    let still = chat_star(&first).expect("the first Ada's chat reaction still stands");
+    // The first Ada counts her own reaction once the server echoes it back to
+    // the room, which is a separate delivery from the one the second Ada got.
+    let still = eventually("the first Ada to count her own", || {
+        chat_star(&first).filter(|r| r.mine)
+    })
+    .await;
     assert_eq!(still.count(), 1);
-    assert!(still.mine);
-    assert!(!chat_star(&second).unwrap().mine);
+    assert!(
+        !chat_star(&second)
+            .expect("still on the second Ada's screen")
+            .mine
+    );
 
     server_process.abort();
 }
@@ -1574,6 +1591,172 @@ async fn a_poll_counts_the_person_not_the_client() {
             .votes,
         Some(2)
     );
+
+    server_process.abort();
+}
+
+/// A reaction to a direct message rides inside the same sealed envelope as the
+/// message, so the server relaying it cannot tell the two apart. Both sides see
+/// the tally, each recognising their own, and either side can react to either
+/// side's messages.
+#[allow(clippy::too_many_lines)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direct_message_reactions_stay_inside_the_encryption() {
+    use conclave_client::conn::DmBody;
+
+    const PORT: u16 = 8099;
+
+    let tempdir = TempDir::new("conclave_dm_react").unwrap();
+    let server_db = tempdir
+        .path()
+        .join(format!("dm_react_{}.db", Uuid::new_v4()));
+
+    let (server, _password) = conclave_server::State::new(
+        "Reaction DM Server".into(),
+        "Description".into(),
+        LOCALHOST,
+        Some("localhost".into()),
+        PORT,
+        false,
+        server_db,
+    )
+    .unwrap();
+    let server = Arc::new(server);
+    let server_clone = server.clone();
+    let server_process = tokio::spawn(async move { server_clone.serve().await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let connect = async |name: &str| {
+        conclave_client::Client::new(
+            tempdir
+                .path()
+                .join(format!("{name}_{}.toml", Uuid::new_v4())),
+        )
+        .unwrap()
+        .connect(
+            LOCALHOST.to_string().as_str(),
+            PORT,
+            true,
+            name.to_string(),
+            None,
+            None,
+            None,
+            String::new(),
+            std::collections::BTreeMap::new(),
+        )
+        .await
+        .unwrap()
+    };
+    let alice = connect("alice").await;
+    let bob = connect("bob").await;
+
+    let peer_id = async |conn: &conclave_client::conn::ConclaveConnection, name: &str| {
+        eventually(&format!("{name}'s connection id"), || {
+            conn.get_connected_users()
+                .into_iter()
+                .find(|user| user.display_name == name)
+                .map(|user| user.id)
+        })
+        .await
+    };
+    let bob_id = peer_id(&alice, "bob").await;
+    let alice_id = peer_id(&bob, "alice").await;
+
+    // Alice says something; both sides end up holding the same message, each
+    // from their own side of it.
+    alice
+        .send_dm(bob_id, "shipping today".to_string())
+        .await
+        .unwrap();
+    let said = |conn: &conclave_client::conn::ConclaveConnection, peer: u16| {
+        conn.dm_thread(peer)
+            .into_iter()
+            .find(|m| matches!(&m.body, DmBody::Text(t) if t == "shipping today"))
+    };
+    let on_bobs_side = eventually("bob to receive it", || said(&bob, alice_id)).await;
+    let on_alices_side = said(&alice, bob_id).expect("her own message");
+    let id = on_bobs_side.id.expect("a message carries a number");
+    assert_eq!(
+        on_alices_side.id,
+        Some(id),
+        "the sender's number, both sides"
+    );
+    assert!(on_alices_side.from_me, "hers");
+    assert!(!on_bobs_side.from_me, "not his");
+
+    // Bob reacts to her message. From his side it is not his own, so the
+    // reference he sends says so, and she has to read it the other way round.
+    bob.react_dm(alice_id, id, false, '★', true).await.unwrap();
+
+    let hers = eventually("the reaction reaching alice", || {
+        said(&alice, bob_id)
+            .map(|m| m.reaction_tallies("bob"))
+            .filter(|t| !t.is_empty())
+    })
+    .await;
+    assert_eq!(hers.len(), 1);
+    assert_eq!(hers[0].emoji, '★');
+    assert_eq!(hers[0].count(), 1);
+    assert!(!hers[0].mine, "bob's reaction is not alice's");
+    assert_eq!(hers[0].who_line(), "★ bob");
+
+    // And Bob sees his own as his.
+    let his = said(&bob, alice_id).unwrap().reaction_tallies("alice");
+    assert!(his[0].mine);
+    assert_eq!(his[0].who_line(), "★ you");
+
+    // Alice joins the same emoji: two people, one reaction each.
+    alice.react_dm(bob_id, id, true, '★', true).await.unwrap();
+    let both = eventually("both reactions", || {
+        said(&bob, alice_id)
+            .map(|m| m.reaction_tallies("alice"))
+            .filter(|t| t.first().is_some_and(|r| r.count() == 2))
+    })
+    .await;
+    assert_eq!(both[0].who_line(), "★ alice and you");
+
+    // Bob takes his back; hers stands.
+    bob.react_dm(alice_id, id, false, '★', false).await.unwrap();
+    let left = eventually("bob's reaction withdrawn", || {
+        said(&alice, bob_id)
+            .map(|m| m.reaction_tallies("bob"))
+            .filter(|t| t.first().is_some_and(|r| r.count() == 1))
+    })
+    .await;
+    assert!(left[0].mine, "what is left is alice's own");
+
+    // Either side can react to its own messages too, and to a second message
+    // numbered separately from the first.
+    bob.send_dm(alice_id, "on it".to_string()).await.unwrap();
+    let bobs_own = eventually("bob's own message", || {
+        bob.dm_thread(alice_id)
+            .into_iter()
+            .find(|m| matches!(&m.body, DmBody::Text(t) if t == "on it"))
+    })
+    .await;
+    let bob_msg = bobs_own.id.expect("numbered");
+    alice
+        .react_dm(bob_id, bob_msg, false, '♡', true)
+        .await
+        .unwrap();
+    let on_his = eventually("her reaction to his message", || {
+        bob.dm_thread(alice_id)
+            .into_iter()
+            .find(|m| m.id == Some(bob_msg) && m.from_me)
+            .map(|m| m.reaction_tallies("alice"))
+            .filter(|t| !t.is_empty())
+    })
+    .await;
+    assert_eq!(on_his[0].emoji, '♡');
+    assert!(!on_his[0].mine, "hers, on his message");
+
+    // Her ★ on the first message is untouched by any of that.
+    let first = said(&bob, alice_id).unwrap().reaction_tallies("alice");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].emoji, '★');
+
+    // A letter is not a reaction, and nothing is sent when it is refused.
+    assert!(bob.react_dm(alice_id, id, false, 'x', true).await.is_err());
 
     server_process.abort();
 }
