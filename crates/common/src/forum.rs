@@ -8,6 +8,9 @@
 //! names the post it replies to. Posts may optionally be signed by the author's
 //! ed25519 identity key so other users can verify authorship.
 //!
+//! Posts also carry reactions — emoji other readers put on them — which are
+//! stored with the post and arrive with it; see [`crate::reaction`].
+//!
 //! A thread may also carry a poll, attached when the thread is started. The
 //! poll itself is not a forum idea — see [`crate::poll`] — so the same question
 //! and the same anonymous tally could be asked somewhere else later.
@@ -15,6 +18,7 @@
 use crate::group::GroupTag;
 use crate::net::{SigningKey, VerifyingKey};
 use crate::poll::NewPoll;
+use crate::reaction::ReactionTally;
 
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Signer, Verifier};
@@ -132,6 +136,9 @@ pub struct ForumPost {
 
     /// The author's signature over the body, if they signed it
     pub signature: Option<ForumSignature>,
+
+    /// The emoji readers put on this post, with who put them there.
+    pub reactions: Vec<ReactionTally>,
 }
 
 /// A request to start a new thread within a topic.

@@ -19,6 +19,15 @@
 //! The cost of that is a vote is final: changing one would mean knowing what to
 //! take back. It also means a voter is not reminded which option they chose
 //! after a reconnect, only that they have voted.
+//!
+//! # One vote each
+//!
+//! A voter is their account where they have one, and their client's identity key
+//! where they do not. So one account is one vote however many machines it votes
+//! from, and an anonymous voter still gets exactly one — but a *new* anonymous
+//! identity is a new voter, since a fresh key is all it takes to become one. A
+//! server that needs a poll to be harder to stuff than that should not be
+//! admitting anonymous users to it.
 
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Duration, Utc};

@@ -9,6 +9,7 @@ use conclave_common::poll::{
     MAX_POLL_OPTION, MAX_POLL_OPTIONS, MAX_POLL_QUESTION, MIN_POLL_OPTIONS, NewPoll, Poll,
     PollDuration,
 };
+use conclave_common::reaction::{REACTION_PALETTE, ReactionTally, first_emoji};
 use conclave_common::server::{
     ChatroomInfo, ConnectedUser, IDLE_TIMEOUT_MINUTES, UserAuthentication, VerifyingKey,
 };
@@ -35,6 +36,11 @@ type ConnSnapshot = (String, String, bool, ConclaveConnection);
 /// where the scale factor is mis-reported (e.g. KDE under X11, where the fixed
 /// logical size could otherwise render as a huge window).
 pub const MAIN_WINDOW_SIZE: [f32; 2] = [460.0, 200.0];
+
+/// Edge length an avatar is drawn at, and the width anything lining up beneath
+/// one is indented by.
+#[allow(clippy::cast_precision_loss)]
+const AVATAR_EDGE: f32 = conclave_client::avatar::DISPLAY_SIZE as f32;
 
 /// The main window is never allowed to occupy more than this fraction of the
 /// monitor in either dimension.
@@ -143,12 +149,31 @@ fn server_list_users(connected: u32, max_users: u16) -> String {
 const LOCKED_SERVER_HINT: &str = "This server does not allow anonymous users — a username and \
      password are required.";
 
-/// Padlock shown before the name of a server that requires an account.
-const LOCKED_SERVER_PREFIX: &str = "🔒 ";
+/// The glyphs the interface draws in place of words, in one place because the
+/// fonts the client ships with cover far fewer of them than they appear to: an
+/// emoji egui cannot draw becomes an empty box, silently. Every one of these is
+/// held to what the bundled fonts can actually render by `ui_glyphs_render`.
+mod glyph {
+    /// Something an account, a group or a key gates.
+    pub const KEYED: &str = "🗝";
+    /// A signature that checks out.
+    pub const SIGNED: &str = "🖊";
+    /// A signature that does not, and anything else cancelled or refused.
+    pub const CROSS: &str = "🗙";
+    /// Adding one more of something.
+    pub const PLUS: &str = "✚";
+    /// Throwing something away.
+    pub const BIN: &str = "🗑";
+    /// A poll.
+    pub const POLL: &str = "▣";
+}
 
-/// Padlock shown before the name of a chatroom or forum topic a group gates,
+/// Mark shown before the name of a server that requires an account.
+const LOCKED_SERVER_PREFIX: &str = "🗝 ";
+
+/// Mark shown before the name of a chatroom or forum topic a group gates,
 /// the same mark [`server_list_name`] puts on a server that admits no guests.
-const RESTRICTED_PREFIX: &str = "🔒 ";
+const RESTRICTED_PREFIX: &str = "🗝 ";
 
 /// A room or topic name as a list shows it: padlocked when a group restricts
 /// it, plain when everyone on the server can read it. An unmarked name is the
@@ -204,7 +229,11 @@ fn audience_line(ui: &mut egui::Ui, restricted_to: &[GroupTag]) {
                     .weak(),
             );
         } else {
-            ui.label(egui::RichText::new("🔒 Visible only to").small().weak());
+            ui.label(
+                egui::RichText::new(format!("{} Visible only to", glyph::KEYED))
+                    .small()
+                    .weak(),
+            );
             group_chips(ui, restricted_to);
         }
     });
@@ -637,7 +666,7 @@ fn note_active_server(active: &RwLock<Option<String>>, ctx: &egui::Context, key:
 /// text height rather than being padded to the avatar size. Idle users' avatars
 /// are dimmed to match their dulled name.
 fn show_avatar(ui: &mut egui::Ui, avatar: Option<&[u8]>, idle: bool) {
-    let edge = f32::from(u16::try_from(conclave_client::avatar::DISPLAY_SIZE).unwrap_or(32));
+    let edge = AVATAR_EDGE;
     if let Some(bytes) = avatar
         && let Some(texture) = avatar_texture(ui.ctx(), bytes)
     {
@@ -777,7 +806,11 @@ fn urls_editor(ui: &mut egui::Ui, id_salt: &str, pairs: &mut Vec<(String, String
                         .desired_width(220.0),
                 )
                 .changed();
-            if ui.small_button("🗑").on_hover_text("Remove link").clicked() {
+            if ui
+                .small_button(glyph::BIN)
+                .on_hover_text("Remove link")
+                .clicked()
+            {
                 remove = Some(i);
             }
         });
@@ -786,7 +819,7 @@ fn urls_editor(ui: &mut egui::Ui, id_salt: &str, pairs: &mut Vec<(String, String
         pairs.remove(i);
         changed = true;
     }
-    if ui.button("➕ Add link").clicked() {
+    if ui.button(format!("{} Add link", glyph::PLUS)).clicked() {
         pairs.push((String::new(), String::new()));
         changed = true;
     }
@@ -885,6 +918,146 @@ enum ForumAction {
     Reply(u32),
     /// Delete the given post id (administrators only).
     Delete(u32),
+    /// Put an emoji on the given post, or take it back.
+    React(u32, ReactionClick),
+}
+
+/// What a click on a reaction row asked for: an emoji, and which way it goes.
+#[derive(Clone, Debug)]
+struct ReactionClick {
+    /// The emoji clicked.
+    emoji: char,
+    /// Whether to add the reaction or take it back.
+    add: bool,
+}
+
+/// Draw the reactions on a forum post, with the picker at the end.
+fn reaction_row(ui: &mut egui::Ui, tallies: &[ReactionTally]) -> Option<ReactionClick> {
+    reaction_row_sized(ui, tallies, false)
+}
+
+/// Draw the reactions under a chat message: the same row, in the small style,
+/// so a line that has been reacted to does not tower over one that has not.
+fn compact_reaction_row(ui: &mut egui::Ui, tallies: &[ReactionTally]) -> Option<ReactionClick> {
+    reaction_row_sized(ui, tallies, true)
+}
+
+/// Draw the reactions on one message or post, with the picker at the end.
+///
+/// Returns what was clicked, for the caller to send once whatever was being
+/// rendered is no longer borrowed. A reaction the reader already made is drawn
+/// pressed, and clicking it takes it back. The palette itself is full size
+/// either way: the emoji in it have to be picked out at a glance.
+fn reaction_row_sized(
+    ui: &mut egui::Ui,
+    tallies: &[ReactionTally],
+    small: bool,
+) -> Option<ReactionClick> {
+    let mut clicked: Option<ReactionClick> = None;
+
+    for tally in tallies {
+        let label = format!("{} {}", tally.emoji, tally.count());
+        let label = if small {
+            egui::RichText::new(label).small()
+        } else {
+            egui::RichText::new(label)
+        };
+        if ui
+            .selectable_label(tally.mine, label)
+            .on_hover_text(tally.who_line())
+            .clicked()
+        {
+            clicked = Some(ReactionClick {
+                emoji: tally.emoji,
+                // Your own reaction comes off; anybody else's, you join.
+                add: !tally.mine,
+            });
+        }
+    }
+
+    let mine_already = |emoji: char| tallies.iter().any(|t| t.emoji == emoji && t.mine);
+    let picker = |ui: &mut egui::Ui, clicked: &mut Option<ReactionClick>| {
+        ui.set_max_width(240.0);
+        ui.horizontal_wrapped(|ui| {
+            for (emoji, meaning) in REACTION_PALETTE {
+                let mine = mine_already(*emoji);
+                if ui
+                    .selectable_label(mine, egui::RichText::new(emoji.to_string()).size(18.0))
+                    .on_hover_text(*meaning)
+                    .clicked()
+                {
+                    *clicked = Some(ReactionClick {
+                        emoji: *emoji,
+                        add: !mine,
+                    });
+                }
+            }
+        });
+
+        // The palette is a shortcut, not the limit: anything the protocol
+        // accepts can be typed or pasted here (on a Mac, ⌃⌘Space).
+        ui.separator();
+        let typed_id = egui::Id::new("reaction_entry");
+        let mut typed: String = ui.data(|d| d.get_temp(typed_id).unwrap_or_default());
+        let candidate = first_emoji(&typed);
+        ui.horizontal(|ui| {
+            let entry = ui.add(
+                egui::TextEdit::singleline(&mut typed)
+                    .hint_text("or an emoji")
+                    .char_limit(8)
+                    .desired_width(110.0),
+            );
+            let entered = entry.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if let Some(emoji) = candidate
+                && (ui.button("Add").clicked() || entered)
+            {
+                *clicked = Some(ReactionClick {
+                    emoji,
+                    add: !mine_already(emoji),
+                });
+                typed.clear();
+            }
+        });
+        // Say which way it failed, because "nothing happened" is the one
+        // outcome that teaches nobody anything.
+        match candidate {
+            None if !typed.is_empty() => {
+                ui.label(
+                    egui::RichText::new("Not an emoji")
+                        .small()
+                        .color(egui::Color32::from_rgb(0xd0, 0x45, 0x37)),
+                );
+            }
+            Some(emoji)
+                if !ui
+                    .ctx()
+                    .fonts_mut(|f| f.has_glyph(&egui::FontId::proportional(14.0), emoji)) =>
+            {
+                ui.label(
+                    egui::RichText::new(
+                        "This client has no glyph for that one — it will show as a box \
+                         here, though another client may draw it.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            }
+            _ => {}
+        }
+        ui.data_mut(|d| d.insert_temp(typed_id, typed));
+    };
+
+    let button = if small {
+        egui::Button::new(egui::RichText::new(glyph::PLUS).small()).small()
+    } else {
+        egui::Button::new(glyph::PLUS)
+    };
+    egui::containers::menu::MenuButton::from_button(button)
+        .ui(ui, |ui| picker(ui, &mut clicked))
+        .0
+        .on_hover_text("React with an emoji");
+
+    clicked
 }
 
 /// One inline span of minimal markdown.
@@ -1106,9 +1279,15 @@ fn render_forum_posts(
                 if let Some(signature) = &post.signature {
                     let valid = signature.verify(&post.body);
                     let (glyph, color) = if valid {
-                        ("🔒 signed", egui::Color32::from_rgb(0x2e, 0xa0, 0x43))
+                        (
+                            format!("{} signed", glyph::SIGNED),
+                            egui::Color32::from_rgb(0x2e, 0xa0, 0x43),
+                        )
                     } else {
-                        ("⚠ bad signature", egui::Color32::from_rgb(0xd0, 0x45, 0x37))
+                        (
+                            format!("{} bad signature", glyph::CROSS),
+                            egui::Color32::from_rgb(0xd0, 0x45, 0x37),
+                        )
                     };
                     let sig_id = egui::Id::new(("forum_sig", key, post.id));
                     let mut shown = ui.data(|d| d.get_temp::<bool>(sig_id)).unwrap_or(false);
@@ -1147,11 +1326,17 @@ fn render_forum_posts(
 
             render_post_body(ui, post);
 
+            ui.horizontal_wrapped(|ui| {
+                if let Some(click) = reaction_row(ui, &post.reactions) {
+                    actions.push(ForumAction::React(post.id, click));
+                }
+            });
+
             ui.horizontal(|ui| {
                 if ui.small_button("Reply").clicked() {
                     actions.push(ForumAction::Reply(post.id));
                 }
-                if is_admin && ui.small_button("🗑 Delete").clicked() {
+                if is_admin && ui.small_button(format!("{} Delete", glyph::BIN)).clicked() {
                     actions.push(ForumAction::Delete(post.id));
                 }
             });
@@ -1268,7 +1453,10 @@ fn poll_composer(ui: &mut egui::Ui, draft: &mut PollDraft) {
                 // Below the minimum there is nothing to take away: a poll needs
                 // at least two options to be a poll.
                 if ui
-                    .add_enabled(i >= MIN_POLL_OPTIONS, egui::Button::new("✖").small())
+                    .add_enabled(
+                        i >= MIN_POLL_OPTIONS,
+                        egui::Button::new(glyph::CROSS).small(),
+                    )
                     .on_hover_text("Remove this option")
                     .clicked()
                 {
@@ -1279,7 +1467,11 @@ fn poll_composer(ui: &mut egui::Ui, draft: &mut PollDraft) {
         if let Some(i) = remove {
             draft.options.remove(i);
         }
-        if draft.options.len() < MAX_POLL_OPTIONS && ui.small_button("➕ Add option").clicked() {
+        if draft.options.len() < MAX_POLL_OPTIONS
+            && ui
+                .small_button(format!("{} Add option", glyph::PLUS))
+                .clicked()
+        {
             draft.options.push(String::new());
         }
 
@@ -1393,7 +1585,7 @@ fn render_poll(ui: &mut egui::Ui, poll: &Poll, picked: &mut Vec<u32>, vote: &mut
 
     ui.group(|ui| {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("📊").size(16.0));
+            ui.label(egui::RichText::new(glyph::POLL).size(16.0));
             ui.label(egui::RichText::new(&poll.question).strong());
         });
 
@@ -3882,7 +4074,12 @@ impl ConclaveGUI {
                                                     // to oneself); the lock marks that
                                                     // every conversation is E2E encrypted.
                                                     if user.display_name != own_name
-                                                        && ui.small_button("🔒 Message").clicked()
+                                                        && ui
+                                                            .small_button(format!(
+                                                                "{} Message",
+                                                                glyph::KEYED
+                                                            ))
+                                                            .clicked()
                                                     {
                                                         open_dm_request = Some(user.id);
                                                     }
@@ -4124,7 +4321,7 @@ impl ConclaveGUI {
                                     topic_input.clear();
                                     editing_topic = false;
                                 }
-                                if ui.button("✖").on_hover_text("Cancel").clicked() {
+                                if ui.button(glyph::CROSS).on_hover_text("Cancel").clicked() {
                                     editing_topic = false;
                                 }
                             });
@@ -4205,6 +4402,11 @@ impl ConclaveGUI {
                             });
                         });
 
+                    // Which reactions are this user's own is a matter of
+                    // connection id: two people may share a display name.
+                    let me = conn.my_connection_id();
+                    let mut react: Option<(u32, ReactionClick)> = None;
+
                     // Center: the conversation.
                     egui::CentralPanel::default().show(ctx, |ui| {
                         egui::ScrollArea::vertical()
@@ -4218,32 +4420,58 @@ impl ConclaveGUI {
                                         }
                                         ChatLine::Message {
                                             time,
+                                            id,
                                             display_name,
                                             message,
+                                            ..
                                         } => {
-                                            ui.horizontal_wrapped(|ui| {
-                                                let idle = user_styles
-                                                    .get(display_name)
-                                                    .is_some_and(|(_, idle)| *idle);
-                                                show_avatar(
-                                                    ui,
-                                                    user_avatars
+                                            // The message and its reactions are
+                                            // two rows of one entry, so they
+                                            // are scoped together with no gap
+                                            // between them: the reactions
+                                            // belong to the line above, not to
+                                            // the space between messages.
+                                            ui.scope(|ui| {
+                                                ui.spacing_mut().item_spacing.y = 0.0;
+                                                ui.horizontal_wrapped(|ui| {
+                                                    let idle = user_styles
                                                         .get(display_name)
-                                                        .map(Vec::as_slice),
-                                                    idle,
-                                                );
-                                                ui.label(
-                                                    egui::RichText::new(
-                                                        time.format("%H:%M:%S").to_string(),
-                                                    )
-                                                    .weak()
-                                                    .monospace(),
-                                                );
-                                                ui.label(
-                                                    egui::RichText::new(format!("{display_name}:"))
+                                                        .is_some_and(|(_, idle)| *idle);
+                                                    show_avatar(
+                                                        ui,
+                                                        user_avatars
+                                                            .get(display_name)
+                                                            .map(Vec::as_slice),
+                                                        idle,
+                                                    );
+                                                    ui.label(
+                                                        egui::RichText::new(
+                                                            time.format("%H:%M:%S").to_string(),
+                                                        )
+                                                        .weak()
+                                                        .monospace(),
+                                                    );
+                                                    ui.label(
+                                                        egui::RichText::new(format!(
+                                                            "{display_name}:"
+                                                        ))
                                                         .strong(),
-                                                );
-                                                ui.label(message);
+                                                    );
+                                                    ui.label(message);
+                                                });
+                                                // Indented clear of the avatar,
+                                                // so the row reads as sitting
+                                                // under the message rather than
+                                                // under the name.
+                                                ui.horizontal_wrapped(|ui| {
+                                                    ui.add_space(AVATAR_EDGE);
+                                                    let tallies = line.reaction_tallies(me);
+                                                    if let Some(click) =
+                                                        compact_reaction_row(ui, &tallies)
+                                                    {
+                                                        react = Some((*id, click));
+                                                    }
+                                                });
                                             });
                                         }
                                     }
@@ -4256,6 +4484,12 @@ impl ConclaveGUI {
                         let conn = conn.clone();
                         tokio::spawn(async move {
                             let _ = conn.chat_send(room, message).await;
+                        });
+                    }
+                    if let Some((message, click)) = react {
+                        let conn = conn.clone();
+                        tokio::spawn(async move {
+                            let _ = conn.chat_react(room, message, click.emoji, click.add).await;
                         });
                     }
                     if let Some(topic) = set_topic {
@@ -4372,7 +4606,7 @@ impl ConclaveGUI {
                     egui::Panel::top(format!("dm_status:{key_owned}:{peer}")).show(ctx, |ui| {
                         ui.add_space(2.0);
                         ui.label(
-                            egui::RichText::new("🔒 End-to-end encrypted")
+                            egui::RichText::new(format!("{} End-to-end encrypted", glyph::KEYED))
                                 .color(egui::Color32::from_rgb(0x33, 0xaa, 0x33))
                                 .strong(),
                         );
@@ -4672,7 +4906,7 @@ impl ConclaveGUI {
                                                 // Delete permission; the listing is
                                                 // refreshed afterwards.
                                                 if ui
-                                                    .small_button("🗑")
+                                                    .small_button(glyph::BIN)
                                                     .on_hover_text("Delete")
                                                     .clicked()
                                                 {
@@ -4909,7 +5143,7 @@ impl ConclaveGUI {
                                         for th in &threads {
                                             ui.horizontal(|ui| {
                                                 let label = if th.has_poll {
-                                                    format!("📊 {}", th.subject)
+                                                    format!("{} {}", glyph::POLL, th.subject)
                                                 } else {
                                                     th.subject.clone()
                                                 };
@@ -5053,6 +5287,12 @@ impl ConclaveGUI {
                                 let c = conn.clone();
                                 tokio::spawn(async move {
                                     let _ = c.delete_forum_post(pid).await;
+                                });
+                            }
+                            ForumAction::React(pid, click) => {
+                                let c = conn.clone();
+                                tokio::spawn(async move {
+                                    let _ = c.react_forum_post(pid, click.emoji, click.add).await;
                                 });
                             }
                         }
@@ -5431,6 +5671,114 @@ mod tests {
             egui::__run_test_ui(|ui| render_poll(ui, &poll, &mut picked, &mut vote));
             assert!(!vote, "nothing was clicked, so no ballot should be cast");
         }
+    }
+
+    /// A context with the fonts built, ready to be asked what it can draw.
+    fn font_context() -> egui::Context {
+        let ctx = egui::Context::default();
+        // One frame builds the fonts. Its texture deltas belong to a painter
+        // there is none of here, and are dropped deliberately rather than left
+        // to panic on drop.
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        output.textures_delta.clear();
+        ctx
+    }
+
+    /// Every emoji the picker offers has a glyph in the fonts the client
+    /// ships with. An emoji without one draws as an empty box, so the palette
+    /// is only as good as the font behind it.
+    #[test]
+    fn the_palette_renders_in_the_bundled_fonts() {
+        let ctx = font_context();
+        let font = egui::FontId::proportional(14.0);
+        for (emoji, _) in REACTION_PALETTE {
+            assert!(
+                ctx.fonts_mut(|f| f.has_glyph(&font, *emoji)),
+                "no glyph for {emoji} in the bundled fonts"
+            );
+        }
+    }
+
+    /// And so does every glyph the interface itself draws. egui's bundled
+    /// emoji font covers far less than its name suggests, and a glyph it
+    /// cannot draw becomes an empty box with nothing said about it.
+    #[test]
+    fn ui_glyphs_render() {
+        let ctx = font_context();
+        let font = egui::FontId::proportional(14.0);
+        for glyph in [
+            glyph::KEYED,
+            glyph::SIGNED,
+            glyph::CROSS,
+            glyph::PLUS,
+            glyph::BIN,
+            glyph::POLL,
+            LOCKED_SERVER_PREFIX.trim(),
+            RESTRICTED_PREFIX.trim(),
+        ] {
+            assert!(
+                ctx.fonts_mut(|f| f.has_glyphs(&font, glyph)),
+                "no glyph for {glyph} in the bundled fonts"
+            );
+        }
+    }
+
+    /// Both sizes of reaction row draw, and a reaction nobody clicked is not
+    /// sent.
+    #[test]
+    fn a_reaction_row_draws_and_reports_nothing_unclicked() {
+        let tallies = vec![
+            ReactionTally {
+                emoji: '★',
+                who: vec!["Ada".to_string()],
+                mine: true,
+            },
+            ReactionTally {
+                emoji: '♡',
+                who: vec!["Grace".to_string()],
+                mine: false,
+            },
+        ];
+        let mut clicked = None;
+        egui::__run_test_ui(|ui| clicked = reaction_row(ui, &tallies));
+        assert!(clicked.is_none());
+
+        // An item with no reactions still offers the picker.
+        egui::__run_test_ui(|ui| clicked = reaction_row(ui, &[]));
+        assert!(clicked.is_none());
+
+        // And the small form a chat message gets, which draws the same row
+        // through the same code.
+        egui::__run_test_ui(|ui| clicked = compact_reaction_row(ui, &tallies));
+        assert!(clicked.is_none());
+        egui::__run_test_ui(|ui| clicked = compact_reaction_row(ui, &[]));
+        assert!(clicked.is_none());
+    }
+
+    /// The row a chat message gets really is the smaller one. Chat lines are
+    /// dense and one sits under every message, so this is the whole point of
+    /// there being two sizes.
+    #[test]
+    fn the_chat_reaction_row_is_smaller_than_a_post_s() {
+        let tallies = vec![ReactionTally {
+            emoji: '★',
+            who: vec!["Ada".to_string()],
+            mine: true,
+        }];
+        let height = |small: bool| {
+            let mut rect = egui::Rect::ZERO;
+            egui::__run_test_ui(|ui| {
+                reaction_row_sized(ui, &tallies, small);
+                rect = ui.min_rect();
+            });
+            rect.height()
+        };
+        assert!(
+            height(true) < height(false),
+            "compact {} should be shorter than full size {}",
+            height(true),
+            height(false)
+        );
     }
 
     /// The composer refuses to hand over a poll until what was typed is one,

@@ -39,6 +39,9 @@ pub mod group;
 /// Polls: a question, a handful of options, and an anonymous tally
 pub mod poll;
 
+/// Reactions: an emoji somebody put on a message or a post
+pub mod reaction;
+
 /// Serialization and deserialization utilities for cryptographic keys. Keys stored in config files
 /// are base64-encoded; the `_bytes` variants, along with the signature helpers, keep the same
 /// material as raw bytes for the ML-DSA types sent over the network, which have no `serde`

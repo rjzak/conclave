@@ -21,6 +21,9 @@ use conclave_common::net::{
     DEFAULT_REKEY_INTERVAL, DefaultEncryptedStream, EncryptedRead, EncryptedWrite, random_keypair,
 };
 use conclave_common::poll::{NewPoll, Poll, PollOption, PollVote};
+use conclave_common::reaction::{
+    MAX_REACTIONS_PER_ITEM, ReactionTally, tally_reactions, validate_emoji,
+};
 use conclave_common::server::{
     AuthRequest, ChatEvent, ChatTopic, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser,
     IDLE_TIMEOUT_MINUTES, MAX_AVATAR_BYTES, MAX_BANNER_BYTES, ServerError, ServerInformation,
@@ -335,6 +338,11 @@ pub struct State {
     /// Forum thread subscriptions: thread id -> connection ids currently viewing.
     forum_viewers: Arc<RwLock<HashMap<u32, HashSet<u16>>>>,
 
+    /// Id given to the next chat message, so a reaction has something to name.
+    /// Chat keeps no history, so this restarts with the server and a client
+    /// only ever learns the ids of messages it was present for.
+    next_chat_message_id: Arc<AtomicU32>,
+
     /// User-to-user file transfers being relayed, keyed by the sending
     /// connection's id and the transfer id it chose. The file's bytes are never
     /// held here — only what the server needs to hold a sender to the offer the
@@ -509,6 +517,7 @@ impl State {
                 chat_topics: Arc::new(RwLock::new(HashMap::new())),
                 forums_enabled: Arc::new(AtomicBool::new(false)), // Database default
                 forum_viewers: Arc::new(RwLock::new(HashMap::new())),
+                next_chat_message_id: Arc::new(AtomicU32::new(0)),
                 dm_transfers: Arc::new(RwLock::new(HashMap::new())),
                 banner: Arc::new(RwLock::new(None)),
                 serving: Arc::new(AtomicBool::new(false)),
@@ -698,6 +707,7 @@ impl State {
             chat_topics: Arc::new(RwLock::new(HashMap::new())),
             forums_enabled: Arc::new(AtomicBool::new(forums_enabled)),
             forum_viewers: Arc::new(RwLock::new(HashMap::new())),
+            next_chat_message_id: Arc::new(AtomicU32::new(0)),
             dm_transfers: Arc::new(RwLock::new(HashMap::new())),
             banner: Arc::new(RwLock::new(banner)),
             serving: Arc::new(AtomicBool::new(false)),
@@ -2402,6 +2412,16 @@ impl State {
                     self.chat_send(user.id, room, message, &user).await;
                 }
 
+                Ok(ServerMessagesEncrypted::ChatReact {
+                    room,
+                    message,
+                    emoji,
+                    add,
+                }) => {
+                    self.chat_react(user.id, room, message, emoji, add, &user)
+                        .await;
+                }
+
                 Ok(ServerMessagesEncrypted::ChatSetTopic { room, topic }) => {
                     self.chat_set_topic(user.id, room, topic, &user).await;
                 }
@@ -2495,8 +2515,36 @@ impl State {
                         None => false,
                     };
                     if reachable {
-                        match self.forum_poll_vote(vote, user.public_key).await {
+                        match self.forum_poll_vote(vote, Voter::of(&user)).await {
                             Ok(thread) => self.broadcast_poll(thread).await,
+                            Err(e) => {
+                                reply(
+                                    &write,
+                                    &addr,
+                                    &ClientMessagesEncrypted::Error(ServerError::ActionFailed(
+                                        e.to_string(),
+                                    )),
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
+
+                Ok(ServerMessagesEncrypted::ForumReact { post, emoji, add }) => {
+                    // The post's thread has to be reachable before its
+                    // reactions are, so a gated topic gates these too.
+                    let thread = self.thread_of_post(post).await;
+                    let reachable = match thread {
+                        Some(thread) => {
+                            self.can_access_thread(thread, user.user_id, user.admin)
+                                .await
+                        }
+                        None => false,
+                    };
+                    if reachable {
+                        match self.forum_react(post, emoji, add, &user).await {
+                            Ok(thread) => self.broadcast_post_reactions(thread, post).await,
                             Err(e) => {
                                 reply(
                                     &write,
@@ -3564,9 +3612,50 @@ impl State {
             room,
             &ClientMessagesEncrypted::ChatActivity(ChatEvent::Message {
                 room,
+                id: self.next_chat_message_id.fetch_add(1, Ordering::Relaxed),
                 display_name: user.display_name.clone(),
                 message,
                 at: Utc::now(),
+            }),
+            None,
+        )
+        .await;
+    }
+
+    /// Relay a reaction to a chat message to the whole room, the sender
+    /// included so every client counts the same way.
+    ///
+    /// Nothing is kept: chat has no history, so the server has no message to
+    /// hang a tally on and each client adds up the reactions to the messages it
+    /// saw. A client that was not there has nothing to add them to, which is
+    /// already true of the messages themselves.
+    async fn chat_react(
+        &self,
+        connection_id: u16,
+        room: u16,
+        message: u32,
+        emoji: char,
+        add: bool,
+        user: &ConnectedUser,
+    ) {
+        let is_member = self
+            .chat_members
+            .read()
+            .await
+            .get(&room)
+            .is_some_and(|set| set.contains(&connection_id));
+        if !is_member || validate_emoji(emoji).is_err() {
+            return;
+        }
+        self.broadcast_to_room(
+            room,
+            &ClientMessagesEncrypted::ChatActivity(ChatEvent::Reaction {
+                room,
+                message,
+                emoji,
+                user: connection_id,
+                display_name: user.display_name.clone(),
+                added: add,
             }),
             None,
         )
@@ -3788,6 +3877,12 @@ impl State {
                     [id],
                 )?;
                 conn.execute(
+                    "DELETE FROM FORUM_POST_REACTION WHERE post IN \
+                     (SELECT p.id FROM FORUM_POST p JOIN FORUM_THREAD th ON th.id = p.thread \
+                      WHERE th.topic = ?1);",
+                    [id],
+                )?;
+                conn.execute(
                     "DELETE FROM FORUM_POST WHERE thread IN \
                      (SELECT id FROM FORUM_THREAD WHERE topic = ?1);",
                     [id],
@@ -4003,7 +4098,8 @@ impl State {
     }
 
     /// All posts within a thread, in creation order.
-    async fn forum_posts(&self, thread: u32) -> Vec<ForumPost> {
+    async fn forum_posts(&self, thread: u32, viewer: [u8; 32]) -> Vec<ForumPost> {
+        let key = viewer.to_vec();
         self.sqlite
             .conn(move |conn| {
                 let mut stmt = conn.prepare(
@@ -4011,11 +4107,179 @@ impl State {
                             public_key, signature, created_at \
                      FROM FORUM_POST WHERE thread = ?1 ORDER BY id;",
                 )?;
-                stmt.query_map([thread], row_to_forum_post)?
-                    .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()
+                let mut posts = stmt
+                    .query_map([thread], row_to_forum_post)?
+                    .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()?;
+
+                // One query for the thread's reactions rather than one per
+                // post, then handed out to the posts they belong to.
+                let mut stmt = conn.prepare(
+                    "SELECT r.post, r.emoji, r.reactor_name, r.reactor = ?2 \
+                     FROM FORUM_POST_REACTION r JOIN FORUM_POST p ON p.id = r.post \
+                     WHERE p.thread = ?1 ORDER BY r.post, r.reacted_at, r.rowid;",
+                )?;
+                let rows = stmt
+                    .query_map(params![thread, key], |row| {
+                        Ok((
+                            row.get::<_, u32>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, bool>(3)?,
+                        ))
+                    })?
+                    .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()?;
+
+                let mut by_post: HashMap<u32, Vec<(char, String, bool)>> = HashMap::new();
+                for (post, emoji, who, mine) in rows {
+                    // The column is text; a reaction is one character of it.
+                    // Anything else was not written by this server.
+                    if let Some(emoji) = one_emoji(&emoji) {
+                        by_post.entry(post).or_default().push((emoji, who, mine));
+                    }
+                }
+                for post in &mut posts {
+                    if let Some(rows) = by_post.remove(&post.id) {
+                        post.reactions = tally_reactions(rows);
+                    }
+                }
+                Ok(posts)
             })
             .await
             .unwrap_or_default()
+    }
+
+    /// One post's reactions, as one viewer sees them.
+    async fn post_reactions(&self, post: u32, viewer: [u8; 32]) -> Vec<ReactionTally> {
+        let key = viewer.to_vec();
+        self.sqlite
+            .conn(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT emoji, reactor_name, reactor = ?2 FROM FORUM_POST_REACTION \
+                     WHERE post = ?1 ORDER BY reacted_at, rowid;",
+                )?;
+                let rows = stmt
+                    .query_map(params![post, key], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, bool>(2)?,
+                        ))
+                    })?
+                    .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()?;
+                Ok(tally_reactions(rows.into_iter().filter_map(
+                    |(emoji, who, mine)| Some((one_emoji(&emoji)?, who, mine)),
+                )))
+            })
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Put an emoji on a post, or take it back. Returns the thread the post
+    /// belongs to.
+    ///
+    /// The reactor is named by their identity key, like a voter, so anonymous
+    /// users react once too — but unlike a vote, the name is kept alongside it
+    /// and shown: a reaction is a public gesture.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the emoji is not an emoji, if the post does not
+    /// exist, if the post already carries as many distinct emoji as it may, or
+    /// on a database failure.
+    async fn forum_react(
+        &self,
+        post: u32,
+        emoji: char,
+        add: bool,
+        user: &ConnectedUser,
+    ) -> Result<u32> {
+        validate_emoji(emoji)?;
+        let emoji = emoji.to_string();
+
+        let thread: u32 = self
+            .sqlite
+            .conn(move |conn| {
+                conn.query_row(
+                    "SELECT thread FROM FORUM_POST WHERE id = ?1;",
+                    [post],
+                    |r| r.get(0),
+                )
+            })
+            .await?;
+
+        let reactor = user.public_key.to_vec();
+        let reactor_name = user.display_name.clone();
+        let reactor_user = user.user_id;
+        self.sqlite
+            .conn_mut(move |conn| {
+                let tx = conn.transaction()?;
+                if add {
+                    // The cap counts emoji already on the post, so joining one
+                    // that is already there is never turned away.
+                    let distinct: u32 = tx.query_row(
+                        "SELECT COUNT(DISTINCT emoji) FROM FORUM_POST_REACTION \
+                         WHERE post = ?1 AND emoji <> ?2;",
+                        params![post, emoji],
+                        |r| r.get(0),
+                    )?;
+                    if distinct as usize >= MAX_REACTIONS_PER_ITEM {
+                        tx.rollback()?;
+                        return Ok(false);
+                    }
+                    tx.execute(
+                        "INSERT OR REPLACE INTO FORUM_POST_REACTION(post, emoji, reactor, \
+                                                       reactor_name, reactor_user) \
+                         VALUES(?1, ?2, ?3, ?4, ?5);",
+                        params![post, emoji, reactor, reactor_name, reactor_user],
+                    )?;
+                } else {
+                    tx.execute(
+                        "DELETE FROM FORUM_POST_REACTION \
+                         WHERE post = ?1 AND emoji = ?2 AND reactor = ?3;",
+                        params![post, emoji, reactor],
+                    )?;
+                }
+                tx.commit()?;
+                Ok(true)
+            })
+            .await?
+            .then_some(thread)
+            .ok_or_else(|| {
+                anyhow!("This post already has {MAX_REACTIONS_PER_ITEM} different reactions")
+            })
+    }
+
+    /// Push a post's reactions to everyone with its thread open, rendered once
+    /// per viewer: whether a reaction is the reader's own differs from reader
+    /// to reader, so there is no one message to broadcast.
+    async fn broadcast_post_reactions(&self, thread: u32, post: u32) {
+        let ids = self
+            .forum_viewers
+            .read()
+            .await
+            .get(&thread)
+            .cloned()
+            .unwrap_or_default();
+        let targets: Vec<_> = self
+            .connections
+            .read()
+            .await
+            .iter()
+            .filter(|c| ids.contains(&c.connection_id))
+            .map(|c| (c.conn.clone(), c.user.public_key))
+            .collect();
+        for (writer, key) in targets {
+            let reactions = self.post_reactions(post, key).await;
+            let bytes = ClientMessagesEncrypted::ForumPostReactions {
+                thread,
+                post,
+                reactions,
+            }
+            .to_vec();
+            if let Err(e) = writer.write().await.send(&bytes).await {
+                error!("Failed to send post reactions: {e}");
+            }
+        }
     }
 
     /// Create a new thread with its opening post. Returns the thread summary.
@@ -4160,6 +4424,7 @@ impl State {
                         (SELECT reply_to FROM FORUM_POST WHERE id = ?1) WHERE reply_to = ?1;",
                     [post],
                 )?;
+                conn.execute("DELETE FROM FORUM_POST_REACTION WHERE post = ?1;", [post])?;
                 conn.execute("DELETE FROM FORUM_POST WHERE id = ?1;", [post])?;
                 Ok(thread)
             })
@@ -4182,8 +4447,8 @@ impl State {
             .entry(thread)
             .or_default()
             .insert(connection_id);
-        let posts = self.forum_posts(thread).await;
-        let poll = self.poll_for_viewer(thread, user.public_key).await;
+        let posts = self.forum_posts(thread, user.public_key).await;
+        let poll = self.poll_for_viewer(thread, Voter::of(user)).await;
         self.send_to_connection(
             connection_id,
             &ClientMessagesEncrypted::ForumThreadResponse {
@@ -4271,15 +4536,22 @@ impl State {
     ///
     /// What never rides along, for anyone, is who voted for what: the database
     /// does not record it, so there is nothing here to leave out.
-    async fn poll_for_viewer(&self, thread: u32, viewer: [u8; 32]) -> Option<Poll> {
+    async fn poll_for_viewer(&self, thread: u32, viewer: Voter) -> Option<Poll> {
         let now = Utc::now();
-        let viewer = viewer.to_vec();
         self.sqlite
             .conn(move |conn| {
-                let Some((id, question, multiple_choice, public_results, author_key, closes_at)) =
-                    conn.query_row(
-                        "SELECT id, question, multiple_choice, public_results, author_key, \
-                                closes_at FROM FORUM_POLL WHERE thread = ?1;",
+                let Some((
+                    id,
+                    question,
+                    multiple_choice,
+                    public_results,
+                    author_user,
+                    author_key,
+                    closes_at,
+                )) = conn
+                    .query_row(
+                        "SELECT id, question, multiple_choice, public_results, author_user, \
+                                author_key, closes_at FROM FORUM_POLL WHERE thread = ?1;",
                         [thread],
                         |row| {
                             Ok((
@@ -4287,8 +4559,9 @@ impl State {
                                 row.get::<_, String>(1)?,
                                 row.get::<_, bool>(2)?,
                                 row.get::<_, bool>(3)?,
-                                row.get::<_, Vec<u8>>(4)?,
-                                row.get::<_, DateTime<Utc>>(5)?,
+                                row.get::<_, Option<u32>>(4)?,
+                                row.get::<_, Vec<u8>>(5)?,
+                                row.get::<_, DateTime<Utc>>(6)?,
                             ))
                         },
                     )
@@ -4297,12 +4570,25 @@ impl State {
                     return Ok(None);
                 };
 
-                let results_visible = public_results || now >= closes_at || author_key == viewer;
+                // The author sees the running tally before anybody else does,
+                // and by account where there is one, so their own poll reads
+                // the same from whichever machine they open it on.
+                let is_author = match (&viewer, author_user) {
+                    (Voter::Account(id), Some(author)) => *id == author,
+                    (Voter::Anonymous(key), _) => key.as_slice() == author_key,
+                    (Voter::Account(_), None) => false,
+                };
+                let results_visible = public_results || now >= closes_at || is_author;
 
+                // Each identity is matched only against its own column: an
+                // anonymous viewer passes no account, and must not match the
+                // NULL account of every other anonymous voter.
+                let (viewer_user, viewer_key) = viewer.columns();
                 let has_voted = conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM FORUM_POLL_VOTER \
-                     WHERE poll = ?1 AND voter = ?2);",
-                    params![id, viewer],
+                    "SELECT EXISTS(SELECT 1 FROM FORUM_POLL_VOTER WHERE poll = ?1 \
+                     AND ((?2 IS NOT NULL AND voter_user = ?2) \
+                       OR (?3 IS NOT NULL AND voter_key = ?3)));",
+                    params![id, viewer_user, viewer_key],
                     |row| row.get::<_, bool>(0),
                 )?;
 
@@ -4343,6 +4629,22 @@ impl State {
             .flatten()
     }
 
+    /// The thread a post belongs to, if the post exists.
+    async fn thread_of_post(&self, post: u32) -> Option<u32> {
+        self.sqlite
+            .conn(move |conn| {
+                conn.query_row(
+                    "SELECT thread FROM FORUM_POST WHERE id = ?1;",
+                    [post],
+                    |row| row.get::<_, u32>(0),
+                )
+                .optional()
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
     /// The thread a poll belongs to, if the poll exists.
     async fn thread_of_poll(&self, poll: u32) -> Option<u32> {
         self.sqlite
@@ -4372,7 +4674,7 @@ impl State {
     /// Returns an error if the poll has closed, if the ballot does not match
     /// the poll's terms, if this voter has already voted, or on a database
     /// failure.
-    async fn forum_poll_vote(&self, vote: PollVote, voter: [u8; 32]) -> Result<u32> {
+    async fn forum_poll_vote(&self, vote: PollVote, voter: Voter) -> Result<u32> {
         let poll = vote.poll;
         let mut options = vote.options;
         let picked = options.len();
@@ -4417,16 +4719,19 @@ impl State {
             "This poll takes a single choice"
         );
 
-        let voter = voter.to_vec();
         let cast = self
             .sqlite
             .conn_mut(move |conn| {
                 let tx = conn.transaction()?;
                 // The voter roll is the gate: an identity already on it has
-                // voted, and the tally below is left untouched.
+                // voted, and the tally below is left untouched. Which identity
+                // that is — account or key — the roll's own unique indexes
+                // decide, so this does not have to ask first.
+                let (voter_user, voter_key) = voter.columns();
                 let first_ballot = tx.execute(
-                    "INSERT OR IGNORE INTO FORUM_POLL_VOTER(poll, voter) VALUES(?1, ?2);",
-                    params![poll, voter],
+                    "INSERT OR IGNORE INTO FORUM_POLL_VOTER(poll, voter_user, voter_key) \
+                     VALUES(?1, ?2, ?3);",
+                    params![poll, voter_user, voter_key],
                 )? == 1;
                 if !first_ballot {
                     tx.rollback()?;
@@ -4465,10 +4770,10 @@ impl State {
             .await
             .iter()
             .filter(|c| ids.contains(&c.connection_id))
-            .map(|c| (c.conn.clone(), c.user.public_key))
+            .map(|c| (c.conn.clone(), Voter::of(&c.user)))
             .collect();
-        for (writer, key) in targets {
-            let Some(poll) = self.poll_for_viewer(thread, key).await else {
+        for (writer, voter) in targets {
+            let Some(poll) = self.poll_for_viewer(thread, voter).await else {
                 continue;
             };
             let bytes = ClientMessagesEncrypted::ForumPollUpdate { thread, poll }.to_vec();
@@ -5048,6 +5353,56 @@ fn split_signature(signature: Option<&ForumSignature>) -> (Option<Vec<u8>>, Opti
     }
 }
 
+/// How the voter roll and the early-results check know one person from another:
+/// by their account when they have one, by their identity key when they do not.
+///
+/// An account is the better identity where there is one — it is one person
+/// however many machines they sign in from, whereas a key is one client install
+/// — but an anonymous user has no account, and still gets exactly one vote.
+///
+/// An enum rather than a pair of options, so "an account or a key, never both
+/// and never neither" is what the type says rather than something a constructor
+/// has to remember. The table says the same thing with a `CHECK`.
+#[derive(Clone, Debug)]
+enum Voter {
+    /// An authenticated voter, known by the account they signed in to.
+    Account(u32),
+
+    /// A voter with no account, known by their client's identity key because
+    /// there is nothing else to know them by.
+    Anonymous([u8; 32]),
+}
+
+impl Voter {
+    /// The identity this connection votes under: its account if it
+    /// authenticated, otherwise its identity key.
+    fn of(user: &ConnectedUser) -> Self {
+        match user.user_id {
+            Some(id) => Self::Account(id),
+            None => Self::Anonymous(user.public_key),
+        }
+    }
+
+    /// This identity as the voter roll's two columns, of which exactly one is
+    /// ever filled — the shape the table's `CHECK` constraint insists on.
+    fn columns(&self) -> (Option<u32>, Option<Vec<u8>>) {
+        match self {
+            Self::Account(id) => (Some(*id), None),
+            Self::Anonymous(key) => (None, Some(key.to_vec())),
+        }
+    }
+}
+
+/// The single emoji a `FORUM_POST_REACTION.emoji` cell holds, or `None` if the
+/// cell holds anything else. The column is text so the table reads plainly in a
+/// database browser; a reaction is one character of it, and a row that is not
+/// one was not written by this server.
+fn one_emoji(cell: &str) -> Option<char> {
+    let mut chars = cell.chars();
+    let emoji = chars.next()?;
+    chars.next().is_none().then_some(emoji)
+}
+
 /// Write a poll and its options for a thread being created. Runs inside the
 /// same statement batch as the thread and its opening post, so a thread asked
 /// to carry a poll never turns up without one.
@@ -5111,6 +5466,9 @@ fn row_to_forum_post(
         markdown: row.get(6)?,
         created_at: row.get(9)?,
         signature,
+        // Filled in afterwards: what a reaction looks like depends on who is
+        // reading it, and a row does not know that.
+        reactions: Vec::new(),
     })
 }
 

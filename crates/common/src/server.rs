@@ -5,6 +5,7 @@ use crate::files::FileEntry;
 use crate::forum::{ForumPost, ForumThreadInfo, ForumTopic, NewForumPost, NewForumThread};
 use crate::group::GroupTag;
 use crate::poll::{Poll, PollVote};
+use crate::reaction::ReactionTally;
 
 use std::collections::BTreeMap;
 
@@ -193,12 +194,35 @@ pub enum ChatEvent {
     Message {
         /// Chatroom id
         room: u16,
+        /// Id of the message for the purpose of reactions.
+        id: u32,
         /// Author's display name
         display_name: String,
         /// Message text
         message: String,
         /// When the server received the message (UTC)
         at: DateTime<Utc>,
+    },
+
+    /// A user put an emoji on a message, or took one back.
+    ///
+    /// The server relays these without keeping a tally of its own: chat has no
+    /// history, so each client adds up the reactions to the messages it saw,
+    /// and a client that was not there has nothing to add them to.
+    Reaction {
+        /// Chatroom id
+        room: u16,
+        /// The message reacted to
+        message: u32,
+        /// The emoji
+        emoji: char,
+        /// Connection id of the person reacting, so each client can recognise
+        /// its own reaction and count one person once
+        user: u16,
+        /// That person's display name, for the list of who reacted
+        display_name: String,
+        /// Whether the reaction was added (`true`) or taken back (`false`)
+        added: bool,
     },
 
     /// A user set (or, with empty text, cleared) the room's topic.
@@ -412,6 +436,19 @@ pub enum ServerMessagesEncrypted {
         message: String,
     },
 
+    /// Put an emoji on a chat message, or take it back. The sender must be a
+    /// member of the room.
+    ChatReact {
+        /// Chatroom id
+        room: u16,
+        /// The message to react to
+        message: u32,
+        /// The emoji
+        emoji: char,
+        /// Whether to add the reaction or take it back
+        add: bool,
+    },
+
     /// Set (or, with empty text, clear) a chatroom's topic. The sender must be a
     /// member of the room.
     ChatSetTopic {
@@ -458,6 +495,17 @@ pub enum ServerMessagesEncrypted {
     /// multiple-choice, and only once: a vote cannot be changed, because what
     /// it was is never recorded.
     ForumPollVote(PollVote),
+
+    /// Put an emoji on a forum post, or take it back. Reacting again with the
+    /// same emoji takes it back, so `add` says which way this one goes.
+    ForumReact {
+        /// The post to react to
+        post: u32,
+        /// The emoji
+        emoji: char,
+        /// Whether to add the reaction or take it back
+        add: bool,
+    },
 
     /// List a shared directory. `path` is relative to the share root, using `/`
     /// separators; an empty string is the root.
@@ -697,6 +745,17 @@ pub enum ClientMessagesEncrypted {
         thread: u32,
         /// The poll, as this user may see it
         poll: Poll,
+    },
+
+    /// A post's reactions changed. Sent to each viewer separately, because
+    /// whether a reaction is the reader's own differs from reader to reader.
+    ForumPostReactions {
+        /// Thread the post belongs to
+        thread: u32,
+        /// The post
+        post: u32,
+        /// The post's reactions, as this user may see them
+        reactions: Vec<ReactionTally>,
     },
 
     /// A post was deleted from a thread the user has open.

@@ -7,6 +7,7 @@ use conclave_common::forum::{
 };
 use conclave_common::net::{DefaultEncryptedStream, EncryptedWrite, SigningKey, VerifyingKey};
 use conclave_common::poll::{NewPoll, Poll, PollVote};
+use conclave_common::reaction::{ReactionTally, tally_reactions, validate_emoji};
 use conclave_common::server::{
     ChatEvent, ChatTopic, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser, ServerInformation,
     ServerMessagesEncrypted, UserDetails,
@@ -42,6 +43,22 @@ use tokio::task::JoinHandle;
 /// half-open socket would otherwise hold the connection's write lock forever.
 const SEND_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10);
 
+/// One emoji one person put on a chat message, as this client saw it happen.
+///
+/// Held raw rather than counted so a reaction can be taken back by the person
+/// who made it, and so this client can tell its own from everyone else's.
+#[derive(Clone, Debug)]
+pub struct ChatReaction {
+    /// The emoji.
+    pub emoji: char,
+
+    /// Connection id of the person who reacted.
+    pub user: u16,
+
+    /// That person's display name when they reacted.
+    pub display_name: String,
+}
+
 /// A single rendered line in a chatroom conversation.
 #[derive(Clone, Debug)]
 pub enum ChatLine {
@@ -52,11 +69,35 @@ pub enum ChatLine {
     Message {
         /// Local time the message was received.
         time: DateTime<Local>,
+        /// The server's id for this message, which reactions name. Unique only
+        /// within this run of the server, which is as long as chat lasts.
+        id: u32,
         /// Author's display name.
         display_name: String,
         /// Message text.
         message: String,
+        /// Reactions to this message, in the order they arrived.
+        reactions: Vec<ChatReaction>,
     },
+}
+
+impl ChatLine {
+    /// The message's reactions counted per emoji, with `mine` set for the
+    /// reactions belonging to connection `me`.
+    ///
+    /// Counted here rather than on the server because chat keeps no history:
+    /// what this client saw is all there is to count.
+    #[must_use]
+    pub fn reaction_tallies(&self, me: Option<u16>) -> Vec<ReactionTally> {
+        match self {
+            Self::System(_) => Vec::new(),
+            Self::Message { reactions, .. } => tally_reactions(
+                reactions
+                    .iter()
+                    .map(|r| (r.emoji, r.display_name.clone(), Some(r.user) == me)),
+            ),
+        }
+    }
 }
 
 /// What one entry in a direct-message conversation holds.
@@ -536,6 +577,21 @@ impl ConclaveConnection {
                             list.push(post);
                         }
                     }
+                    ClientMessagesEncrypted::ForumPostReactions {
+                        thread,
+                        post,
+                        reactions,
+                    } => {
+                        let mut map = conn_clone
+                            .forum_posts
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Some(list) = map.get_mut(&thread)
+                            && let Some(entry) = list.iter_mut().find(|p| p.id == post)
+                        {
+                            entry.reactions = reactions;
+                        }
+                    }
                     ClientMessagesEncrypted::ForumPostDeleted { thread, post } => {
                         let mut map = conn_clone
                             .forum_posts
@@ -781,6 +837,29 @@ impl ConclaveConnection {
             .clone()
     }
 
+    /// This client's own identity key, as the other users on the server see it.
+    #[must_use]
+    pub fn my_public_key(&self) -> [u8; 32] {
+        self.signing_key.verifying_key().to_bytes()
+    }
+
+    /// This client's own connection id, found by its identity key in the user
+    /// list. `None` until the list has arrived.
+    ///
+    /// Used to recognise this user's own reactions, which are named by
+    /// connection id rather than by display name — two people may share a
+    /// display name, but not a key.
+    #[must_use]
+    pub fn my_connection_id(&self) -> Option<u16> {
+        let me = self.my_public_key();
+        self.connected_users
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|user| user.public_key == me)
+            .map(|user| user.id)
+    }
+
     /// The most recently received per-user details, if any. Populated in response
     /// to [`Self::request_user_details`].
     #[must_use]
@@ -829,6 +908,7 @@ impl ConclaveConnection {
             }
             ChatEvent::Message {
                 room,
+                id,
                 display_name,
                 message,
                 at,
@@ -839,9 +919,49 @@ impl ConclaveConnection {
                     .lines
                     .push(ChatLine::Message {
                         time: at.with_timezone(&Local),
+                        id,
                         display_name,
                         message,
+                        reactions: Vec::new(),
                     });
+            }
+            ChatEvent::Reaction {
+                room,
+                message,
+                emoji,
+                user,
+                display_name,
+                added,
+            } => {
+                // A reaction to a message this client never saw has nothing to
+                // attach to, which is the ordinary case for anyone who joined
+                // after it was posted.
+                let Some(entry) = rooms.get_mut(&room) else {
+                    return;
+                };
+                let Some(ChatLine::Message { reactions, .. }) = entry
+                    .lines
+                    .iter_mut()
+                    .find(|line| matches!(line, ChatLine::Message { id, .. } if *id == message))
+                else {
+                    return;
+                };
+                let existing = reactions
+                    .iter()
+                    .position(|r| r.user == user && r.emoji == emoji);
+                match (added, existing) {
+                    // Idempotent both ways: the same reaction twice is still
+                    // one, and taking back one that is not there is nothing.
+                    (true, None) => reactions.push(ChatReaction {
+                        emoji,
+                        user,
+                        display_name,
+                    }),
+                    (false, Some(i)) => {
+                        reactions.remove(i);
+                    }
+                    (true, Some(_)) | (false, None) => {}
+                }
             }
             ChatEvent::Topic {
                 room,
@@ -1848,6 +1968,29 @@ impl ConclaveConnection {
             .await
     }
 
+    /// Put an emoji on a chat message, or take it back.
+    ///
+    /// The server relays this to the room without keeping a tally: chat has no
+    /// history, so each client counts the reactions to the messages it saw.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `emoji` is not an emoji. Network errors are
+    /// possible.
+    pub async fn chat_react(&self, room: u16, message: u32, emoji: char, add: bool) -> Result<()> {
+        validate_emoji(emoji)?;
+        self.send_request(
+            &ServerMessagesEncrypted::ChatReact {
+                room,
+                message,
+                emoji,
+                add,
+            }
+            .to_vec(),
+        )
+        .await
+    }
+
     /// Set (or, with empty text, clear) a chatroom's topic.
     ///
     /// # Errors
@@ -2040,6 +2183,21 @@ impl ConclaveConnection {
             .to_vec(),
         )
         .await
+    }
+
+    /// Put an emoji on a forum post, or take it back.
+    ///
+    /// Unlike a vote in a poll, a reaction carries the name of whoever made it:
+    /// it is a public gesture, and the post shows who reacted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `emoji` is not an emoji. Network errors are
+    /// possible.
+    pub async fn react_forum_post(&self, post: u32, emoji: char, add: bool) -> Result<()> {
+        validate_emoji(emoji)?;
+        self.send_request(&ServerMessagesEncrypted::ForumReact { post, emoji, add }.to_vec())
+            .await
     }
 
     /// (Admin) Delete a forum post by id.

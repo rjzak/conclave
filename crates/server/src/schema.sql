@@ -113,6 +113,19 @@ CREATE TABLE FORUM_POST (
     FOREIGN KEY (author_user) REFERENCES USER(id)
 );
 
+-- An emoji somebody put on a post. Who reacted is kept and shown.
+CREATE TABLE FORUM_POST_REACTION (
+    post integer NOT NULL,
+    emoji text NOT NULL, -- exactly one character; text so the table reads plainly
+    reactor blob NOT NULL, -- reactor's ed25519 identity key, which anonymous users have too
+    reactor_name text NOT NULL, -- display name at the time, for the list of who reacted
+    reactor_user integer, -- NULL for anonymous reactors
+    reacted_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    PRIMARY KEY (post, emoji, reactor),
+    FOREIGN KEY (post) REFERENCES FORUM_POST(id) ON DELETE CASCADE,
+    FOREIGN KEY (reactor_user) REFERENCES USER(id)
+);
+
 -- An optional poll attached to a thread
 CREATE TABLE FORUM_POLL (
     id INTEGER PRIMARY KEY,
@@ -120,7 +133,7 @@ CREATE TABLE FORUM_POLL (
     question text NOT NULL,
     multiple_choice boolean DEFAULT FALSE NOT NULL,
     public_results boolean DEFAULT TRUE NOT NULL,
-    author_user integer NOT NULL,
+    author_user integer,
     author_key blob NOT NULL,
     closes_at DATETIME NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
@@ -138,14 +151,23 @@ CREATE TABLE FORUM_POLL_OPTION (
     FOREIGN KEY (poll) REFERENCES FORUM_POLL(id) ON DELETE CASCADE
 );
 
--- Records THAT someone voted, never what they voted for.
+-- Records THAT someone voted, never what they voted for. Use user_id for authenticated
+-- users, or key ID blob for anonymous users.
 CREATE TABLE FORUM_POLL_VOTER (
     poll integer NOT NULL,
-    voter blob NOT NULL, -- voter's ed25519 identity key, which anonymous users have too
+    voter_user integer, -- account id; NULL for an anonymous voter
+    voter_key blob, -- ed25519 identity key; NULL for an authenticated voter
     voted_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    PRIMARY KEY (poll, voter),
-    FOREIGN KEY (poll) REFERENCES FORUM_POLL(id) ON DELETE CASCADE
+    CHECK ((voter_user IS NULL) <> (voter_key IS NULL)),
+    FOREIGN KEY (poll) REFERENCES FORUM_POLL(id) ON DELETE CASCADE,
+    FOREIGN KEY (voter_user) REFERENCES USER(id)
 );
+
+-- One vote each, enforced here.
+CREATE UNIQUE INDEX poll_one_vote_per_account ON FORUM_POLL_VOTER (poll, voter_user)
+    WHERE voter_user IS NOT NULL;
+CREATE UNIQUE INDEX poll_one_vote_per_key ON FORUM_POLL_VOTER (poll, voter_key)
+    WHERE voter_key IS NOT NULL;
 
 INSERT INTO USER VALUES(0, 'admin', NULL, CURRENT_TIMESTAMP, false);
 -- The admin group is red (16711680 = 0xFF0000); red is reserved for admins.

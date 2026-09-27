@@ -928,3 +928,652 @@ async fn a_poll_tallies_votes_without_recording_voters() {
 
     server_process.abort();
 }
+
+/// Reactions on both sides of the server: a forum post keeps its emoji, a chat
+/// message's are relayed to the room and counted by whoever was there. Both
+/// name the people who reacted, and reacting again takes the reaction back.
+#[allow(clippy::too_many_lines)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reactions_tally_emoji_and_name_who_left_them() {
+    const PORT: u16 = 8096;
+
+    let tempdir = TempDir::new("conclave_reactions").unwrap();
+    let server_db = tempdir
+        .path()
+        .join(format!("reactions_{}.db", Uuid::new_v4()));
+
+    let (server, password) = conclave_server::State::new(
+        "Reaction Server".into(),
+        "Description".into(),
+        LOCALHOST,
+        Some("localhost".into()),
+        PORT,
+        false,
+        server_db,
+    )
+    .unwrap();
+    let server = Arc::new(server);
+
+    server.set_chat_enabled(true).await.unwrap();
+    server.set_forums_enabled(true).await.unwrap();
+    server
+        .create_forum_topic("Announcements".into(), String::new(), vec![])
+        .await
+        .unwrap();
+
+    let server_clone = server.clone();
+    let server_process = tokio::spawn(async move { server_clone.serve().await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let connect = async |name: &str, auth: Option<conclave_common::server::UserAuthentication>| {
+        conclave_client::Client::new(
+            tempdir
+                .path()
+                .join(format!("{name}_{}.toml", Uuid::new_v4())),
+        )
+        .unwrap()
+        .connect(
+            LOCALHOST.to_string().as_str(),
+            PORT,
+            true,
+            name.to_string(),
+            auth,
+            None,
+            None,
+            String::new(),
+            std::collections::BTreeMap::new(),
+        )
+        .await
+        .unwrap()
+    };
+
+    let ada = connect(
+        "admin",
+        Some(("admin".to_string(), password.to_string()).into()),
+    )
+    .await;
+    let grace = connect("Grace", None).await;
+
+    // ── A forum post keeps its reactions ──────────────────────────────
+    let topic = eventually("the topic list", || {
+        ada.forum_topics().first().map(|t| t.id)
+    })
+    .await;
+    ada.new_forum_thread(
+        topic,
+        "Ship it".into(),
+        "Release is out.".into(),
+        false,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let thread = eventually("the new thread", || {
+        ada.forum_threads(topic).first().map(|t| t.id)
+    })
+    .await;
+    grace.request_forum_threads(topic).await.unwrap();
+    ada.open_forum_thread(thread).await.unwrap();
+    grace.open_forum_thread(thread).await.unwrap();
+
+    let post = eventually("the opening post", || {
+        ada.forum_posts(thread)
+            .and_then(|p| p.first().map(|p| p.id))
+    })
+    .await;
+    let reactions = |conn: &conclave_client::conn::ConclaveConnection| {
+        conn.forum_posts(thread)
+            .and_then(|posts| posts.into_iter().find(|p| p.id == post))
+            .map(|p| p.reactions)
+            .unwrap_or_default()
+    };
+
+    grace.react_forum_post(post, '★', true).await.unwrap();
+    let seen = eventually("Grace's reaction", || {
+        let seen = reactions(&ada);
+        (!seen.is_empty()).then_some(seen)
+    })
+    .await;
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].emoji, '★');
+    assert_eq!(seen[0].who, vec!["Grace".to_string()]);
+    // Grace's reaction is Grace's, and it is not Ada's.
+    assert!(!seen[0].mine);
+    assert!(
+        eventually("Grace's own view", || {
+            reactions(&grace).into_iter().next()
+        })
+        .await
+        .mine
+    );
+
+    // A second person joining the same emoji is a second name on it.
+    ada.react_forum_post(post, '★', true).await.unwrap();
+    let both = eventually("both reactions", || {
+        reactions(&ada).into_iter().find(|r| r.count() == 2)
+    })
+    .await;
+    assert!(both.mine);
+    assert_eq!(both.who_line(), "★ Grace and you");
+
+    // Taking one back leaves the other standing.
+    grace.react_forum_post(post, '★', false).await.unwrap();
+    let left = eventually("Grace's reaction withdrawn", || {
+        reactions(&ada).into_iter().find(|r| r.count() == 1)
+    })
+    .await;
+    // All that is left is Ada's own, so there is nobody else to name.
+    assert!(left.mine);
+    assert!(left.who.is_empty());
+    assert_eq!(left.who_line(), "★ you");
+
+    // The picker's palette is a shortcut, not the limit: an emoji that is not
+    // on it is still a reaction, on the wire and in the database.
+    assert!(
+        !conclave_common::reaction::REACTION_PALETTE
+            .iter()
+            .any(|(emoji, _)| *emoji == '👍'),
+        "picked for this test because the palette does not offer it"
+    );
+    grace.react_forum_post(post, '👍', true).await.unwrap();
+    let off_palette = eventually("an emoji from outside the palette", || {
+        reactions(&ada).into_iter().find(|r| r.emoji == '👍')
+    })
+    .await;
+    assert_eq!(off_palette.who, vec!["Grace".to_string()]);
+    grace.react_forum_post(post, '👍', false).await.unwrap();
+    eventually("it coming back off", || {
+        reactions(&ada)
+            .into_iter()
+            .all(|r| r.emoji != '👍')
+            .then_some(())
+    })
+    .await;
+
+    // A letter is not a reaction, and the server is not asked to take a
+    // client's word for it: the client refuses before sending, and nothing
+    // lands if it does.
+    assert!(grace.react_forum_post(post, 'x', true).await.is_err());
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(reactions(&ada).len(), 1);
+
+    // ── A chat message's reactions are relayed to the room ────────────
+    ada.chat_join(0).await.unwrap();
+    grace.chat_join(0).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    ada.chat_send(0, "Deploying now".to_string()).await.unwrap();
+    let message = eventually("the chat message", || {
+        grace
+            .chat_room(0)?
+            .lines
+            .iter()
+            .find_map(|line| match line {
+                conclave_client::conn::ChatLine::Message { id, message, .. }
+                    if message == "Deploying now" =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+    })
+    .await;
+
+    grace.chat_react(0, message, '♡', true).await.unwrap();
+
+    // Both ends count it, and each recognises whose it is.
+    let tallies = async |conn: &conclave_client::conn::ConclaveConnection| {
+        let me = conn.my_connection_id();
+        conn.chat_room(0)
+            .map(|room| {
+                room.lines
+                    .iter()
+                    .flat_map(|line| line.reaction_tallies(me))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    let on_adas_screen = eventually("the reaction reaching Ada", || {
+        let room = ada.chat_room(0)?;
+        let me = ada.my_connection_id();
+        room.lines
+            .iter()
+            .flat_map(|line| line.reaction_tallies(me))
+            .next()
+    })
+    .await;
+    assert_eq!(on_adas_screen.emoji, '♡');
+    assert_eq!(on_adas_screen.who, vec!["Grace".to_string()]);
+    assert!(!on_adas_screen.mine);
+    assert!(tallies(&grace).await[0].mine);
+
+    // The same reaction twice is still one reaction.
+    grace.chat_react(0, message, '♡', true).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(tallies(&ada).await.len(), 1);
+    assert_eq!(tallies(&ada).await[0].count(), 1);
+
+    // And taking it back leaves nothing behind.
+    grace.chat_react(0, message, '♡', false).await.unwrap();
+    eventually("the reaction being taken back", || {
+        let me = ada.my_connection_id();
+        ada.chat_room(0)?
+            .lines
+            .iter()
+            .all(|line| line.reaction_tallies(me).is_empty())
+            .then_some(())
+    })
+    .await;
+
+    server_process.abort();
+}
+
+/// Display names are not unique, so a reaction cannot be keyed by one. Two
+/// people both calling themselves "Ada" each own their own reaction: neither can
+/// take back the other's, on a post or on a chat message.
+#[allow(clippy::too_many_lines)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_shared_display_name_does_not_share_reactions() {
+    const PORT: u16 = 8097;
+
+    let tempdir = TempDir::new("conclave_samename").unwrap();
+    let server_db = tempdir
+        .path()
+        .join(format!("samename_{}.db", Uuid::new_v4()));
+
+    let (server, password) = conclave_server::State::new(
+        "Same Name Server".into(),
+        "Description".into(),
+        LOCALHOST,
+        Some("localhost".into()),
+        PORT,
+        false,
+        server_db,
+    )
+    .unwrap();
+    let server = Arc::new(server);
+
+    server.set_chat_enabled(true).await.unwrap();
+    server.set_forums_enabled(true).await.unwrap();
+    server
+        .create_forum_topic("Announcements".into(), String::new(), vec![])
+        .await
+        .unwrap();
+
+    let server_clone = server.clone();
+    let server_process = tokio::spawn(async move { server_clone.serve().await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Two separate clients, so two separate identity keys, both introducing
+    // themselves as "Ada". The server takes display names as given.
+    let connect = async |file: &str, auth: Option<conclave_common::server::UserAuthentication>| {
+        conclave_client::Client::new(
+            tempdir
+                .path()
+                .join(format!("{file}_{}.toml", Uuid::new_v4())),
+        )
+        .unwrap()
+        .connect(
+            LOCALHOST.to_string().as_str(),
+            PORT,
+            true,
+            "Ada".to_string(),
+            auth,
+            None,
+            None,
+            String::new(),
+            std::collections::BTreeMap::new(),
+        )
+        .await
+        .unwrap()
+    };
+
+    let first = connect(
+        "first",
+        Some(("admin".to_string(), password.to_string()).into()),
+    )
+    .await;
+    let second = connect("second", None).await;
+    assert_ne!(
+        first.my_public_key(),
+        second.my_public_key(),
+        "two clients, two identities"
+    );
+
+    // ── On a forum post ───────────────────────────────────────────────
+    let topic = eventually("the topic list", || {
+        first.forum_topics().first().map(|t| t.id)
+    })
+    .await;
+    first
+        .new_forum_thread(
+            topic,
+            "Release".into(),
+            "It is out.".into(),
+            false,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+    let thread = eventually("the new thread", || {
+        first.forum_threads(topic).first().map(|t| t.id)
+    })
+    .await;
+    first.open_forum_thread(thread).await.unwrap();
+    second.open_forum_thread(thread).await.unwrap();
+    let post = eventually("the opening post", || {
+        first
+            .forum_posts(thread)
+            .and_then(|p| p.first().map(|p| p.id))
+    })
+    .await;
+    let star = |conn: &conclave_client::conn::ConclaveConnection| {
+        conn.forum_posts(thread)
+            .and_then(|posts| posts.into_iter().find(|p| p.id == post))
+            .and_then(|p| p.reactions.into_iter().find(|r| r.emoji == '★'))
+    };
+
+    first.react_forum_post(post, '★', true).await.unwrap();
+    eventually("the first Ada's reaction", || star(&first)).await;
+
+    // The second Ada asks for it to come off. It is not hers to take back.
+    second.react_forum_post(post, '★', false).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let mine = star(&first).expect("the first Ada's reaction still stands");
+    assert_eq!(mine.count(), 1);
+    assert!(mine.mine);
+    // And from the other Ada's side it is still somebody else's.
+    let theirs = star(&second).expect("still there for the second Ada too");
+    assert!(!theirs.mine);
+    assert_eq!(theirs.who, vec!["Ada".to_string()]);
+
+    // Both reacting is two reactions from two people with one name.
+    second.react_forum_post(post, '★', true).await.unwrap();
+    let both = eventually("both Adas", || star(&first).filter(|r| r.count() == 2)).await;
+    assert_eq!(both.who, vec!["Ada".to_string()]);
+    assert!(both.mine);
+
+    // The second Ada takes back her own, and only her own.
+    second.react_forum_post(post, '★', false).await.unwrap();
+    let left = eventually("one Ada left", || star(&first).filter(|r| r.count() == 1)).await;
+    assert!(left.mine, "the reaction left standing is the first Ada's");
+
+    // ── On a chat message ─────────────────────────────────────────────
+    first.chat_join(0).await.unwrap();
+    second.chat_join(0).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    first.chat_send(0, "Deploying".to_string()).await.unwrap();
+    let message = eventually("the chat message", || {
+        second
+            .chat_room(0)?
+            .lines
+            .iter()
+            .find_map(|line| match line {
+                conclave_client::conn::ChatLine::Message { id, message, .. }
+                    if message == "Deploying" =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+    })
+    .await;
+    let chat_star = |conn: &conclave_client::conn::ConclaveConnection| {
+        let me = conn.my_connection_id();
+        conn.chat_room(0)?
+            .lines
+            .iter()
+            .flat_map(|line| line.reaction_tallies(me))
+            .find(|r| r.emoji == '★')
+    };
+
+    first.chat_react(0, message, '★', true).await.unwrap();
+    eventually("the reaction arriving", || chat_star(&second)).await;
+
+    // Same again: the other Ada cannot take back a reaction she did not make,
+    // because a reaction is the connection's, not the name's.
+    second.chat_react(0, message, '★', false).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let still = chat_star(&first).expect("the first Ada's chat reaction still stands");
+    assert_eq!(still.count(), 1);
+    assert!(still.mine);
+    assert!(!chat_star(&second).unwrap().mine);
+
+    server_process.abort();
+}
+
+/// A ballot belongs to a person, not to a name and not to a client install.
+/// Renaming yourself is the same voter; so is the same account on a second
+/// machine. Two genuinely separate anonymous identities are two voters, because
+/// without accounts that is all the server can tell apart.
+#[allow(clippy::too_many_lines)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_poll_counts_the_person_not_the_client() {
+    use conclave_common::poll::{NewPoll, PollDuration};
+
+    const PORT: u16 = 8098;
+
+    let tempdir = TempDir::new("conclave_revote").unwrap();
+    let server_db = tempdir.path().join(format!("revote_{}.db", Uuid::new_v4()));
+
+    let (server, password) = conclave_server::State::new(
+        "Revote Server".into(),
+        "Description".into(),
+        LOCALHOST,
+        Some("localhost".into()),
+        PORT,
+        false,
+        server_db,
+    )
+    .unwrap();
+    let server = Arc::new(server);
+
+    server.set_forums_enabled(true).await.unwrap();
+    server
+        .create_forum_topic("Lunch".into(), String::new(), vec![])
+        .await
+        .unwrap();
+
+    let server_clone = server.clone();
+    let server_process = tokio::spawn(async move { server_clone.serve().await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // One config file is one identity: reconnecting through it keeps the key
+    // whatever name is given, which is how a client keeps its identity at all.
+    let voter_config = tempdir
+        .path()
+        .join(format!("voter_{}.toml", Uuid::new_v4()));
+    let connect =
+        async |config: std::path::PathBuf,
+               name: &str,
+               auth: Option<conclave_common::server::UserAuthentication>| {
+            conclave_client::Client::new(config)
+                .unwrap()
+                .connect(
+                    LOCALHOST.to_string().as_str(),
+                    PORT,
+                    true,
+                    name.to_string(),
+                    auth,
+                    None,
+                    None,
+                    String::new(),
+                    std::collections::BTreeMap::new(),
+                )
+                .await
+                .unwrap()
+        };
+
+    let author = connect(
+        tempdir
+            .path()
+            .join(format!("author_{}.toml", Uuid::new_v4())),
+        "admin",
+        Some(("admin".to_string(), password.to_string()).into()),
+    )
+    .await;
+
+    let topic = eventually("the topic list", || {
+        author.forum_topics().first().map(|t| t.id)
+    })
+    .await;
+    author
+        .new_forum_thread(
+            topic,
+            "Friday".into(),
+            "Pick one.".into(),
+            false,
+            false,
+            Some(NewPoll {
+                question: "Where?".into(),
+                options: vec!["Tacos".into(), "Pizza".into()],
+                multiple_choices: false,
+                duration: PollDuration::days(1).unwrap(),
+                public_results: true,
+            }),
+        )
+        .await
+        .unwrap();
+    let thread = eventually("the new thread", || {
+        author.forum_threads(topic).first().map(|t| t.id)
+    })
+    .await;
+    author.open_forum_thread(thread).await.unwrap();
+
+    // Vote once as "Ada".
+    let ada = connect(voter_config.clone(), "Ada", None).await;
+    ada.open_forum_thread(thread).await.unwrap();
+    let poll = eventually("the poll", || ada.forum_poll(thread)).await;
+    let tacos = poll.options.iter().find(|o| o.text == "Tacos").unwrap().id;
+    let pizza = poll.options.iter().find(|o| o.text == "Pizza").unwrap().id;
+    ada.vote_forum_poll(poll.id, vec![tacos]).await.unwrap();
+    eventually("the first vote", || {
+        author
+            .forum_poll(thread)
+            .filter(|p| p.total_voters == Some(1))
+    })
+    .await;
+
+    // Come back as "Grace" through the same config — same key, same voter.
+    let grace = connect(voter_config.clone(), "Grace", None).await;
+    assert_eq!(
+        ada.my_public_key(),
+        grace.my_public_key(),
+        "one config file, one identity, whatever name it gives"
+    );
+    grace.open_forum_thread(thread).await.unwrap();
+    let seen = eventually("the poll as Grace", || grace.forum_poll(thread)).await;
+    // The poll already knows this voter, under the new name as under the old.
+    assert!(seen.voted);
+
+    grace.vote_forum_poll(poll.id, vec![pizza]).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let after = author.forum_poll(thread).unwrap();
+    assert_eq!(after.total_voters, Some(1), "still one voter, renamed");
+    assert_eq!(
+        after.options.iter().find(|o| o.id == pizza).unwrap().votes,
+        Some(0),
+        "the second ballot was not counted"
+    );
+    assert_eq!(
+        after.options.iter().find(|o| o.id == tacos).unwrap().votes,
+        Some(1),
+        "and the first was not moved"
+    );
+
+    // A different anonymous identity is a different voter, even sharing a
+    // display name: without an account, a key is all the server has to go on.
+    let other = connect(
+        tempdir
+            .path()
+            .join(format!("other_{}.toml", Uuid::new_v4())),
+        "Ada",
+        None,
+    )
+    .await;
+    other.open_forum_thread(thread).await.unwrap();
+    let fresh = eventually("the poll for a new identity", || {
+        other.forum_poll(thread).filter(|p| !p.voted)
+    })
+    .await;
+    other.vote_forum_poll(fresh.id, vec![pizza]).await.unwrap();
+    let two = eventually("the second voter", || {
+        author
+            .forum_poll(thread)
+            .filter(|p| p.total_voters == Some(2))
+    })
+    .await;
+    assert_eq!(
+        two.options.iter().find(|o| o.id == pizza).unwrap().votes,
+        Some(1)
+    );
+
+    // An account, though, is one voter however many machines it votes from: a
+    // second client signed in to the same account is a second key and the same
+    // person, and the roll knows it by the account.
+    let second_device = connect(
+        tempdir
+            .path()
+            .join(format!("device_{}.toml", Uuid::new_v4())),
+        "admin elsewhere",
+        Some(("admin".to_string(), password.to_string()).into()),
+    )
+    .await;
+    assert_ne!(
+        author.my_public_key(),
+        second_device.my_public_key(),
+        "two installs, two keys"
+    );
+
+    // The author votes from the machine they created the poll on.
+    author.vote_forum_poll(poll.id, vec![tacos]).await.unwrap();
+    let three = eventually("the account's vote", || {
+        author
+            .forum_poll(thread)
+            .filter(|p| p.total_voters == Some(3))
+    })
+    .await;
+    assert_eq!(
+        three.options.iter().find(|o| o.id == tacos).unwrap().votes,
+        Some(2)
+    );
+
+    // The same account from the other machine is already on the roll.
+    second_device.open_forum_thread(thread).await.unwrap();
+    let elsewhere = eventually("the poll on the other machine", || {
+        second_device.forum_poll(thread)
+    })
+    .await;
+    assert!(
+        elsewhere.voted,
+        "the account has voted, whichever machine asks"
+    );
+    // And it can still see the tally early, because the author is the account.
+    assert!(elsewhere.results_visible());
+
+    second_device
+        .vote_forum_poll(poll.id, vec![pizza])
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let unchanged = author.forum_poll(thread).unwrap();
+    assert_eq!(
+        unchanged.total_voters,
+        Some(3),
+        "one account, one vote, two devices"
+    );
+    assert_eq!(
+        unchanged
+            .options
+            .iter()
+            .find(|o| o.id == tacos)
+            .unwrap()
+            .votes,
+        Some(2)
+    );
+
+    server_process.abort();
+}

@@ -51,7 +51,7 @@ The tracker and server may be graphical desktop applications (`--features=gui`) 
 * **Ephemeral** direct messages, end-to-end encrypted
 * Sending files to another user directly, end-to-end encrypted, subject to their acceptance
 * File sharing
-* Message boards; any permanent message should be under a message board topic. Allows for polls.
+* Message boards; any permanent message should be under a message board topic. Allows for polls, reactions.
 
 ## AI Disclosure
 
