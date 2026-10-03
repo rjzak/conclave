@@ -104,7 +104,7 @@ jobs:
 
   macos:
     #if: startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 45
     steps:
       - name: Harden Runner
