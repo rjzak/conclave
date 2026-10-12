@@ -5494,6 +5494,12 @@ fn hash_password(password: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    // Introduced in Rust 1.99, this Clippy lint as a ridiculous check insisting that checks for
+    // emptiness now have to compare a container with an empty version. However, then Rust/Clippy
+    // goes back and forth whether type hints are required. So let's just not deal with this nonsense!
+    // https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assert_is_empty
+    #![allow(clippy::assert_is_empty)]
+
     use conclave_common::net::random_keypair;
     use conclave_common::tracker::TrackerProtocol::AdvertiseServer;
     use conclave_common::tracker::{Advertise, TrackerProtocol};
