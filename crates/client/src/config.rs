@@ -60,12 +60,15 @@ pub struct ClientConfig {
     pub verifying_key: VerifyingKey,
 
     /// List of trackers to use
+    #[serde(default)]
     pub trackers: Vec<TrackerWithKey>,
 
     /// List of servers for easy access
+    #[serde(default)]
     pub bookmarks: Vec<BookmarkEntry>,
 
     /// Cached keys for servers previously connected to
+    #[serde(default)]
     pub known_hosts: Vec<KnownHost>,
 
     /// The user's avatar, stored as a 512×512 PNG. A 32×32 thumbnail is shared

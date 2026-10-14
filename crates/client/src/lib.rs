@@ -20,7 +20,7 @@ pub mod config;
 /// Server connection management and protocol handling.
 pub mod conn;
 
-use crate::config::{BookmarkEntry, ClientConfig};
+use crate::config::{BookmarkEntry, ClientConfig, KnownHost};
 use crate::conn::ConclaveConnection;
 use conclave_common::net::{DefaultEncryptedStream, EncryptedStream};
 use conclave_common::server::{
@@ -244,7 +244,10 @@ impl Client {
             if servers.verify(&tracker.key) {
                 servers_set.extend(servers.servers);
             } else {
-                warn!("Received server list from tracker but the signature was invalid.");
+                let size = servers.servers.len();
+                warn!(
+                    "Received list of {size} servers from tracker but the signature was invalid! Ignoring."
+                );
             }
         }
 
@@ -481,6 +484,36 @@ impl Client {
         self.config.read().await.save(&self.config_file)
     }
 
+    /// Remove a server from the list of cached servers by host and port. The list of known hosts is
+    /// used to validate that server's identity keys haven't changed in a manner similar to SSH.
+    ///
+    /// # Errors
+    ///
+    /// I/O errors may occur when writing to the config file.
+    pub async fn remove_known_server_by_host(&self, host: &str, port: u16) -> Result<()> {
+        self.config
+            .write()
+            .await
+            .known_hosts
+            .retain(|b| b.host != host || b.port != port);
+        self.config.read().await.save(&self.config_file)
+    }
+
+    /// Remove a server from the list of cached servers by key. The list of known hosts is used to
+    /// validate that server's identity keys haven't changed in a manner similar to SSH.
+    ///
+    /// # Errors
+    ///
+    /// I/O errors may occur when writing to the config file.
+    pub async fn remove_known_server_by_key(&self, key: &VerifyingKey) -> Result<()> {
+        self.config
+            .write()
+            .await
+            .known_hosts
+            .retain(|b| b.key != *key);
+        self.config.read().await.save(&self.config_file)
+    }
+
     /// Read the user's configured default display name without blocking.
     #[must_use]
     pub fn default_display_name(&self) -> String {
@@ -584,20 +617,38 @@ impl Client {
         };
 
         let mut stream = TcpStream::connect(format!("{server}:{port}")).await?;
-
-        info!(
-            "Connecting to the server on port {port} with key {}",
-            hex::encode(key.as_bytes())
-        );
         unencrypted::ClientToServer::GoCrypto
             .send(&mut stream)
             .await?;
 
+        if let Some(known_host) = self
+            .config
+            .read()
+            .await
+            .known_hosts
+            .iter()
+            .find(|k| k.host == server && k.port == port)
+        {
+            ensure!(
+                known_host.key == key,
+                "Danger! The key for {server}:{port} has changed!"
+            );
+        } else {
+            self.config.write().await.known_hosts.push(KnownHost {
+                host: server.to_string(),
+                port,
+                key,
+            });
+            if let Err(e) = self.config.read().await.save(&self.config_file) {
+                error!(
+                    "Failed to update config file for new known server key for {server}:{port}: {e:?}"
+                );
+            }
+        }
+
         let config = self.config.read().await;
         let signing_key = config.signing_key.clone();
-        // Derive a small 32×32 thumbnail to share with the server. Prefer the
-        // per-connection avatar (e.g. from a bookmark), falling back to the
-        // client's default; a decode failure just means no avatar is sent.
+        // Derive a small 32×32 thumbnail to share with the server, prefer per-connection avatar
         let avatar_thumb = avatar
             .or_else(|| config.avatar.clone())
             .as_deref()
@@ -609,8 +660,7 @@ impl Client {
                 }
             });
 
-        // Share the per-server profile and links when set, otherwise fall back
-        // to the client's global defaults.
+        // Share the per-server profile and links if set
         let profile = if profile.is_empty() {
             config.profile.clone()
         } else {
@@ -622,10 +672,8 @@ impl Client {
             urls
         };
 
-        info!("Creating encrypted stream to server");
         let mut encrypted_stream =
             EncryptedStream::connect(stream, &key, Some(&signing_key)).await?;
-        info!("Client: EncryptedStream created");
 
         // Share our timezone as whole hours relative to GMT so peers can compute the
         // difference; keep a copy so the GUI shows offsets relative to us.
@@ -646,11 +694,8 @@ impl Client {
         .to_vec();
         encrypted_stream.send(&login).await?;
 
-        info!("Expecting information request");
         let server_info = encrypted_stream.recv().await?;
-        let server_info = ClientMessagesEncrypted::from_bytes(&server_info)?;
-
-        match server_info {
+        match ClientMessagesEncrypted::from_bytes(&server_info)? {
             ClientMessagesEncrypted::ServerInformationResponse(server_info) => {
                 if server_info.version > *VERSION {
                     warn!(
