@@ -2348,21 +2348,28 @@ impl State {
                 }
             };
 
+            let message = match ServerMessagesEncrypted::from_bytes(&message) {
+                Ok(message) => message,
+                Err(e) => {
+                    error!("Error decoding message from {addr:?}: {e}");
+                    break;
+                }
+            };
+
             // Treat anything but the keep-alive heartbeat as user activity, so an
             // idle user's name un-greys as soon as they do something.
-            match ServerMessagesEncrypted::from_bytes(&message) {
-                Ok(ServerMessagesEncrypted::KeepAlive) | Err(_) => {}
-                Ok(_) => self.mark_active(&last_active).await,
+            if !matches!(message, ServerMessagesEncrypted::KeepAlive) {
+                self.mark_active(&last_active).await;
             }
 
-            match ServerMessagesEncrypted::from_bytes(&message) {
-                Ok(ServerMessagesEncrypted::KeepAlive) => {
+            match message {
+                ServerMessagesEncrypted::KeepAlive => {
                     if let Err(e) = write.write().await.send(&keep_alive_bytes).await {
                         error!("Failed to send keep alive to {addr:?}: {e}");
                     }
                 }
 
-                Ok(ServerMessagesEncrypted::ServerInformationRequest) => {
+                ServerMessagesEncrypted::ServerInformationRequest => {
                     let info = ClientMessagesEncrypted::ServerInformationResponse(
                         self.server_information().await,
                     )
@@ -2372,7 +2379,7 @@ impl State {
                     }
                 }
 
-                Ok(ServerMessagesEncrypted::ListConnectedUsersRequest) => {
+                ServerMessagesEncrypted::ListConnectedUsersRequest => {
                     let response = ClientMessagesEncrypted::ListConnectedUsersResponse(
                         self.connected_users().await,
                     )
@@ -2382,7 +2389,7 @@ impl State {
                     }
                 }
 
-                Ok(ServerMessagesEncrypted::UserDetailsRequest(id)) => {
+                ServerMessagesEncrypted::UserDetailsRequest(id) => {
                     // Privileged fields (username, IP) are only filled in for an
                     // administrator connection.
                     let details = self.user_details(id, user.admin).await;
@@ -2392,7 +2399,7 @@ impl State {
                     }
                 }
 
-                Ok(ServerMessagesEncrypted::ChatRoomsRequest) => {
+                ServerMessagesEncrypted::ChatRoomsRequest => {
                     let rooms = self.chatrooms_for_user(user.user_id, user.admin).await;
                     let response = ClientMessagesEncrypted::ChatRoomsResponse(rooms).to_vec();
                     if let Err(e) = write.write().await.send(&response).await {
@@ -2400,33 +2407,33 @@ impl State {
                     }
                 }
 
-                Ok(ServerMessagesEncrypted::ChatJoin(room)) => {
+                ServerMessagesEncrypted::ChatJoin(room) => {
                     self.chat_join(user.id, room, &user).await;
                 }
 
-                Ok(ServerMessagesEncrypted::ChatLeave(room)) => {
+                ServerMessagesEncrypted::ChatLeave(room) => {
                     self.chat_leave(user.id, room, &user.display_name).await;
                 }
 
-                Ok(ServerMessagesEncrypted::ChatSend { room, message }) => {
+                ServerMessagesEncrypted::ChatSend { room, message } => {
                     self.chat_send(user.id, room, message, &user).await;
                 }
 
-                Ok(ServerMessagesEncrypted::ChatReact {
+                ServerMessagesEncrypted::ChatReact {
                     room,
                     message,
                     emoji,
                     add,
-                }) => {
+                } => {
                     self.chat_react(user.id, room, message, emoji, add, &user)
                         .await;
                 }
 
-                Ok(ServerMessagesEncrypted::ChatSetTopic { room, topic }) => {
+                ServerMessagesEncrypted::ChatSetTopic { room, topic } => {
                     self.chat_set_topic(user.id, room, topic, &user).await;
                 }
 
-                Ok(ServerMessagesEncrypted::ForumTopicsRequest) => {
+                ServerMessagesEncrypted::ForumTopicsRequest => {
                     let topics = self.forum_topics_for_user(user.user_id, user.admin).await;
                     reply(
                         &write,
@@ -2436,7 +2443,7 @@ impl State {
                     .await;
                 }
 
-                Ok(ServerMessagesEncrypted::ForumThreadsRequest { topic }) => {
+                ServerMessagesEncrypted::ForumThreadsRequest { topic } => {
                     if self.can_access_topic(topic, user.user_id, user.admin).await {
                         let threads = self.forum_threads(topic).await;
                         reply(
@@ -2448,15 +2455,15 @@ impl State {
                     }
                 }
 
-                Ok(ServerMessagesEncrypted::ForumThreadOpen { thread }) => {
+                ServerMessagesEncrypted::ForumThreadOpen { thread } => {
                     self.forum_open(user.id, thread, &user).await;
                 }
 
-                Ok(ServerMessagesEncrypted::ForumThreadClose { thread }) => {
+                ServerMessagesEncrypted::ForumThreadClose { thread } => {
                     self.forum_close(user.id, thread).await;
                 }
 
-                Ok(ServerMessagesEncrypted::ForumNewThread(new)) => {
+                ServerMessagesEncrypted::ForumNewThread(new) => {
                     let topic = new.topic;
                     if self.can_access_topic(topic, user.user_id, user.admin).await {
                         match self.create_forum_thread(new, &user).await {
@@ -2475,7 +2482,7 @@ impl State {
                     }
                 }
 
-                Ok(ServerMessagesEncrypted::ForumNewPost(new)) => {
+                ServerMessagesEncrypted::ForumNewPost(new) => {
                     let thread = new.thread;
                     if self
                         .can_access_thread(thread, user.user_id, user.admin)
@@ -2503,7 +2510,7 @@ impl State {
                     }
                 }
 
-                Ok(ServerMessagesEncrypted::ForumPollVote(vote)) => {
+                ServerMessagesEncrypted::ForumPollVote(vote) => {
                     // The thread has to be reachable before the poll is, so a
                     // gated topic gates its polls without a rule of its own.
                     let thread = self.thread_of_poll(vote.poll).await;
@@ -2531,7 +2538,7 @@ impl State {
                     }
                 }
 
-                Ok(ServerMessagesEncrypted::ForumReact { post, emoji, add }) => {
+                ServerMessagesEncrypted::ForumReact { post, emoji, add } => {
                     // The post's thread has to be reachable before its
                     // reactions are, so a gated topic gates these too.
                     let thread = self.thread_of_post(post).await;
@@ -2559,7 +2566,7 @@ impl State {
                     }
                 }
 
-                Ok(ServerMessagesEncrypted::ForumDeletePost { post }) => {
+                ServerMessagesEncrypted::ForumDeletePost { post } => {
                     if user.admin {
                         match self.delete_forum_post(post).await {
                             Ok(thread) => {
@@ -2590,16 +2597,16 @@ impl State {
                     }
                 }
 
-                Ok(ServerMessagesEncrypted::FileListRequest { path }) => {
+                ServerMessagesEncrypted::FileListRequest { path } => {
                     let response = self.file_list(&path, &user).await;
                     reply(&write, &addr, &response).await;
                 }
 
-                Ok(ServerMessagesEncrypted::FileDownloadRequest { path }) => {
+                ServerMessagesEncrypted::FileDownloadRequest { path } => {
                     self.file_download(&path, &user, &write, &addr).await;
                 }
 
-                Ok(ServerMessagesEncrypted::FileUploadRequest { path, size }) => {
+                ServerMessagesEncrypted::FileUploadRequest { path, size } => {
                     // Discard any half-finished prior upload.
                     if let Some(previous) = upload.take() {
                         let _ = std::fs::remove_file(&previous.temp_path);
@@ -2613,7 +2620,7 @@ impl State {
                     }
                 }
 
-                Ok(ServerMessagesEncrypted::FileUploadChunk { data }) => {
+                ServerMessagesEncrypted::FileUploadChunk { data } => {
                     if let Some(active) = upload.as_mut() {
                         active.written += data.len() as u64;
                         let too_big = active.max.is_some_and(|max| active.written > max);
@@ -2633,7 +2640,7 @@ impl State {
                     }
                 }
 
-                Ok(ServerMessagesEncrypted::FileUploadEnd) => {
+                ServerMessagesEncrypted::FileUploadEnd => {
                     if let Some(finished) = upload.take() {
                         let response = match finalize_upload(finished) {
                             Ok(()) => ClientMessagesEncrypted::FileUploadComplete,
@@ -2643,19 +2650,19 @@ impl State {
                     }
                 }
 
-                Ok(ServerMessagesEncrypted::FileDeleteRequest { path }) => {
+                ServerMessagesEncrypted::FileDeleteRequest { path } => {
                     if let Some(err) = self.file_delete(&path, &user).await {
                         reply(&write, &addr, &err).await;
                     }
                 }
 
-                Ok(ServerMessagesEncrypted::FileMkdirRequest { path }) => {
+                ServerMessagesEncrypted::FileMkdirRequest { path } => {
                     if let Some(err) = self.file_mkdir(&path, &user).await {
                         reply(&write, &addr, &err).await;
                     }
                 }
 
-                Ok(ServerMessagesEncrypted::DirectMessage { to, payload }) => {
+                ServerMessagesEncrypted::DirectMessage { to, payload } => {
                     // Relay the encrypted message to the recipient
                     let delivery = ClientMessagesEncrypted::DirectMessageReceived {
                         from: user.id,
@@ -2665,49 +2672,49 @@ impl State {
                     self.send_to_connection(to, &delivery).await;
                 }
 
-                Ok(ServerMessagesEncrypted::DirectFileOffer {
+                ServerMessagesEncrypted::DirectFileOffer {
                     to,
                     transfer,
                     size,
                     name,
-                }) => {
+                } => {
                     if let Some(refusal) = self.dm_file_offer(&user, to, transfer, size, name).await
                     {
                         reply(&write, &addr, &refusal).await;
                     }
                 }
 
-                Ok(ServerMessagesEncrypted::DirectFileAnswer {
+                ServerMessagesEncrypted::DirectFileAnswer {
                     to,
                     transfer,
                     accept,
-                }) => {
+                } => {
                     self.dm_file_answer(user.id, to, transfer, accept).await;
                 }
 
-                Ok(ServerMessagesEncrypted::DirectFileChunk { to, transfer, data }) => {
+                ServerMessagesEncrypted::DirectFileChunk { to, transfer, data } => {
                     if let Some(refusal) = self.dm_file_chunk(user.id, to, transfer, data).await {
                         reply(&write, &addr, &refusal).await;
                     }
                 }
 
-                Ok(ServerMessagesEncrypted::DirectFileEnd { to, transfer }) => {
+                ServerMessagesEncrypted::DirectFileEnd { to, transfer } => {
                     self.dm_file_end(user.id, to, transfer).await;
                 }
 
-                Ok(ServerMessagesEncrypted::DirectFileCancel {
+                ServerMessagesEncrypted::DirectFileCancel {
                     to,
                     transfer,
                     outgoing,
-                }) => {
+                } => {
                     self.dm_file_cancel(user.id, to, transfer, outgoing).await;
                 }
 
-                Ok(ServerMessagesEncrypted::Disconnect) => break,
+                ServerMessagesEncrypted::Disconnect => break,
 
                 // Administrative requests: allowed only on an authenticated admin
                 // connection. A single gate covers every admin message.
-                Ok(ServerMessagesEncrypted::AdministrativeRequest(admin_request)) => {
+                ServerMessagesEncrypted::AdministrativeRequest(admin_request) => {
                     if user.admin {
                         self.handle_admin(admin_request, &write, &addr).await;
                     } else {
@@ -2721,12 +2728,8 @@ impl State {
                     }
                 }
 
-                Ok(x) => {
+                x => {
                     error!("Unexpected message from {addr:?}: {x:?}");
-                    break;
-                }
-                Err(e) => {
-                    error!("Error decoding message from {addr:?}: {e}");
                     break;
                 }
             }
