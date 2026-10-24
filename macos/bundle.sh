@@ -101,10 +101,10 @@ version=$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version *= *"\([^"]*\)".*/\
 	exit 1
 }
 
-[ -f "$HOME/.cargo/bin/cargo-auditable" ] || {
+if ! command -v cargo-auditable; then
 	echo "bundle.sh: cargo-auditable is missing, please install with \"cargo install cargo-auditable\"" >&2
 	exit 1
-}
+fi
 
 # Only the server and tracker gate their GUI behind a feature; the client is
 # always graphical.
