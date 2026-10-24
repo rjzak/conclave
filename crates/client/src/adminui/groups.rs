@@ -13,11 +13,11 @@ use eframe::egui;
 pub fn ui(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str) {
     let groups = conn.admin_groups();
 
-    let name_id = egui::Id::new(format!("admin_gn:{key}"));
-    let desc_id = egui::Id::new(format!("admin_gd:{key}"));
-    let colored_id = egui::Id::new(format!("admin_gcol:{key}"));
-    let color_id = egui::Id::new(format!("admin_gc:{key}"));
-    let edit_id = egui::Id::new(format!("admin_ge:{key}"));
+    let name_id = egui::Id::unique(format!("admin_gn:{key}"));
+    let desc_id = egui::Id::unique(format!("admin_gd:{key}"));
+    let colored_id = egui::Id::unique(format!("admin_gcol:{key}"));
+    let color_id = egui::Id::unique(format!("admin_gc:{key}"));
+    let edit_id = egui::Id::unique(format!("admin_ge:{key}"));
     let mut name: String = ui.data(|d| d.get_temp(name_id).unwrap_or_default());
     let mut desc: String = ui.data(|d| d.get_temp(desc_id).unwrap_or_default());
     let mut colored: bool = ui.data(|d| d.get_temp(colored_id).unwrap_or(false));

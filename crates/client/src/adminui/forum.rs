@@ -15,10 +15,10 @@ pub fn ui(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str) {
     let topics = conn.admin_forum_topics();
     let groups = conn.admin_groups();
 
-    let name_id = egui::Id::new(format!("admin_fn:{key}"));
-    let desc_id = egui::Id::new(format!("admin_fd:{key}"));
-    let groups_id = egui::Id::new(format!("admin_fg:{key}"));
-    let edit_id = egui::Id::new(format!("admin_fe:{key}"));
+    let name_id = egui::Id::unique(format!("admin_fn:{key}"));
+    let desc_id = egui::Id::unique(format!("admin_fd:{key}"));
+    let groups_id = egui::Id::unique(format!("admin_fg:{key}"));
+    let edit_id = egui::Id::unique(format!("admin_fe:{key}"));
     let mut topic_name: String = ui.data(|d| d.get_temp(name_id).unwrap_or_default());
     let mut topic_desc: String = ui.data(|d| d.get_temp(desc_id).unwrap_or_default());
     let mut topic_groups: HashSet<u32> = ui.data(|d| d.get_temp(groups_id).unwrap_or_default());

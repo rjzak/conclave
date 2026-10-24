@@ -11,8 +11,8 @@ use eframe::egui;
 pub fn ui(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str) {
     let trackers = conn.admin_trackers();
 
-    let host_id = egui::Id::new(format!("admin_th:{key}"));
-    let port_id = egui::Id::new(format!("admin_tp:{key}"));
+    let host_id = egui::Id::unique(format!("admin_th:{key}"));
+    let port_id = egui::Id::unique(format!("admin_tp:{key}"));
     let mut host: String = ui.data(|d| d.get_temp(host_id).unwrap_or_default());
     let mut port: String = ui.data(|d| {
         d.get_temp(port_id)

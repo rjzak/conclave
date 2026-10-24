@@ -293,9 +293,9 @@ fn acl_row(
 /// Collapsible upload panel. Reads a local file and uploads it to a destination
 /// folder on the server (which enforces the Write permission).
 fn file_upload_panel(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str, path: &str) {
-    let local_id = egui::Id::new(format!("file_upload_local:{key}"));
-    let dest_id = egui::Id::new(format!("file_upload_dest:{key}"));
-    let dest_seed_id = egui::Id::new(format!("file_upload_dest_seed:{key}"));
+    let local_id = egui::Id::unique(format!("file_upload_local:{key}"));
+    let dest_id = egui::Id::unique(format!("file_upload_dest:{key}"));
+    let dest_seed_id = egui::Id::unique(format!("file_upload_dest_seed:{key}"));
 
     // Default the destination to the folder currently open; reseed on navigation.
     let seeded: String = ui.data(|d| d.get_temp(dest_seed_id).unwrap_or_default());
@@ -369,8 +369,8 @@ fn file_upload_panel(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str, pa
 fn file_acl_editor(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str, path: &str) {
     use conclave_common::files::DirAcl;
 
-    let edit_id = egui::Id::new(format!("file_acl_edit:{key}"));
-    let seeded_id = egui::Id::new(format!("file_acl_seeded:{key}"));
+    let edit_id = egui::Id::unique(format!("file_acl_edit:{key}"));
+    let seeded_id = egui::Id::unique(format!("file_acl_seeded:{key}"));
 
     ui.collapsing("Permissions (admin)", |ui| {
         if ui.button("Load / refresh").clicked() {
@@ -584,7 +584,7 @@ fn avatar_texture(ctx: &egui::Context, png: &[u8]) -> Option<egui::TextureHandle
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     png.hash(&mut hasher);
     let hash = hasher.finish();
-    let id = egui::Id::new(("avatar_tex", hash));
+    let id = egui::Id::unique(("avatar_tex", hash));
 
     if let Some(texture) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
         return Some(texture);
@@ -609,7 +609,7 @@ fn banner_texture(ctx: &egui::Context, png: &[u8]) -> Option<egui::TextureHandle
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     png.hash(&mut hasher);
     let hash = hasher.finish();
-    let id = egui::Id::new(("banner_tex", hash));
+    let id = egui::Id::unique(("banner_tex", hash));
 
     if let Some(texture) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
         return Some(texture);
@@ -1000,7 +1000,7 @@ fn reaction_row_sized(
         // The palette is a shortcut, not the limit: anything the protocol
         // accepts can be typed or pasted here (on a Mac, ⌃⌘Space).
         ui.separator();
-        let typed_id = egui::Id::new("reaction_entry");
+        let typed_id = egui::Id::unique("reaction_entry");
         let mut typed: String = ui.data(|d| d.get_temp(typed_id).unwrap_or_default());
         let candidate = first_emoji(&typed);
         ui.horizontal(|ui| {
@@ -1292,7 +1292,7 @@ fn render_forum_posts(
                             egui::Color32::from_rgb(0xd0, 0x45, 0x37),
                         )
                     };
-                    let sig_id = egui::Id::new(("forum_sig", key, post.id));
+                    let sig_id = egui::Id::unique(("forum_sig", key, post.id));
                     let mut shown = ui.data(|d| d.get_temp::<bool>(sig_id)).unwrap_or(false);
                     if ui
                         .selectable_label(shown, egui::RichText::new(glyph).color(color).small())
@@ -1306,7 +1306,7 @@ fn render_forum_posts(
 
             // Expanded signature details.
             if let Some(signature) = &post.signature {
-                let sig_id = egui::Id::new(("forum_sig", key, post.id));
+                let sig_id = egui::Id::unique(("forum_sig", key, post.id));
                 if ui.data(|d| d.get_temp::<bool>(sig_id)).unwrap_or(false) {
                     ui.label(
                         egui::RichText::new(format!(
@@ -2164,8 +2164,8 @@ impl ConclaveGUI {
 
                     // Profile text and links live in egui temp data, seeded from
                     // the saved config the first time the window is drawn.
-                    let profile_id = egui::Id::new("settings_profile_text");
-                    let urls_id = egui::Id::new("settings_url_pairs");
+                    let profile_id = egui::Id::unique("settings_profile_text");
+                    let urls_id = egui::Id::unique("settings_url_pairs");
                     let mut profile_text: String = ctx
                         .data(|d| d.get_temp::<String>(profile_id))
                         .unwrap_or_else(|| client_arc.profile());
@@ -2495,8 +2495,8 @@ impl ConclaveGUI {
                     let is_pending = op_pending_arc.load(Ordering::SeqCst);
                     let trackers = client_arc.list_trackers();
 
-                    let form_host_id = egui::Id::new("tracker_form_host");
-                    let form_port_id = egui::Id::new("tracker_form_port");
+                    let form_host_id = egui::Id::unique("tracker_form_host");
+                    let form_port_id = egui::Id::unique("tracker_form_port");
                     let mut form_host =
                         ctx.data(|d| d.get_temp::<String>(form_host_id).unwrap_or_default());
                     let mut form_port = ctx.data(|d| {
@@ -2741,17 +2741,17 @@ impl ConclaveGUI {
                     let bookmarks = client_arc.bookmarks();
 
                     // Form fields live in egui temp data, keyed once here.
-                    let name_id = egui::Id::new("bm_form_name");
-                    let host_id = egui::Id::new("bm_form_host");
-                    let port_id = egui::Id::new("bm_form_port");
-                    let display_id = egui::Id::new("bm_form_display");
-                    let user_id = egui::Id::new("bm_form_user");
-                    let pass_id = egui::Id::new("bm_form_pass");
-                    let share_id = egui::Id::new("bm_form_share");
-                    let avatar_id = egui::Id::new("bm_form_avatar");
-                    let profile_field_id = egui::Id::new("bm_form_profile");
-                    let urls_field_id = egui::Id::new("bm_form_urls");
-                    let edit_id = egui::Id::new("bm_form_edit_index");
+                    let name_id = egui::Id::unique("bm_form_name");
+                    let host_id = egui::Id::unique("bm_form_host");
+                    let port_id = egui::Id::unique("bm_form_port");
+                    let display_id = egui::Id::unique("bm_form_display");
+                    let user_id = egui::Id::unique("bm_form_user");
+                    let pass_id = egui::Id::unique("bm_form_pass");
+                    let share_id = egui::Id::unique("bm_form_share");
+                    let avatar_id = egui::Id::unique("bm_form_avatar");
+                    let profile_field_id = egui::Id::unique("bm_form_profile");
+                    let urls_field_id = egui::Id::unique("bm_form_urls");
+                    let edit_id = egui::Id::unique("bm_form_edit_index");
 
                     let mut f_name =
                         ctx.data(|d| d.get_temp::<String>(name_id).unwrap_or_default());
@@ -2854,7 +2854,7 @@ impl ConclaveGUI {
                                         }
 
                                         // The server key is hidden until asked for.
-                                        let show_key_id = egui::Id::new(("bm_show_key", i));
+                                        let show_key_id = egui::Id::unique(("bm_show_key", i));
                                         let mut show_key = ui
                                             .data(|d| d.get_temp::<bool>(show_key_id))
                                             .unwrap_or(false);
@@ -3373,10 +3373,10 @@ impl ConclaveGUI {
                         ctx.request_repaint();
                     }
 
-                    let login_name_id = egui::Id::new("login_display_name");
-                    let login_user_id = egui::Id::new("login_username");
-                    let login_pass_id = egui::Id::new("login_password");
-                    let login_share_id = egui::Id::new("login_share_time");
+                    let login_name_id = egui::Id::unique("login_display_name");
+                    let login_user_id = egui::Id::unique("login_username");
+                    let login_pass_id = egui::Id::unique("login_password");
+                    let login_share_id = egui::Id::unique("login_share_time");
 
                     let mut display_name: String = ctx.data(|d| {
                         d.get_temp(login_name_id)
@@ -3789,7 +3789,7 @@ impl ConclaveGUI {
                     let own_name = conn.display_name();
 
                     // Which user's detail panel is expanded (by connection id).
-                    let selected_id = egui::Id::new(format!("user_details_sel:{key_owned}"));
+                    let selected_id = egui::Id::unique(format!("user_details_sel:{key_owned}"));
                     let selected: Option<u16> = ctx
                         .data(|d| d.get_temp::<Option<u16>>(selected_id))
                         .flatten();
@@ -4008,7 +4008,7 @@ impl ConclaveGUI {
                     // Join the room when the window opens and leave when it
                     // closes (the close-drain spawns chat_leave). The joined flag
                     // is reset on close so reopening rejoins.
-                    let joined_id = egui::Id::new(format!("chat_joined:{key_owned}:{room}"));
+                    let joined_id = egui::Id::unique(format!("chat_joined:{key_owned}:{room}"));
                     if windows.handle_close(ctx, &(key_owned.clone(), room)) {
                         ctx.data_mut(|d| d.insert_temp(joined_id, false));
                     } else if !ctx.data(|d| d.get_temp::<bool>(joined_id).unwrap_or(false)) {
@@ -4036,17 +4036,17 @@ impl ConclaveGUI {
                         .filter_map(|u| u.avatar.map(|a| (u.display_name, a)))
                         .collect();
 
-                    let input_id = egui::Id::new(format!("chat_input:{key_owned}:{room}"));
+                    let input_id = egui::Id::unique(format!("chat_input:{key_owned}:{room}"));
                     let mut input: String = ctx.data(|d| d.get_temp(input_id).unwrap_or_default());
                     let mut send = false;
 
                     let topic_input_id =
-                        egui::Id::new(format!("chat_topic_input:{key_owned}:{room}"));
+                        egui::Id::unique(format!("chat_topic_input:{key_owned}:{room}"));
                     let mut topic_input: String =
                         ctx.data(|d| d.get_temp(topic_input_id).unwrap_or_default());
                     // Whether the inline topic editor is open for this room.
                     let editing_topic_id =
-                        egui::Id::new(format!("chat_topic_editing:{key_owned}:{room}"));
+                        egui::Id::unique(format!("chat_topic_editing:{key_owned}:{room}"));
                     let mut editing_topic: bool =
                         ctx.data(|d| d.get_temp(editing_topic_id).unwrap_or(false));
                     // `None` = no change this frame; `Some(text)` sets the topic
@@ -4335,7 +4335,7 @@ impl ConclaveGUI {
                     windows.handle_close(ctx, &(key_owned.clone(), peer));
 
                     let thread = conn.dm_thread(peer);
-                    let input_id = egui::Id::new(format!("dm_input:{key_owned}:{peer}"));
+                    let input_id = egui::Id::unique(format!("dm_input:{key_owned}:{peer}"));
                     let mut input: String = ctx.data(|d| d.get_temp(input_id).unwrap_or_default());
                     let mut send = false;
                     let mut offer: Option<std::path::PathBuf> = None;
@@ -4533,9 +4533,9 @@ impl ConclaveGUI {
                     note_active_server(&active_server, ctx, &key_owned);
                     windows.handle_close(ctx, &key_owned);
 
-                    let path_id = egui::Id::new(format!("file_path:{key_owned}"));
-                    let req_id = egui::Id::new(format!("file_req:{key_owned}"));
-                    let status_id = egui::Id::new(format!("file_status:{key_owned}"));
+                    let path_id = egui::Id::unique(format!("file_path:{key_owned}"));
+                    let req_id = egui::Id::unique(format!("file_req:{key_owned}"));
+                    let status_id = egui::Id::unique(format!("file_status:{key_owned}"));
                     let mut path: String = ctx.data(|d| d.get_temp(path_id).unwrap_or_default());
 
                     // Fetch the listing whenever the path changes.
@@ -4590,7 +4590,7 @@ impl ConclaveGUI {
                         // Create a new directory in the current folder (server-
                         // enforced by the Write permission).
                         ui.horizontal(|ui| {
-                            let newdir_id = egui::Id::new(format!("newdir:{key_owned}"));
+                            let newdir_id = egui::Id::unique(format!("newdir:{key_owned}"));
                             let mut newdir: String =
                                 ui.data(|d| d.get_temp(newdir_id).unwrap_or_default());
                             ui.add(
@@ -4755,20 +4755,20 @@ impl ConclaveGUI {
                     note_active_server(&active_server, ctx, &key_owned);
                     windows.handle_close(ctx, &key_owned);
 
-                    let topic_id = egui::Id::new(format!("forum_topic:{key_owned}"));
-                    let thread_id = egui::Id::new(format!("forum_thread:{key_owned}"));
-                    let opened_id = egui::Id::new(format!("forum_opened:{key_owned}"));
-                    let treq_id = egui::Id::new(format!("forum_treq:{key_owned}"));
-                    let nt_subject_id = egui::Id::new(format!("forum_nt_subject:{key_owned}"));
-                    let nt_body_id = egui::Id::new(format!("forum_nt_body:{key_owned}"));
-                    let nt_md_id = egui::Id::new(format!("forum_nt_md:{key_owned}"));
-                    let nt_sign_id = egui::Id::new(format!("forum_nt_sign:{key_owned}"));
-                    let nt_poll_id = egui::Id::new(format!("forum_nt_poll:{key_owned}"));
-                    let pick_id = egui::Id::new(format!("forum_poll_pick:{key_owned}"));
-                    let reply_to_id = egui::Id::new(format!("forum_reply_to:{key_owned}"));
-                    let reply_body_id = egui::Id::new(format!("forum_reply_body:{key_owned}"));
-                    let reply_md_id = egui::Id::new(format!("forum_reply_md:{key_owned}"));
-                    let reply_sign_id = egui::Id::new(format!("forum_reply_sign:{key_owned}"));
+                    let topic_id = egui::Id::unique(format!("forum_topic:{key_owned}"));
+                    let thread_id = egui::Id::unique(format!("forum_thread:{key_owned}"));
+                    let opened_id = egui::Id::unique(format!("forum_opened:{key_owned}"));
+                    let treq_id = egui::Id::unique(format!("forum_treq:{key_owned}"));
+                    let nt_subject_id = egui::Id::unique(format!("forum_nt_subject:{key_owned}"));
+                    let nt_body_id = egui::Id::unique(format!("forum_nt_body:{key_owned}"));
+                    let nt_md_id = egui::Id::unique(format!("forum_nt_md:{key_owned}"));
+                    let nt_sign_id = egui::Id::unique(format!("forum_nt_sign:{key_owned}"));
+                    let nt_poll_id = egui::Id::unique(format!("forum_nt_poll:{key_owned}"));
+                    let pick_id = egui::Id::unique(format!("forum_poll_pick:{key_owned}"));
+                    let reply_to_id = egui::Id::unique(format!("forum_reply_to:{key_owned}"));
+                    let reply_body_id = egui::Id::unique(format!("forum_reply_body:{key_owned}"));
+                    let reply_md_id = egui::Id::unique(format!("forum_reply_md:{key_owned}"));
+                    let reply_sign_id = egui::Id::unique(format!("forum_reply_sign:{key_owned}"));
 
                     let mut sel_topic: Option<u32> = ctx.data(|d| d.get_temp(topic_id)).flatten();
                     let mut sel_thread: Option<u32> = ctx.data(|d| d.get_temp(thread_id)).flatten();
@@ -5194,8 +5194,8 @@ impl ConclaveGUI {
             move |ctx, _class| {
                 closer.handle(ctx);
 
-                let host_id = egui::Id::new("direct_connect_host");
-                let port_id = egui::Id::new("direct_connect_port");
+                let host_id = egui::Id::unique("direct_connect_host");
+                let port_id = egui::Id::unique("direct_connect_port");
                 let mut host: String = ctx.data(|d| d.get_temp(host_id).unwrap_or_default());
                 let mut port_str: String = ctx.data(|d| {
                     d.get_temp(port_id)

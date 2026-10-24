@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Open/closed bookkeeping for deferred viewports.
 //!
 //! A deferred viewport's closure runs outside `ConclaveGUI::ui` and cannot

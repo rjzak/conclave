@@ -16,8 +16,8 @@ pub fn ui(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str) {
     });
     ui.separator();
 
-    let name_id = egui::Id::new(format!("admin_name:{key}"));
-    let desc_id = egui::Id::new(format!("admin_desc:{key}"));
+    let name_id = egui::Id::unique(format!("admin_name:{key}"));
+    let desc_id = egui::Id::unique(format!("admin_desc:{key}"));
     let mut server_name: String =
         ui.data(|d| d.get_temp(name_id).unwrap_or_else(|| info.name.clone()));
     let mut server_desc: String = ui.data(|d| {
@@ -116,7 +116,7 @@ fn banner_editor(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str) {
         .small(),
     );
 
-    let error_id = egui::Id::new(format!("admin_banner_err:{key}"));
+    let error_id = egui::Id::unique(format!("admin_banner_err:{key}"));
     let mut error: Option<String> = ui
         .data(|d| d.get_temp::<Option<String>>(error_id))
         .flatten();
@@ -182,7 +182,7 @@ fn banner_texture(ui: &egui::Ui, png: &[u8]) -> Option<egui::TextureHandle> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     png.hash(&mut hasher);
     let hash = hasher.finish();
-    let id = egui::Id::new(("admin_banner_tex", hash));
+    let id = egui::Id::unique(("admin_banner_tex", hash));
 
     if let Some(texture) = ui.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
         return Some(texture);
@@ -206,11 +206,11 @@ fn limits_editor(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str) {
     ui.separator();
     ui.label(egui::RichText::new("Limits").strong());
 
-    let cap_upload_id = egui::Id::new(format!("admin_cap_upload:{key}"));
-    let upload_val_id = egui::Id::new(format!("admin_upload_val:{key}"));
-    let cap_conns_id = egui::Id::new(format!("admin_cap_conns:{key}"));
-    let conns_val_id = egui::Id::new(format!("admin_conns_val:{key}"));
-    let seeded_id = egui::Id::new(format!("admin_limits_seeded:{key}"));
+    let cap_upload_id = egui::Id::unique(format!("admin_cap_upload:{key}"));
+    let upload_val_id = egui::Id::unique(format!("admin_upload_val:{key}"));
+    let cap_conns_id = egui::Id::unique(format!("admin_cap_conns:{key}"));
+    let conns_val_id = egui::Id::unique(format!("admin_conns_val:{key}"));
+    let seeded_id = egui::Id::unique(format!("admin_limits_seeded:{key}"));
 
     let mut cap_upload: bool = ui.data(|d| d.get_temp(cap_upload_id).unwrap_or(false));
     let mut upload_val: String = ui.data(|d| d.get_temp(upload_val_id).unwrap_or_default());

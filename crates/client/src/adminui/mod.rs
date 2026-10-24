@@ -83,7 +83,7 @@ pub fn admin_ui(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str) {
     // Load the administered lists once per connection. Keyed by the connection's
     // start time so a reconnect (e.g. logging out and back in) reloads rather
     // than reusing the previous session's stale flag.
-    let loaded_id = egui::Id::new(format!(
+    let loaded_id = egui::Id::unique(format!(
         "admin_loaded:{key}:{}",
         conn.connection_time.timestamp_millis()
     ));
@@ -95,7 +95,7 @@ pub fn admin_ui(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str) {
     let info = conn.server_info();
     let admin_error = conn.admin_error();
 
-    let tab_id = egui::Id::new(format!("admin_tab:{key}:{}", conn.local_id));
+    let tab_id = egui::Id::unique(format!("admin_tab:{key}:{}", conn.local_id));
     let mut tab: AdminTab = ui.data(|d| d.get_temp(tab_id).unwrap_or_default());
 
     egui::CentralPanel::default().show(ui, |ui| {

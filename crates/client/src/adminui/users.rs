@@ -15,9 +15,9 @@ pub fn ui(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str) {
     let users = conn.admin_users();
     let groups = conn.admin_groups();
 
-    let new_user_id = egui::Id::new(format!("admin_nu:{key}"));
-    let new_pass_id = egui::Id::new(format!("admin_np:{key}"));
-    let new_groups_id = egui::Id::new(format!("admin_ng:{key}"));
+    let new_user_id = egui::Id::unique(format!("admin_nu:{key}"));
+    let new_pass_id = egui::Id::unique(format!("admin_np:{key}"));
+    let new_groups_id = egui::Id::unique(format!("admin_ng:{key}"));
     let mut new_user: String = ui.data(|d| d.get_temp(new_user_id).unwrap_or_default());
     let mut new_pass: String = ui.data(|d| d.get_temp(new_pass_id).unwrap_or_default());
     let mut new_groups: HashSet<String> =

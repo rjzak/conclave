@@ -15,9 +15,9 @@ pub fn ui(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str) {
     let chatrooms = conn.admin_chatrooms();
     let groups = conn.admin_groups();
 
-    let name_id = egui::Id::new(format!("admin_cn:{key}"));
-    let groups_id = egui::Id::new(format!("admin_cg:{key}"));
-    let edit_id = egui::Id::new(format!("admin_ce:{key}"));
+    let name_id = egui::Id::unique(format!("admin_cn:{key}"));
+    let groups_id = egui::Id::unique(format!("admin_cg:{key}"));
+    let edit_id = egui::Id::unique(format!("admin_ce:{key}"));
     let mut chat_name: String = ui.data(|d| d.get_temp(name_id).unwrap_or_default());
     let mut chat_groups: HashSet<u32> = ui.data(|d| d.get_temp(groups_id).unwrap_or_default());
     let mut chat_edit: Option<u16> = ui.data(|d| d.get_temp::<Option<u16>>(edit_id)).flatten();
