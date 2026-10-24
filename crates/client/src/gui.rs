@@ -25,6 +25,9 @@ use eframe::{Frame, egui};
 use sha2::{Digest, Sha256};
 use tracing::error;
 
+mod windows;
+use windows::Windows;
+
 /// A per-frame snapshot of one active connection: (window key, display
 /// label, still-connected flag, connection handle).
 type ConnSnapshot = (String, String, bool, ConclaveConnection);
@@ -1664,19 +1667,12 @@ struct MenuServer {
 
 /// GUI client state
 #[derive(Debug)]
-#[allow(clippy::struct_excessive_bools)]
 pub struct ConclaveGUI {
     /// Conclave client
     client: Arc<Client>,
 
-    /// Showing the window displaying local Conclave servers
-    show_advertised_servers_list: bool,
-
-    /// Showing the window displaying known Conclave trackers
-    show_tracker_list: bool,
-
-    /// Showing the window displaying servers advertised via trackers
-    show_tracker_servers: bool,
+    /// Open/closed state of every window besides the root one
+    windows: Windows,
 
     /// Discovered local Conclave servers
     discovered_servers: Arc<RwLock<HashSet<DiscoveredServer>>>,
@@ -1687,12 +1683,6 @@ pub struct ConclaveGUI {
     /// Any errors encountered during discovery
     discovery_error: Arc<RwLock<Option<String>>>,
 
-    /// Local server discovery window closed
-    discovery_viewport_closed: Arc<AtomicBool>,
-
-    /// Tracker window closed
-    tracker_viewport_closed: Arc<AtomicBool>,
-
     /// Any errors encountered trying to add a tracker
     tracker_error: Arc<RwLock<Option<String>>>,
 
@@ -1701,9 +1691,6 @@ pub struct ConclaveGUI {
 
     /// Tracker fetched from network, awaiting user confirmation before adding
     pending_tracker_info: Arc<RwLock<Option<TrackerWithKey>>>,
-
-    /// Tracker servers window closed
-    tracker_servers_viewport_closed: Arc<AtomicBool>,
 
     /// Servers discovered via trackers
     tracker_servers: Arc<RwLock<Vec<Advertise>>>,
@@ -1737,30 +1724,6 @@ pub struct ConclaveGUI {
     /// the login form's "Share local time" checkbox.
     default_share_timezone: bool,
 
-    /// Show the direct-connect host/port window
-    show_direct_connect: bool,
-
-    /// Direct-connect window close flag (set when the user closes the window)
-    direct_connect_closed: Arc<AtomicBool>,
-
-    /// Login window close flag (set when the user closes the login window)
-    login_window_closed: Arc<AtomicBool>,
-
-    /// Show the "Connected Servers" window
-    show_servers_window: bool,
-
-    /// Show the About window
-    show_about: bool,
-
-    /// About window close flag, set by its viewport closure
-    about_closed: Arc<AtomicBool>,
-
-    /// Show the Settings window
-    show_settings: bool,
-
-    /// Settings window close flag, set by its viewport closure
-    settings_closed: Arc<AtomicBool>,
-
     /// A settings operation (saving the avatar) is in flight
     settings_pending: Arc<AtomicBool>,
 
@@ -1771,57 +1734,12 @@ pub struct ConclaveGUI {
     /// window and persisted to the config on change.
     settings_avatar: Arc<RwLock<Option<Vec<u8>>>>,
 
-    /// Connected Servers window close flag
-    servers_window_closed: Arc<AtomicBool>,
-
-    /// Server keys (`host:port` hash) whose user-list window is open
-    open_user_windows: Arc<RwLock<HashSet<String>>>,
-
     /// Servers already auto-opened once, so a manual close is not undone
     seen_servers: HashSet<String>,
-
-    /// User-window close requests (server keys) emitted by viewport closures
-    user_window_close_requests: Arc<RwLock<Vec<String>>>,
-
-    /// Server keys whose administration window is open (admin connections only)
-    open_admin_windows: Arc<RwLock<HashSet<String>>>,
-
-    /// Admin-window close requests (server keys) emitted by viewport closures
-    admin_window_close_requests: Arc<RwLock<Vec<String>>>,
-
-    /// Open chatroom windows, keyed by (server key, room id)
-    open_chats: Arc<RwLock<HashSet<(String, u16)>>>,
-
-    /// Chat-window close requests emitted by viewport closures
-    chat_window_close_requests: Arc<RwLock<Vec<(String, u16)>>>,
-
-    /// Open direct-message windows, keyed by (server key, peer connection id)
-    open_dms: Arc<RwLock<HashSet<(String, u16)>>>,
-
-    /// Direct-message-window close requests emitted by viewport closures
-    dm_window_close_requests: Arc<RwLock<Vec<(String, u16)>>>,
-
-    /// Open file-browser windows, keyed by server key
-    open_file_windows: Arc<RwLock<HashSet<String>>>,
-
-    /// File-window close requests emitted by viewport closures
-    file_window_close_requests: Arc<RwLock<Vec<String>>>,
-
-    /// Open forum windows, keyed by server key
-    open_forum_windows: Arc<RwLock<HashSet<String>>>,
-
-    /// Forum-window close requests emitted by viewport closures
-    forum_window_close_requests: Arc<RwLock<Vec<String>>>,
 
     /// Server key of the most recently focused per-server window, whose banner
     /// the root window displays. `None` shows the default placeholder.
     active_server: Arc<RwLock<Option<String>>>,
-
-    /// Show the bookmarks management window
-    show_bookmarks_window: bool,
-
-    /// Bookmarks window close flag
-    bookmarks_viewport_closed: Arc<AtomicBool>,
 
     /// Any error from a bookmark add/edit operation
     bookmarks_error: Arc<RwLock<Option<String>>>,
@@ -1841,18 +1759,13 @@ impl ConclaveGUI {
         let avatar = client.avatar();
         Self {
             client: Arc::new(client),
-            show_advertised_servers_list: false,
-            show_tracker_list: false,
-            show_tracker_servers: false,
+            windows: Windows::default(),
             discovered_servers: Arc::new(RwLock::new(HashSet::new())),
             discovery_running: Arc::new(AtomicBool::new(false)),
             discovery_error: Arc::new(RwLock::new(None)),
-            discovery_viewport_closed: Arc::new(AtomicBool::new(false)),
-            tracker_viewport_closed: Arc::new(AtomicBool::new(false)),
             tracker_error: Arc::new(RwLock::new(None)),
             tracker_op_pending: Arc::new(AtomicBool::new(false)),
             pending_tracker_info: Arc::new(RwLock::new(None)),
-            tracker_servers_viewport_closed: Arc::new(AtomicBool::new(false)),
             tracker_servers: Arc::new(RwLock::new(Vec::new())),
             tracker_servers_watch: None,
             pending_server: Arc::new(RwLock::new(None)),
@@ -1863,34 +1776,11 @@ impl ConclaveGUI {
             active_connections: Arc::new(RwLock::new(Vec::new())),
             default_display_name,
             default_share_timezone,
-            show_direct_connect: false,
-            direct_connect_closed: Arc::new(AtomicBool::new(false)),
-            login_window_closed: Arc::new(AtomicBool::new(false)),
-            show_servers_window: false,
-            show_about: false,
-            about_closed: Arc::new(AtomicBool::new(false)),
-            show_settings: false,
-            settings_closed: Arc::new(AtomicBool::new(false)),
             settings_pending: Arc::new(AtomicBool::new(false)),
             settings_error: Arc::new(RwLock::new(None)),
             settings_avatar: Arc::new(RwLock::new(avatar)),
-            servers_window_closed: Arc::new(AtomicBool::new(false)),
-            open_user_windows: Arc::new(RwLock::new(HashSet::new())),
-            open_admin_windows: Arc::new(RwLock::new(HashSet::new())),
-            admin_window_close_requests: Arc::new(RwLock::new(Vec::new())),
-            open_chats: Arc::new(RwLock::new(HashSet::new())),
-            chat_window_close_requests: Arc::new(RwLock::new(Vec::new())),
-            open_dms: Arc::new(RwLock::new(HashSet::new())),
-            dm_window_close_requests: Arc::new(RwLock::new(Vec::new())),
-            open_file_windows: Arc::new(RwLock::new(HashSet::new())),
-            file_window_close_requests: Arc::new(RwLock::new(Vec::new())),
-            open_forum_windows: Arc::new(RwLock::new(HashSet::new())),
             active_server: Arc::new(RwLock::new(None)),
-            forum_window_close_requests: Arc::new(RwLock::new(Vec::new())),
             seen_servers: HashSet::new(),
-            user_window_close_requests: Arc::new(RwLock::new(Vec::new())),
-            show_bookmarks_window: false,
-            bookmarks_viewport_closed: Arc::new(AtomicBool::new(false)),
             bookmarks_error: Arc::new(RwLock::new(None)),
             bookmarks_op_pending: Arc::new(AtomicBool::new(false)),
             window_fitted: false,
@@ -1967,34 +1857,25 @@ impl ConclaveGUI {
     #[inline]
     fn begin_frame(&mut self, ui: &mut egui::Ui) {
         // ── Handle viewport close events ──────────────────────────────────
-        if self.discovery_viewport_closed.swap(false, Ordering::SeqCst) {
-            self.show_advertised_servers_list = false;
+        let w = &mut self.windows;
+        for window in [
+            &mut w.about,
+            &mut w.settings,
+            &mut w.discovery,
+            &mut w.trackers,
+            &mut w.tracker_servers,
+            &mut w.bookmarks,
+            &mut w.direct_connect,
+            &mut w.servers,
+        ] {
+            window.sync();
         }
-        if self.tracker_viewport_closed.swap(false, Ordering::SeqCst) {
-            self.show_tracker_list = false;
-        }
-        if self
-            .tracker_servers_viewport_closed
-            .swap(false, Ordering::SeqCst)
-        {
-            self.show_tracker_servers = false;
-        }
-        if self.bookmarks_viewport_closed.swap(false, Ordering::SeqCst) {
-            self.show_bookmarks_window = false;
-        }
-        if self.direct_connect_closed.swap(false, Ordering::SeqCst) {
-            self.show_direct_connect = false;
-        }
-        if self.about_closed.swap(false, Ordering::SeqCst) {
-            self.show_about = false;
-        }
-        if self.settings_closed.swap(false, Ordering::SeqCst) {
-            self.show_settings = false;
-        }
+        w.users.drain_closed();
+        w.admin.drain_closed();
 
         // Keep the live tracker-server subscription running exactly while the
         // window is open: start it on open, stop it (drop the handle) on close.
-        if self.show_tracker_servers {
+        if self.windows.tracker_servers.open {
             if self.tracker_servers_watch.is_none() {
                 if let Ok(mut servers) = self.tracker_servers.write() {
                     servers.clear();
@@ -2009,41 +1890,12 @@ impl ConclaveGUI {
         {
             servers.clear();
         }
-        if self.login_window_closed.swap(false, Ordering::SeqCst) {
+        if self.windows.login_closed.take() {
             if let Ok(mut p) = self.pending_server.write() {
                 *p = None;
             }
             if let Ok(mut e) = self.connect_error.write() {
                 *e = None;
-            }
-        }
-        if self.servers_window_closed.swap(false, Ordering::SeqCst) {
-            self.show_servers_window = false;
-        }
-        // Drain close requests from per-server user windows.
-        let close_keys: Vec<String> = self
-            .user_window_close_requests
-            .write()
-            .map(|mut r| r.drain(..).collect())
-            .unwrap_or_default();
-        if !close_keys.is_empty()
-            && let Ok(mut open) = self.open_user_windows.write()
-        {
-            for k in close_keys {
-                open.remove(&k);
-            }
-        }
-        // Drain close requests from per-server admin windows.
-        let admin_close_keys: Vec<String> = self
-            .admin_window_close_requests
-            .write()
-            .map(|mut r| r.drain(..).collect())
-            .unwrap_or_default();
-        if !admin_close_keys.is_empty()
-            && let Ok(mut open) = self.open_admin_windows.write()
-        {
-            for k in admin_close_keys {
-                open.remove(&k);
             }
         }
 
@@ -2106,10 +1958,10 @@ impl ConclaveGUI {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Settings").clicked() {
-                        self.show_settings = true;
+                        self.windows.settings.open = true;
                     }
                     if ui.button("About").clicked() {
-                        self.show_about = true;
+                        self.windows.about.open = true;
                     }
                     ui.separator();
                     if ui.button("Quit").clicked() {
@@ -2118,7 +1970,7 @@ impl ConclaveGUI {
                 });
                 ui.menu_button("Connect", |ui| {
                     if ui.button("Discover Local Servers").clicked() {
-                        self.show_advertised_servers_list = true;
+                        self.windows.discovery.open = true;
                         do_start_discovery(
                             self.discovered_servers.clone(),
                             self.discovery_running.clone(),
@@ -2126,10 +1978,10 @@ impl ConclaveGUI {
                         );
                     }
                     if ui.button("Find via Trackers").clicked() {
-                        self.show_tracker_servers = true;
+                        self.windows.tracker_servers.open = true;
                     }
                     if ui.button("Direct Connect").clicked() {
-                        self.show_direct_connect = true;
+                        self.windows.direct_connect.open = true;
                     }
                     ui.separator();
                     // Bookmarks as a submenu: clicking one connects to it.
@@ -2170,10 +2022,8 @@ impl ConclaveGUI {
                     }
                     for server in &menu_servers {
                         ui.menu_button(&server.label, |ui| {
-                            if ui.button("Users").clicked()
-                                && let Ok(mut open) = self.open_user_windows.write()
-                            {
-                                open.insert(server.key.clone());
+                            if ui.button("Users").clicked() {
+                                self.windows.users.open(server.key.clone());
                             }
                             // Chat: a submenu of the server's rooms when enabled,
                             // greyed out otherwise.
@@ -2193,9 +2043,8 @@ impl ConclaveGUI {
                                             ))
                                             .on_hover_text(audience(&room.restricted_to))
                                             .clicked()
-                                            && let Ok(mut open) = self.open_chats.write()
                                         {
-                                            open.insert((server.key.clone(), room.id));
+                                            self.windows.chats.open((server.key.clone(), room.id));
                                         }
                                     }
                                 });
@@ -2204,25 +2053,17 @@ impl ConclaveGUI {
                             }
                             // Forums: greyed out when disabled on the server.
                             if server.forums_enabled {
-                                if ui.button("Forums").clicked()
-                                    && let Ok(mut open) = self.open_forum_windows.write()
-                                {
-                                    open.insert(server.key.clone());
+                                if ui.button("Forums").clicked() {
+                                    self.windows.forums.open(server.key.clone());
                                 }
                             } else {
                                 ui.add_enabled(false, egui::Button::new("Forums"));
                             }
-                            if server.sharing
-                                && ui.button("Files").clicked()
-                                && let Ok(mut open) = self.open_file_windows.write()
-                            {
-                                open.insert(server.key.clone());
+                            if server.sharing && ui.button("Files").clicked() {
+                                self.windows.files.open(server.key.clone());
                             }
-                            if server.is_admin
-                                && ui.button("Admin").clicked()
-                                && let Ok(mut open) = self.open_admin_windows.write()
-                            {
-                                open.insert(server.key.clone());
+                            if server.is_admin && ui.button("Admin").clicked() {
+                                self.windows.admin.open(server.key.clone());
                             }
                             ui.separator();
                             if ui.button("Disconnect").clicked() {
@@ -2240,9 +2081,7 @@ impl ConclaveGUI {
                                         idx.map(|i| c.remove(i))
                                     });
                                 if let Some(conn) = removed {
-                                    if let Ok(mut o) = self.open_user_windows.write() {
-                                        o.remove(&server.key);
-                                    }
+                                    self.windows.users.remove(&server.key);
                                     tokio::spawn(async move {
                                         let _ = conn.disconnect().await;
                                     });
@@ -2252,14 +2091,12 @@ impl ConclaveGUI {
                     }
                 });
                 ui.menu_button("View", |ui| {
-                    ui.checkbox(
-                        &mut self.show_advertised_servers_list,
-                        "Local Server Discovery",
-                    );
-                    ui.checkbox(&mut self.show_tracker_list, "Trackers");
-                    ui.checkbox(&mut self.show_tracker_servers, "Servers Listing");
-                    ui.checkbox(&mut self.show_servers_window, "Connected Servers");
-                    ui.checkbox(&mut self.show_bookmarks_window, "Bookmarks");
+                    let w = &mut self.windows;
+                    ui.checkbox(&mut w.discovery.open, "Local Server Discovery");
+                    ui.checkbox(&mut w.trackers.open, "Trackers");
+                    ui.checkbox(&mut w.tracker_servers.open, "Servers Listing");
+                    ui.checkbox(&mut w.servers.open, "Connected Servers");
+                    ui.checkbox(&mut w.bookmarks.open, "Bookmarks");
                 });
                 ui.add_space(16.0);
                 egui::widgets::global_theme_preference_buttons(ui);
@@ -2271,8 +2108,8 @@ impl ConclaveGUI {
     #[inline]
     fn about_window(&mut self, ui: &mut egui::Ui) {
         // ── About window ──────────────────────────────────────────────────
-        if self.show_about {
-            let closed = self.about_closed.clone();
+        if self.windows.about.open {
+            let closer = self.windows.about.closer();
             ui.ctx().show_viewport_deferred(
                 egui::ViewportId::from_hash_of("about_window"),
                 egui::ViewportBuilder::default()
@@ -2280,11 +2117,7 @@ impl ConclaveGUI {
                     .with_inner_size([300.0, 150.0])
                     .with_resizable(false),
                 move |ctx, _class| {
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        closed.store(true, Ordering::SeqCst);
-                        ctx.request_repaint_of(egui::ViewportId::ROOT);
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
+                    closer.handle(ctx);
                     egui::CentralPanel::default().show(ctx, |ui| {
                         ui.vertical_centered(|ui| {
                             ui.add_space(16.0);
@@ -2304,8 +2137,8 @@ impl ConclaveGUI {
     #[allow(clippy::too_many_lines)]
     fn settings_window(&mut self, ui: &mut egui::Ui) {
         // ── Settings viewport ─────────────────────────────────────────────
-        if self.show_settings {
-            let closed = self.settings_closed.clone();
+        if self.windows.settings.open {
+            let closer = self.windows.settings.closer();
             let error_arc = self.settings_error.clone();
             let pending_arc = self.settings_pending.clone();
             let avatar_arc = self.settings_avatar.clone();
@@ -2318,11 +2151,7 @@ impl ConclaveGUI {
                     .with_inner_size([420.0, 560.0])
                     .with_resizable(true),
                 move |ctx, _class| {
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        closed.store(true, Ordering::SeqCst);
-                        ctx.request_repaint_of(egui::ViewportId::ROOT);
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
+                    closer.handle(ctx);
                     if pending_arc.load(Ordering::SeqCst) {
                         ctx.request_repaint();
                     }
@@ -2520,8 +2349,8 @@ impl ConclaveGUI {
     #[allow(clippy::too_many_lines)]
     fn server_discovery_window(&mut self, ui: &mut egui::Ui) {
         // ── Server Discovery viewport ─────────────────────────────────────
-        if self.show_advertised_servers_list {
-            let closed_arc = self.discovery_viewport_closed.clone();
+        if self.windows.discovery.open {
+            let closer = self.windows.discovery.closer();
             let running_arc = self.discovery_running.clone();
             let servers_arc = self.discovered_servers.clone();
             let error_arc = self.discovery_error.clone();
@@ -2535,10 +2364,7 @@ impl ConclaveGUI {
                     .with_inner_size([480.0, 340.0])
                     .with_resizable(true),
                 move |ctx, _class| {
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        closed_arc.store(true, Ordering::SeqCst);
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
+                    closer.handle(ctx);
                     if running_arc.load(Ordering::SeqCst) {
                         ctx.request_repaint();
                     }
@@ -2647,8 +2473,8 @@ impl ConclaveGUI {
     #[allow(clippy::too_many_lines)]
     fn tracker_list_window(&mut self, ui: &mut egui::Ui) {
         // ── Tracker List viewport ─────────────────────────────────────────
-        if self.show_tracker_list {
-            let closed_arc = self.tracker_viewport_closed.clone();
+        if self.windows.trackers.open {
+            let closer = self.windows.trackers.closer();
             let error_arc = self.tracker_error.clone();
             let op_pending_arc = self.tracker_op_pending.clone();
             let client_arc = self.client.clone();
@@ -2661,10 +2487,7 @@ impl ConclaveGUI {
                     .with_inner_size([450.0, 320.0])
                     .with_resizable(true),
                 move |ctx, _class| {
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        closed_arc.store(true, Ordering::SeqCst);
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
+                    closer.handle(ctx);
                     if op_pending_arc.load(Ordering::SeqCst) {
                         ctx.request_repaint();
                     }
@@ -2896,8 +2719,8 @@ impl ConclaveGUI {
     #[allow(clippy::too_many_lines)]
     fn bookmarks_window(&mut self, ui: &mut egui::Ui) {
         // ── Bookmarks viewport ────────────────────────────────────────────
-        if self.show_bookmarks_window {
-            let closed_arc = self.bookmarks_viewport_closed.clone();
+        if self.windows.bookmarks.open {
+            let closer = self.windows.bookmarks.closer();
             let error_arc = self.bookmarks_error.clone();
             let op_pending_arc = self.bookmarks_op_pending.clone();
             let client_arc = self.client.clone();
@@ -2909,10 +2732,7 @@ impl ConclaveGUI {
                     .with_inner_size([460.0, 520.0])
                     .with_resizable(true),
                 move |ctx, _class| {
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        closed_arc.store(true, Ordering::SeqCst);
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
+                    closer.handle(ctx);
                     if op_pending_arc.load(Ordering::SeqCst) {
                         ctx.request_repaint();
                     }
@@ -3401,8 +3221,8 @@ impl ConclaveGUI {
     #[allow(clippy::too_many_lines)]
     fn tracker_servers_window(&mut self, ui: &mut egui::Ui) {
         // ── Tracker Servers viewport ──────────────────────────────────────
-        if self.show_tracker_servers {
-            let closed_arc = self.tracker_servers_viewport_closed.clone();
+        if self.windows.tracker_servers.open {
+            let closer = self.windows.tracker_servers.closer();
             let servers_arc = self.tracker_servers.clone();
             let pending_server_arc = self.pending_server.clone();
             let connect_error_arc = self.connect_error.clone();
@@ -3414,10 +3234,7 @@ impl ConclaveGUI {
                     .with_inner_size([780.0, 400.0])
                     .with_resizable(true),
                 move |ctx, _class| {
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        closed_arc.store(true, Ordering::SeqCst);
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
+                    closer.handle(ctx);
                     // The listing is pushed by the trackers; repaint periodically
                     // so those updates show up promptly.
                     ctx.request_repaint_after(std::time::Duration::from_millis(500));
@@ -3535,7 +3352,7 @@ impl ConclaveGUI {
             self.pending_server.read().ok().and_then(|p| p.clone());
 
         if let Some(server) = pending_info {
-            let closed_arc = self.login_window_closed.clone();
+            let closer = self.windows.login_closed.clone();
             let pending_arc = self.pending_server.clone();
             let connect_pending = self.connect_pending.clone();
             let connect_error = self.connect_error.clone();
@@ -3551,10 +3368,7 @@ impl ConclaveGUI {
                     .with_inner_size([360.0, 250.0])
                     .with_resizable(false),
                 move |ctx, _class| {
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        closed_arc.store(true, Ordering::SeqCst);
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
+                    closer.handle(ctx);
                     if connect_pending.load(Ordering::SeqCst) {
                         ctx.request_repaint();
                     }
@@ -3774,10 +3588,8 @@ impl ConclaveGUI {
         // Connected Servers window when the first connection appears.
         for (key, _, _, _) in &conn_snapshots {
             if self.seen_servers.insert(key.clone()) {
-                if let Ok(mut open) = self.open_user_windows.write() {
-                    open.insert(key.clone());
-                }
-                self.show_servers_window = true;
+                self.windows.users.open(key.clone());
+                self.windows.servers.open = true;
             }
         }
 
@@ -3786,12 +3598,8 @@ impl ConclaveGUI {
         {
             let live: HashSet<String> = conn_snapshots.iter().map(|(k, ..)| k.clone()).collect();
             self.seen_servers.retain(|k| live.contains(k));
-            if let Ok(mut open) = self.open_user_windows.write() {
-                open.retain(|k| live.contains(k));
-            }
-            if let Ok(mut open) = self.open_admin_windows.write() {
-                open.retain(|k| live.contains(k));
-            }
+            self.windows.users.retain(|k| live.contains(k));
+            self.windows.admin.retain(|k| live.contains(k));
         }
 
         conn_snapshots
@@ -3802,14 +3610,14 @@ impl ConclaveGUI {
     #[allow(clippy::too_many_lines)]
     fn connected_servers_window(&mut self, ui: &mut egui::Ui, conn_snapshots: &[ConnSnapshot]) {
         // ── Connected Servers window ──────────────────────────────────────
-        if self.show_servers_window {
-            let closed_arc = self.servers_window_closed.clone();
+        if self.windows.servers.open {
+            let closer = self.windows.servers.closer();
             let active_conns = self.active_connections.clone();
-            let open_windows = self.open_user_windows.clone();
-            let open_admin = self.open_admin_windows.clone();
-            let open_files = self.open_file_windows.clone();
-            let open_chats = self.open_chats.clone();
-            let open_forums = self.open_forum_windows.clone();
+            let open_users = self.windows.users.clone();
+            let open_admin = self.windows.admin.clone();
+            let open_files = self.windows.files.clone();
+            let open_chats = self.windows.chats.clone();
+            let open_forums = self.windows.forums.clone();
             let servers: Vec<ConnSnapshot> = conn_snapshots.to_vec();
 
             ui.ctx().show_viewport_deferred(
@@ -3819,10 +3627,7 @@ impl ConclaveGUI {
                     .with_inner_size([300.0, 360.0])
                     .with_resizable(true),
                 move |ctx, _class| {
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        closed_arc.store(true, Ordering::SeqCst);
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
+                    closer.handle(ctx);
 
                     let mut disconnect_key: Option<String> = None;
                     let mut repaint_root = false;
@@ -3853,9 +3658,7 @@ impl ConclaveGUI {
                                         |ui| {
                                             ui.menu_button("Open ⏷", |ui| {
                                                 if ui.button("User list").clicked() {
-                                                    if let Ok(mut o) = open_windows.write() {
-                                                        o.insert(key.clone());
-                                                    }
+                                                    open_users.open(key.clone());
                                                     repaint_root = true;
                                                 }
                                                 // Chat: a submenu of the server's
@@ -3882,14 +3685,8 @@ impl ConclaveGUI {
                                                                 ))
                                                                 .clicked()
                                                             {
-                                                                if let Ok(mut o) =
-                                                                    open_chats.write()
-                                                                {
-                                                                    o.insert((
-                                                                        key.clone(),
-                                                                        room.id,
-                                                                    ));
-                                                                }
+                                                                open_chats
+                                                                    .open((key.clone(), room.id));
                                                                 repaint_root = true;
                                                             }
                                                         }
@@ -3898,25 +3695,19 @@ impl ConclaveGUI {
                                                 if info.sharing_enabled
                                                     && ui.button("Files").clicked()
                                                 {
-                                                    if let Ok(mut o) = open_files.write() {
-                                                        o.insert(key.clone());
-                                                    }
+                                                    open_files.open(key.clone());
                                                     repaint_root = true;
                                                 }
                                                 if info.forums_enabled
                                                     && ui.button("Forums").clicked()
                                                 {
-                                                    if let Ok(mut o) = open_forums.write() {
-                                                        o.insert(key.clone());
-                                                    }
+                                                    open_forums.open(key.clone());
                                                     repaint_root = true;
                                                 }
                                                 // The admin panel is offered only for
                                                 // connections holding admin rights.
                                                 if is_admin && ui.button("Admin").clicked() {
-                                                    if let Ok(mut o) = open_admin.write() {
-                                                        o.insert(key.clone());
-                                                    }
+                                                    open_admin.open(key.clone());
                                                     repaint_root = true;
                                                 }
                                                 ui.separator();
@@ -3951,9 +3742,7 @@ impl ConclaveGUI {
                             idx.map(|i| c.remove(i))
                         });
                         if let Some(conn) = removed {
-                            if let Ok(mut o) = open_windows.write() {
-                                o.remove(&key);
-                            }
+                            open_users.remove(&key);
                             tokio::spawn(async move {
                                 let _ = conn.disconnect().await;
                             });
@@ -3970,11 +3759,7 @@ impl ConclaveGUI {
     #[allow(clippy::too_many_lines)]
     fn user_windows(&mut self, ui: &mut egui::Ui, conn_snapshots: &[ConnSnapshot]) {
         // ── Per-server user windows ───────────────────────────────────────
-        let open_keys: HashSet<String> = self
-            .open_user_windows
-            .read()
-            .map(|o| o.clone())
-            .unwrap_or_default();
+        let open_keys = self.windows.users.keys();
 
         for (key, name, _active, conn) in conn_snapshots {
             if !open_keys.contains(key) {
@@ -3983,8 +3768,8 @@ impl ConclaveGUI {
             let conn = conn.clone();
             let key_owned = key.clone();
             let title = format!("Users — {name}");
-            let close_reqs = self.user_window_close_requests.clone();
-            let open_dms = self.open_dms.clone();
+            let windows = self.windows.users.clone();
+            let open_dms = self.windows.dms.clone();
             let active_server = self.active_server.clone();
 
             ui.ctx().show_viewport_deferred(
@@ -3995,13 +3780,7 @@ impl ConclaveGUI {
                     .with_resizable(true),
                 move |ctx, _class| {
                     note_active_server(&active_server, ctx, &key_owned);
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        if let Ok(mut r) = close_reqs.write() {
-                            r.push(key_owned.clone());
-                        }
-                        ctx.request_repaint_of(egui::ViewportId::ROOT);
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
+                    windows.handle_close(ctx, &key_owned);
 
                     let server_info = conn.server_info();
                     let users = conn.get_connected_users();
@@ -4135,9 +3914,7 @@ impl ConclaveGUI {
 
                     // Perform queued actions outside the panel closure.
                     if let Some(peer) = open_dm_request {
-                        if let Ok(mut open) = open_dms.write() {
-                            open.insert((key_owned.clone(), peer));
-                        }
+                        open_dms.open((key_owned.clone(), peer));
                         ctx.request_repaint_of(egui::ViewportId::ROOT);
                     }
                     if let Some(id) = details_request {
@@ -4176,17 +3953,8 @@ impl ConclaveGUI {
         // has disconnected.
         {
             let live: HashSet<String> = conn_snapshots.iter().map(|(k, ..)| k.clone()).collect();
-            let closed: Vec<(String, u16)> = self
-                .chat_window_close_requests
-                .write()
-                .map(|mut r| r.drain(..).collect())
-                .unwrap_or_default();
-            if let Ok(mut open) = self.open_chats.write() {
-                for entry in &closed {
-                    open.remove(entry);
-                }
-                open.retain(|(k, _)| live.contains(k));
-            }
+            let closed = self.windows.chats.drain_closed();
+            self.windows.chats.retain(|(k, _)| live.contains(k));
             for (k, room) in closed {
                 if let Some((.., conn)) = conn_snapshots.iter().find(|(key, ..)| *key == k) {
                     let conn = conn.clone();
@@ -4197,11 +3965,7 @@ impl ConclaveGUI {
             }
         }
 
-        let open_chats: Vec<(String, u16)> = self
-            .open_chats
-            .read()
-            .map(|o| o.iter().cloned().collect())
-            .unwrap_or_default();
+        let open_chats = self.windows.chats.keys();
 
         for (key, room) in open_chats {
             let Some((_, server_name, _, conn)) = conn_snapshots.iter().find(|(k, ..)| *k == key)
@@ -4230,7 +3994,7 @@ impl ConclaveGUI {
                 ),
                 None => format!("{room_name} — {server_name}"),
             };
-            let close_reqs = self.chat_window_close_requests.clone();
+            let windows = self.windows.chats.clone();
             let active_server = self.active_server.clone();
 
             ui.ctx().show_viewport_deferred(
@@ -4245,13 +4009,8 @@ impl ConclaveGUI {
                     // closes (the close-drain spawns chat_leave). The joined flag
                     // is reset on close so reopening rejoins.
                     let joined_id = egui::Id::new(format!("chat_joined:{key_owned}:{room}"));
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        if let Ok(mut r) = close_reqs.write() {
-                            r.push((key_owned.clone(), room));
-                        }
+                    if windows.handle_close(ctx, &(key_owned.clone(), room)) {
                         ctx.data_mut(|d| d.insert_temp(joined_id, false));
-                        ctx.request_repaint_of(egui::ViewportId::ROOT);
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     } else if !ctx.data(|d| d.get_temp::<bool>(joined_id).unwrap_or(false)) {
                         ctx.data_mut(|d| d.insert_temp(joined_id, true));
                         let conn = conn.clone();
@@ -4518,17 +4277,8 @@ impl ConclaveGUI {
         // Drain close requests and drop windows whose server disconnected.
         {
             let live: HashSet<String> = conn_snapshots.iter().map(|(k, ..)| k.clone()).collect();
-            let closed: Vec<(String, u16)> = self
-                .dm_window_close_requests
-                .write()
-                .map(|mut r| r.drain(..).collect())
-                .unwrap_or_default();
-            if let Ok(mut open) = self.open_dms.write() {
-                for entry in &closed {
-                    open.remove(entry);
-                }
-                open.retain(|(k, _)| live.contains(k));
-            }
+            self.windows.dms.drain_closed();
+            self.windows.dms.retain(|(k, _)| live.contains(k));
         }
 
         // Auto-open a window for any peer that just sent a direct message and
@@ -4538,10 +4288,8 @@ impl ConclaveGUI {
             if requests.is_empty() {
                 continue;
             }
-            if let Ok(mut open) = self.open_dms.write() {
-                for peer in requests {
-                    open.insert((key.clone(), peer));
-                }
+            for peer in requests {
+                self.windows.dms.open((key.clone(), peer));
             }
         }
         // Poll while connected so inbound messages surface even when the main
@@ -4551,11 +4299,7 @@ impl ConclaveGUI {
                 .request_repaint_after(std::time::Duration::from_millis(300));
         }
 
-        let open_dms: Vec<(String, u16)> = self
-            .open_dms
-            .read()
-            .map(|o| o.iter().cloned().collect())
-            .unwrap_or_default();
+        let open_dms = self.windows.dms.keys();
 
         for (key, peer) in open_dms {
             let Some((_, server_name, _, conn)) = conn_snapshots.iter().find(|(k, ..)| *k == key)
@@ -4575,7 +4319,7 @@ impl ConclaveGUI {
             let fingerprint = conn.peer_key_fingerprint(peer);
             let present = fingerprint.is_some();
             let title = format!("DM {peer_name} — {server_name}");
-            let close_reqs = self.dm_window_close_requests.clone();
+            let windows = self.windows.dms.clone();
             let active_server = self.active_server.clone();
 
             // The window is identified by server name plus both display names,
@@ -4588,13 +4332,7 @@ impl ConclaveGUI {
                     .with_resizable(true),
                 move |ctx, _class| {
                     note_active_server(&active_server, ctx, &key_owned);
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        if let Ok(mut r) = close_reqs.write() {
-                            r.push((key_owned.clone(), peer));
-                        }
-                        ctx.request_repaint_of(egui::ViewportId::ROOT);
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
+                    windows.handle_close(ctx, &(key_owned.clone(), peer));
 
                     let thread = conn.dm_thread(peer);
                     let input_id = egui::Id::new(format!("dm_input:{key_owned}:{peer}"));
@@ -4770,23 +4508,10 @@ impl ConclaveGUI {
         // ── Per-server file-browser windows ───────────────────────────────
         {
             let live: HashSet<String> = conn_snapshots.iter().map(|(k, ..)| k.clone()).collect();
-            let closed: Vec<String> = self
-                .file_window_close_requests
-                .write()
-                .map(|mut r| r.drain(..).collect())
-                .unwrap_or_default();
-            if let Ok(mut open) = self.open_file_windows.write() {
-                for key in &closed {
-                    open.remove(key);
-                }
-                open.retain(|k| live.contains(k));
-            }
+            self.windows.files.drain_closed();
+            self.windows.files.retain(|k| live.contains(k));
         }
-        let file_open_keys: HashSet<String> = self
-            .open_file_windows
-            .read()
-            .map(|o| o.clone())
-            .unwrap_or_default();
+        let file_open_keys = self.windows.files.keys();
 
         for (key, name, _active, conn) in conn_snapshots {
             if !file_open_keys.contains(key) {
@@ -4795,7 +4520,7 @@ impl ConclaveGUI {
             let conn = conn.clone();
             let key_owned = key.clone();
             let title = format!("Files — {name}");
-            let close_reqs = self.file_window_close_requests.clone();
+            let windows = self.windows.files.clone();
             let active_server = self.active_server.clone();
 
             ui.ctx().show_viewport_deferred(
@@ -4806,13 +4531,7 @@ impl ConclaveGUI {
                     .with_resizable(true),
                 move |ctx, _class| {
                     note_active_server(&active_server, ctx, &key_owned);
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        if let Ok(mut r) = close_reqs.write() {
-                            r.push(key_owned.clone());
-                        }
-                        ctx.request_repaint_of(egui::ViewportId::ROOT);
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
+                    windows.handle_close(ctx, &key_owned);
 
                     let path_id = egui::Id::new(format!("file_path:{key_owned}"));
                     let req_id = egui::Id::new(format!("file_req:{key_owned}"));
@@ -5011,23 +4730,10 @@ impl ConclaveGUI {
         // ── Per-server forum windows ──────────────────────────────────────
         {
             let live: HashSet<String> = conn_snapshots.iter().map(|(k, ..)| k.clone()).collect();
-            let closed: Vec<String> = self
-                .forum_window_close_requests
-                .write()
-                .map(|mut r| r.drain(..).collect())
-                .unwrap_or_default();
-            if let Ok(mut open) = self.open_forum_windows.write() {
-                for key in &closed {
-                    open.remove(key);
-                }
-                open.retain(|k| live.contains(k));
-            }
+            self.windows.forums.drain_closed();
+            self.windows.forums.retain(|k| live.contains(k));
         }
-        let forum_open_keys: HashSet<String> = self
-            .open_forum_windows
-            .read()
-            .map(|o| o.clone())
-            .unwrap_or_default();
+        let forum_open_keys = self.windows.forums.keys();
 
         for (key, name, _active, conn) in conn_snapshots {
             if !forum_open_keys.contains(key) {
@@ -5036,7 +4742,7 @@ impl ConclaveGUI {
             let conn = conn.clone();
             let key_owned = key.clone();
             let title = format!("Forums — {name}");
-            let close_reqs = self.forum_window_close_requests.clone();
+            let windows = self.windows.forums.clone();
             let active_server = self.active_server.clone();
 
             ui.ctx().show_viewport_deferred(
@@ -5047,13 +4753,7 @@ impl ConclaveGUI {
                     .with_resizable(true),
                 move |ctx, _class| {
                     note_active_server(&active_server, ctx, &key_owned);
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        if let Ok(mut r) = close_reqs.write() {
-                            r.push(key_owned.clone());
-                        }
-                        ctx.request_repaint_of(egui::ViewportId::ROOT);
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
+                    windows.handle_close(ctx, &key_owned);
 
                     let topic_id = egui::Id::new(format!("forum_topic:{key_owned}"));
                     let thread_id = egui::Id::new(format!("forum_thread:{key_owned}"));
@@ -5438,11 +5138,7 @@ impl ConclaveGUI {
     #[inline]
     fn admin_windows(&mut self, ui: &mut egui::Ui, conn_snapshots: &[ConnSnapshot]) {
         // ── Per-server admin windows (admin connections only) ─────────────
-        let admin_open_keys: HashSet<String> = self
-            .open_admin_windows
-            .read()
-            .map(|o| o.clone())
-            .unwrap_or_default();
+        let admin_open_keys = self.windows.admin.keys();
 
         for (key, name, _active, conn) in conn_snapshots {
             if !admin_open_keys.contains(key) || !conn.is_admin() {
@@ -5451,7 +5147,7 @@ impl ConclaveGUI {
             let conn = conn.clone();
             let key_owned = key.clone();
             let title = format!("Admin — {name}");
-            let close_reqs = self.admin_window_close_requests.clone();
+            let windows = self.windows.admin.clone();
             let active_server = self.active_server.clone();
 
             ui.ctx().show_viewport_deferred(
@@ -5462,13 +5158,7 @@ impl ConclaveGUI {
                     .with_resizable(true),
                 move |ctx, _class| {
                     note_active_server(&active_server, ctx, &key_owned);
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        if let Ok(mut r) = close_reqs.write() {
-                            r.push(key_owned.clone());
-                        }
-                        ctx.request_repaint_of(egui::ViewportId::ROOT);
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
+                    windows.handle_close(ctx, &key_owned);
 
                     conclave_client::adminui::admin_ui(ctx, &conn, &key_owned);
                 },
@@ -5484,11 +5174,11 @@ impl ConclaveGUI {
     #[inline]
     fn direct_connect_window(&mut self, ui: &mut egui::Ui) {
         // ── Direct Connect viewport ───────────────────────────────────────
-        if !self.show_direct_connect {
+        if !self.windows.direct_connect.open {
             return;
         }
 
-        let closed_arc = self.direct_connect_closed.clone();
+        let closer = self.windows.direct_connect.closer();
         let connect_pending = self.connect_pending.clone();
         let connect_error = self.connect_error.clone();
         let pending_server = self.pending_server.clone();
@@ -5502,10 +5192,7 @@ impl ConclaveGUI {
                 .with_inner_size([380.0, 100.0])
                 .with_resizable(false),
             move |ctx, _class| {
-                if ctx.input(|i| i.viewport().close_requested()) {
-                    closed_arc.store(true, Ordering::SeqCst);
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
+                closer.handle(ctx);
 
                 let host_id = egui::Id::new("direct_connect_host");
                 let port_id = egui::Id::new("direct_connect_port");
@@ -5617,7 +5304,7 @@ impl ConclaveGUI {
                 ui.horizontal(|ui| {
                     ui.label(format!("Connected to {} server(s).", conn_snapshots.len()));
                     if ui.small_button("Show Servers").clicked() {
-                        self.show_servers_window = true;
+                        self.windows.servers.open = true;
                     }
                 });
                 ui.separator();
