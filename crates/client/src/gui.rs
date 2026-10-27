@@ -14,6 +14,7 @@ use conclave_common::server::{
     ChatroomInfo, ConnectedUser, IDLE_TIMEOUT_MINUTES, UserAuthentication, VerifyingKey,
 };
 use conclave_common::tracker::{Advertise, Tracker, TrackerWithKey};
+use conclave_common::url::{ServerUrl, parse_server_url, without_credentials};
 use conclave_common::{SERVER_DEFAULT_PORT, TRACKER_DEFAULT_PORT};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -23,7 +24,7 @@ use std::sync::{Arc, RwLock};
 use chrono::Utc;
 use eframe::{Frame, egui};
 use sha2::{Digest, Sha256};
-use tracing::error;
+use tracing::{error, info};
 
 mod windows;
 use windows::Windows;
@@ -828,15 +829,6 @@ fn timezone_offset_text(theirs: Option<i16>, ours: Option<i16>) -> String {
         std::cmp::Ordering::Less => format!("Timezone: {}h behind you", diff.abs()),
         std::cmp::Ordering::Equal => "Timezone: same as yours".to_string(),
     }
-}
-
-/// Parse host and port from a `"conclave://host:port"` URL.
-fn parse_server_url(url: &str) -> Option<(String, u16)> {
-    let rest = url.strip_prefix(conclave_common::URL_PROTOCOL)?;
-    let colon = rest.rfind(':')?;
-    let host = rest[..colon].to_string();
-    let port = rest[colon + 1..].parse().ok()?;
-    Some((host, port))
 }
 
 /// Flatten a description → URL map into an ordered list of pairs for editing.
@@ -1766,6 +1758,38 @@ struct PendingServer {
     anonymous_allowed: bool,
 }
 
+/// The login window's viewport.
+#[inline]
+fn login_viewport() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("login_window")
+}
+
+/// Where the login window keeps the username being typed.
+#[inline]
+fn login_username_id() -> egui::Id {
+    egui::Id::unique("login_username")
+}
+
+/// Where the login window keeps the password being typed.
+#[inline]
+fn login_password_id() -> egui::Id {
+    egui::Id::unique("login_password")
+}
+
+/// The login window's subject for a server a link named. Nothing is known about
+/// it but its address: its key is fetched and checked while connecting, as
+/// for Direct Connect, and whether it takes guests is the server's to say.
+#[inline]
+fn pending_from_link(host: String, port: u16) -> PendingServer {
+    PendingServer {
+        name: format!("{host}:{port}"),
+        host,
+        port,
+        key: None,
+        anonymous_allowed: true,
+    }
+}
+
 /// A per-server entry for the Servers menu, snapshotted each frame.
 #[allow(clippy::struct_excessive_bools)]
 struct MenuServer {
@@ -1876,6 +1900,7 @@ pub struct ConclaveGUI {
 impl ConclaveGUI {
     pub fn new(client: Client, cc: &eframe::CreationContext<'_>) -> Self {
         install_fonts(&cc.egui_ctx);
+        crate::url_handler::attach(&cc.egui_ctx);
         let default_display_name = client.default_display_name();
         let default_share_timezone = client.default_share_timezone();
         let avatar = client.avatar();
@@ -1914,6 +1939,7 @@ impl eframe::App for ConclaveGUI {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut Frame) {
         self.fit_main_window(ui.ctx());
         self.begin_frame(ui);
+        self.open_links(ui.ctx());
         self.top_bar_menu(ui);
         self.about_window(ui);
         self.settings_window(ui);
@@ -3430,7 +3456,7 @@ impl ConclaveGUI {
                                             }
                                             ui.label(format_uptime(server.uptime()));
                                             ui.label(&server.description);
-                                            if let Some((host, port)) =
+                                            if let Ok(ServerUrl { host, port, .. }) =
                                                 parse_server_url(&server.url)
                                             {
                                                 if ui.button("Connect").clicked() {
@@ -3484,7 +3510,7 @@ impl ConclaveGUI {
             let default_share = self.default_share_timezone;
 
             ui.ctx().show_viewport_deferred(
-                egui::ViewportId::from_hash_of("login_window"),
+                login_viewport(),
                 egui::ViewportBuilder::default()
                     .with_title(format!("Connect to {}", server.name))
                     .with_inner_size([360.0, 250.0])
@@ -3496,8 +3522,8 @@ impl ConclaveGUI {
                     }
 
                     let login_name_id = egui::Id::unique("login_display_name");
-                    let login_user_id = egui::Id::unique("login_username");
-                    let login_pass_id = egui::Id::unique("login_password");
+                    let login_user_id = login_username_id();
+                    let login_pass_id = login_password_id();
                     let login_share_id = egui::Id::unique("login_share_time");
 
                     let mut display_name: String = ctx.data(|d| {
@@ -5287,6 +5313,54 @@ impl ConclaveGUI {
                     conclave_client::adminui::admin_ui(ctx, &conn, &key_owned);
                 },
             );
+        }
+    }
+
+    /// Act on any `conclave://` links that have arrived: open the login window
+    /// for the server a link names, with any user name and password it carried
+    /// filled in, and bring it to the front; or, for a link that names no
+    /// server, bring the main window forward to say so. Nothing connects until
+    /// the user says so.
+    fn open_links(&mut self, ctx: &egui::Context) {
+        let links = crate::url_handler::take();
+        // Several links at once is somebody clicking twice; the last is where
+        // they mean to go.
+        let Some(link) = links.last() else {
+            return;
+        };
+        // The link as it is safe to log or show.
+        let shown = without_credentials(link);
+        match parse_server_url(link) {
+            Ok(ServerUrl {
+                host,
+                port,
+                username,
+                password,
+            }) => {
+                info!("Opening {shown}: the login window for {host}:{port}");
+                if let Ok(mut p) = self.pending_server.write() {
+                    *p = Some(pending_from_link(host, port));
+                }
+                if let Ok(mut e) = self.connect_error.write() {
+                    *e = None;
+                }
+                // Whatever was typed before was for whichever server the window
+                // was last open for, so it goes either way.
+                ctx.data_mut(|d| {
+                    d.insert_temp(login_username_id(), username.unwrap_or_default());
+                    d.insert_temp(login_password_id(), password.unwrap_or_default());
+                });
+                // A login window opening for the first time comes up in
+                // front by itself; one already open has to be asked.
+                ctx.send_viewport_cmd_to(login_viewport(), egui::ViewportCommand::Focus);
+            }
+            Err(e) => {
+                error!("Could not open {shown}: {e}");
+                if let Ok(mut err) = self.connect_error.write() {
+                    *err = Some(format!("Could not open {shown}: {e}"));
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
         }
     }
 

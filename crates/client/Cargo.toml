@@ -44,9 +44,12 @@ wgpu = { workspace = true, features = ["vulkan"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu = { workspace = true, features = ["metal"] }
+objc2 = { workspace = true, features = ["std"] }
+objc2-foundation = { workspace = true, features = ["std", "NSAppleEventDescriptor", "NSAppleEventManager", "NSNotification", "NSString"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wgpu = { workspace = true, features = ["dx12"] }
+windows-registry = { workspace = true }
 
 [build-dependencies]
 winresource = { workspace = true, features = ["toml"] }

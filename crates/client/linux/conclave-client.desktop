@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Conclave
+GenericName=Conclave Client
+Comment=Client for the Conclave communications environment
+Exec=conclave-client %u
+Icon=conclave-client
+Terminal=false
+Categories=Network;Chat;
+MimeType=x-scheme-handler/conclave;

@@ -52,6 +52,9 @@ pub mod serde;
 /// Data structures for communicating with the server
 pub mod server;
 
+/// `conclave://` links: where a server is, written so it can be clicked
+pub mod url;
+
 /// The version every Conclave binary reports, worked out once by this crate's
 /// build script and re-exported by the client, server and tracker crates so
 /// there is only ever one answer.

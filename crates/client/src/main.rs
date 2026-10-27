@@ -5,9 +5,10 @@
 //#![deny(clippy::cargo)]
 #![deny(clippy::pedantic)]
 #![allow(clippy::assert_is_empty)]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 mod gui;
+mod url_handler;
 
 use conclave_client::{Client, config::default_config_path};
 
@@ -24,12 +25,26 @@ struct Args {
     /// Config file path
     #[arg(short, long, value_hint = ValueHint::FilePath, default_value = default_config_path().into_os_string())]
     config: PathBuf,
+
+    /// A `conclave://` link to open
+    #[arg(
+        value_name = "URL",
+        help = "A conclave:// link to open in a login window; nothing happens until you connect."
+    )]
+    url: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> eframe::Result {
     conclave_common::init_tracing();
     let args = Args::parse();
+    // On macOS a clicked link arrives as an Apple Event instead, which has to
+    // be listened for before the event loop starts.
+    url_handler::listen();
+    url_handler::register();
+    if let Some(url) = args.url {
+        url_handler::deliver(url);
+    }
     let client = Client::new(&args.config)
         .map_err(|e| panic!("Unable to read {}: {e}", args.config.display()))
         .unwrap();

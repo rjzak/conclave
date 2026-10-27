@@ -25,6 +25,7 @@ tokio = { workspace = true, features = ["net", "io-util", "sync"] }
 tracing-subscriber = { workspace = true, features = ["alloc", "fmt", "std"] }
 ml-dsa = { workspace = true, features = ["alloc", "getrandom", "zeroize"] }
 ml-kem = { workspace = true, features = ["alloc", "getrandom", "zeroize"] }
+percent-encoding = { workspace = true, features = ["std"] }
 postcard = { workspace = true, features = ["alloc", "use-std"] }
 zeroize = { workspace = true, features = ["aarch64", "derive", "serde"] }
 
