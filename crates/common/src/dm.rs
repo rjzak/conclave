@@ -140,7 +140,7 @@ pub enum DmPayload {
         target: DmMessageRef,
 
         /// The emoji.
-        emoji: char,
+        emoji: String,
 
         /// Whether the reaction was added or taken back.
         add: bool,
@@ -238,22 +238,22 @@ mod tests {
 
         let reaction = DmPayload::Reaction {
             target: DmMessageRef { id: 7, own: false },
-            emoji: '★',
+            emoji: "👩🏽‍💻".to_string(),
             add: true,
         };
         let sealed = encrypt(&to_bob, &reaction.to_vec());
         // Nor is the emoji: a relay sees a sealed payload either way and cannot
         // tell a reaction from something said, let alone which emoji it was.
-        let star = '★'.to_string().into_bytes();
-        assert!(!sealed.windows(star.len()).any(|w| w == star.as_slice()));
+        let coder = "👩🏽‍💻".as_bytes();
+        assert!(!sealed.windows(coder.len()).any(|w| w == coder));
         let opened = DmPayload::from_bytes(&decrypt(&to_alice, &sealed).unwrap()).unwrap();
         assert!(matches!(
             opened,
             DmPayload::Reaction {
                 target: DmMessageRef { id: 7, own: false },
-                emoji: '★',
+                emoji,
                 add: true
-            }
+            } if emoji == "👩🏽‍💻"
         ));
     }
 

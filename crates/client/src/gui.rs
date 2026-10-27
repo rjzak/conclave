@@ -9,7 +9,7 @@ use conclave_common::poll::{
     MAX_POLL_OPTION, MAX_POLL_OPTIONS, MAX_POLL_QUESTION, MIN_POLL_OPTIONS, NewPoll, Poll,
     PollDuration,
 };
-use conclave_common::reaction::{REACTION_PALETTE, ReactionTally, first_emoji};
+use conclave_common::reaction::{REACTION_PALETTE, ReactionTally, SKIN_TONES, first_emoji};
 use conclave_common::server::{
     ChatroomInfo, ConnectedUser, IDLE_TIMEOUT_MINUTES, UserAuthentication, VerifyingKey,
 };
@@ -162,13 +162,84 @@ mod glyph {
     /// A signature that checks out.
     pub const SIGNED: &str = "🖊";
     /// A signature that does not, and anything else cancelled or refused.
-    pub const CROSS: &str = "🗙";
+    pub const CROSS: &str = "❌";
     /// Adding one more of something.
-    pub const PLUS: &str = "✚";
+    pub const PLUS: &str = "➕";
     /// Throwing something away.
     pub const BIN: &str = "🗑";
     /// A poll.
     pub const POLL: &str = "▣";
+    /// A button that opens a menu.
+    pub const MENU: &str = "▾";
+}
+
+/// Name the colour emoji font is installed under.
+const COLOUR_EMOJI_FONT_NAME: &str = "Noto-COLRv1";
+
+/// Noto Color Emoji in its vector (`COLRv1`) form, under the SIL Open Font
+/// License (see `fonts/Noto-COLRv1-OFL.txt`). Vector rather than the bitmap
+/// form because it is half the size and stays sharp at any scale.
+const COLOUR_EMOJI_FONT: &[u8] = include_bytes!("../fonts/Noto-COLRv1.ttf");
+
+/// Font family for text that is an emoji and nothing else: a reaction, a
+/// button in the picker. The colour emoji font comes first in it.
+///
+/// Elsewhere it cannot: a font is chosen by the first character of a
+/// sequence, so a keycap (1️⃣) goes to whichever font has the digit, and in
+/// running text that has to be the text font. Where nothing but an emoji is
+/// drawn there is no text to protect, and the keycap gets its picture.
+const EMOJI_FAMILY: &str = "emoji";
+
+/// [`EMOJI_FAMILY`], as a family to draw with.
+fn emoji_family() -> egui::FontFamily {
+    egui::FontFamily::Name(EMOJI_FAMILY.into())
+}
+
+/// An emoji as a label, drawn from [`EMOJI_FAMILY`].
+fn emoji_text(emoji: &str) -> egui::RichText {
+    egui::RichText::new(emoji).family(emoji_family())
+}
+
+/// Install the fonts the client draws with: egui's own, with the colour emoji
+/// font slotted in straight after the fonts that carry the text, plus
+/// [`EMOJI_FAMILY`].
+///
+/// After the text fonts, because the emoji font also covers the digits, `#`
+/// and `*` (for keycaps) and those have to stay text.
+///
+/// egui's monochrome emoji fonts are not installed: the colour font draws
+/// every emoji they did. What they also caught was a scatter of arrows and
+/// shapes that are not emoji (▾, ▼), and the monospace font has most of
+/// those, so it is the last thing the proportional family falls back on.
+fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        COLOUR_EMOJI_FONT_NAME.to_owned(),
+        Arc::new(egui::FontData::from_static(COLOUR_EMOJI_FONT)),
+    );
+    for family in fonts.families.values_mut() {
+        let after_text = family
+            .iter()
+            .position(|name| name == "egui-icons")
+            .unwrap_or(family.len());
+        family.insert(after_text, COLOUR_EMOJI_FONT_NAME.to_owned());
+    }
+    if let Some(proportional) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        proportional.push("Hack".to_owned());
+    }
+    let emoji_first = std::iter::once(COLOUR_EMOJI_FONT_NAME.to_owned())
+        .chain(
+            fonts
+                .families
+                .get(&egui::FontFamily::Proportional)
+                .into_iter()
+                .flatten()
+                .filter(|name| *name != COLOUR_EMOJI_FONT_NAME)
+                .cloned(),
+        )
+        .collect();
+    fonts.families.insert(emoji_family(), emoji_first);
+    ctx.set_fonts(fonts);
 }
 
 /// Mark shown before the name of a server that requires an account.
@@ -929,7 +1000,7 @@ enum ForumAction {
 #[derive(Clone, Debug)]
 struct ReactionClick {
     /// The emoji clicked.
-    emoji: char,
+    emoji: String,
     /// Whether to add the reaction or take it back.
     add: bool,
 }
@@ -959,11 +1030,14 @@ fn reaction_row_sized(
     let mut clicked: Option<ReactionClick> = None;
 
     for tally in tallies {
-        let label = format!("{} {}", tally.emoji, tally.count());
+        let (emoji, count) = (
+            emoji_text(&tally.emoji),
+            egui::RichText::new(tally.count().to_string()),
+        );
         let label = if small {
-            egui::RichText::new(label).small()
+            (emoji.small(), count.small())
         } else {
-            egui::RichText::new(label)
+            (emoji, count)
         };
         if ui
             .selectable_label(tally.mine, label)
@@ -971,34 +1045,37 @@ fn reaction_row_sized(
             .clicked()
         {
             clicked = Some(ReactionClick {
-                emoji: tally.emoji,
+                emoji: tally.emoji.clone(),
                 // Your own reaction comes off; anybody else's, you join.
                 add: !tally.mine,
             });
         }
     }
 
-    let mine_already = |emoji: char| tallies.iter().any(|t| t.emoji == emoji && t.mine);
+    let mine_already = |emoji: &str| tallies.iter().any(|t| t.emoji == emoji && t.mine);
     let picker = |ui: &mut egui::Ui, clicked: &mut Option<ReactionClick>| {
-        ui.set_max_width(240.0);
+        ui.set_max_width(300.0);
+
+        let tone = skin_tone_picker(ui);
+        ui.separator();
+
         ui.horizontal_wrapped(|ui| {
-            for (emoji, meaning) in REACTION_PALETTE {
-                let mine = mine_already(*emoji);
+            for entry in REACTION_PALETTE {
+                let emoji = entry.in_tone(tone);
+                let mine = mine_already(&emoji);
                 if ui
-                    .selectable_label(mine, egui::RichText::new(emoji.to_string()).size(18.0))
-                    .on_hover_text(*meaning)
+                    .selectable_label(mine, emoji_text(&emoji).size(20.0))
+                    .on_hover_text(entry.meaning)
                     .clicked()
                 {
-                    *clicked = Some(ReactionClick {
-                        emoji: *emoji,
-                        add: !mine,
-                    });
+                    *clicked = Some(ReactionClick { emoji, add: !mine });
                 }
             }
         });
 
         // The palette is a shortcut, not the limit: anything the protocol
-        // accepts can be typed or pasted here (on a Mac, ⌃⌘Space).
+        // accepts can be typed or pasted here (on a Mac, ⌃⌘Space) — flags,
+        // keycaps and joined sequences such as 👩🏽‍💻 included.
         ui.separator();
         let typed_id = egui::Id::unique("reaction_entry");
         let mut typed: String = ui.data(|d| d.get_temp(typed_id).unwrap_or_default());
@@ -1007,15 +1084,15 @@ fn reaction_row_sized(
             let entry = ui.add(
                 egui::TextEdit::singleline(&mut typed)
                     .hint_text("or an emoji")
-                    .char_limit(8)
+                    .char_limit(16)
                     .desired_width(110.0),
             );
             let entered = entry.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if let Some(emoji) = candidate
+            if let Some(emoji) = &candidate
                 && (ui.button("Add").clicked() || entered)
             {
                 *clicked = Some(ReactionClick {
-                    emoji,
+                    emoji: emoji.clone(),
                     add: !mine_already(emoji),
                 });
                 typed.clear();
@@ -1023,7 +1100,7 @@ fn reaction_row_sized(
         });
         // Say which way it failed, because "nothing happened" is the one
         // outcome that teaches nobody anything.
-        match candidate {
+        match &candidate {
             None if !typed.is_empty() => {
                 ui.label(
                     egui::RichText::new("Not an emoji")
@@ -1031,11 +1108,7 @@ fn reaction_row_sized(
                         .color(egui::Color32::from_rgb(0xd0, 0x45, 0x37)),
                 );
             }
-            Some(emoji)
-                if !ui
-                    .ctx()
-                    .fonts_mut(|f| f.has_glyph(&egui::FontId::proportional(14.0), emoji)) =>
-            {
+            Some(emoji) if !can_draw(ui.ctx(), emoji) => {
                 ui.label(
                     egui::RichText::new(
                         "This client has no glyph for that one — it will show as a box \
@@ -1061,6 +1134,54 @@ fn reaction_row_sized(
         .on_hover_text("React with an emoji");
 
     clicked
+}
+
+/// The row of hands the picker chooses a skin tone with, and the tone chosen:
+/// `None` for the plain yellow.
+///
+/// The choice is kept for the rest of the session, so it is made once rather
+/// than per reaction.
+fn skin_tone_picker(ui: &mut egui::Ui) -> Option<char> {
+    let tone_id = egui::Id::unique("reaction_skin_tone");
+    let mut tone: Option<char> = ui.data(|d| d.get_temp(tone_id)).flatten();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let swatch = |tone: Option<char>| {
+            emoji_text(&tone.map_or_else(|| "✋".to_string(), |t| format!("✋{t}"))).size(16.0)
+        };
+        if ui
+            .selectable_label(tone.is_none(), swatch(None))
+            .on_hover_text("No skin tone")
+            .clicked()
+        {
+            tone = None;
+        }
+        for (t, name) in SKIN_TONES {
+            if ui
+                .selectable_label(tone == Some(*t), swatch(Some(*t)))
+                .on_hover_text(*name)
+                .clicked()
+            {
+                tone = Some(*t);
+            }
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(tone_id, tone));
+    tone
+}
+
+/// Whether the installed fonts have a glyph for every part of `emoji`.
+///
+/// The emoji-style selector is left out of the question: it asks for a colour
+/// glyph rather than being one, and no font maps it to anything.
+fn can_draw(ctx: &egui::Context, emoji: &str) -> bool {
+    let font = egui::FontId::new(14.0, emoji_family());
+    ctx.fonts_mut(|f| {
+        emoji
+            .chars()
+            .filter(|c| *c != '\u{FE0F}')
+            .all(|c| f.has_glyph(&font, c))
+    })
 }
 
 /// One inline span of minimal markdown.
@@ -1753,7 +1874,8 @@ pub struct ConclaveGUI {
 }
 
 impl ConclaveGUI {
-    pub fn new(client: Client, _cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(client: Client, cc: &eframe::CreationContext<'_>) -> Self {
+        install_fonts(&cc.egui_ctx);
         let default_display_name = client.default_display_name();
         let default_share_timezone = client.default_share_timezone();
         let avatar = client.avatar();
@@ -3656,7 +3778,7 @@ impl ConclaveGUI {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            ui.menu_button("Open ⏷", |ui| {
+                                            ui.menu_button(format!("Open {}", glyph::MENU), |ui| {
                                                 if ui.button("User list").clicked() {
                                                     open_users.open(key.clone());
                                                     repaint_root = true;
@@ -4248,7 +4370,9 @@ impl ConclaveGUI {
                     if let Some((message, click)) = react {
                         let conn = conn.clone();
                         tokio::spawn(async move {
-                            let _ = conn.chat_react(room, message, click.emoji, click.add).await;
+                            let _ = conn
+                                .chat_react(room, message, &click.emoji, click.add)
+                                .await;
                         });
                     }
                     if let Some(topic) = set_topic {
@@ -4489,7 +4613,7 @@ impl ConclaveGUI {
                         let conn = conn.clone();
                         tokio::spawn(async move {
                             let _ = conn
-                                .react_dm(peer, message, from_me, click.emoji, click.add)
+                                .react_dm(peer, message, from_me, &click.emoji, click.add)
                                 .await;
                         });
                     }
@@ -5029,7 +5153,7 @@ impl ConclaveGUI {
                             ForumAction::React(pid, click) => {
                                 let c = conn.clone();
                                 tokio::spawn(async move {
-                                    let _ = c.react_forum_post(pid, click.emoji, click.add).await;
+                                    let _ = c.react_forum_post(pid, &click.emoji, click.add).await;
                                 });
                             }
                         }
@@ -5400,6 +5524,7 @@ mod tests {
     /// A context with the fonts built, ready to be asked what it can draw.
     fn font_context() -> egui::Context {
         let ctx = egui::Context::default();
+        install_fonts(&ctx);
         // One frame builds the fonts. Its texture deltas belong to a painter
         // there is none of here, and are dropped deliberately rather than left
         // to panic on drop.
@@ -5408,24 +5533,81 @@ mod tests {
         ctx
     }
 
-    /// Every emoji the picker offers has a glyph in the fonts the client
-    /// ships with. An emoji without one draws as an empty box, so the palette
-    /// is only as good as the font behind it.
+    /// The glyphs `text` lays out as in `family`, and whether each is drawn
+    /// in colour. Spaces draw nothing, so are not among them.
+    fn laid_out_in(ctx: &egui::Context, family: egui::FontFamily, text: &str) -> Vec<bool> {
+        let font = egui::FontId::new(14.0, family);
+        let galley =
+            ctx.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font, egui::Color32::WHITE));
+        galley
+            .rows
+            .iter()
+            .flat_map(|row| row.glyphs.iter())
+            // The rest of a sequence rides along as empty placeholders behind
+            // the glyph that draws all of it.
+            .filter(|g| !g.uv_rect.is_nothing())
+            .map(|g| g.is_color)
+            .collect()
+    }
+
+    /// The glyphs `text` lays out as in running text.
+    fn laid_out(ctx: &egui::Context, text: &str) -> Vec<bool> {
+        laid_out_in(ctx, egui::FontFamily::Proportional, text)
+    }
+
+    /// The glyphs `text` lays out as where only an emoji is drawn.
+    fn laid_out_alone(ctx: &egui::Context, text: &str) -> Vec<bool> {
+        laid_out_in(ctx, emoji_family(), text)
+    }
+
+    /// Every emoji the picker offers, in every skin tone it offers them in,
+    /// comes out as a single colour picture. An emoji the font lacks draws as
+    /// an empty box, and a sequence it lacks falls apart into its pieces — a
+    /// thumb next to a swatch of brown — so the palette is only as good as the
+    /// font behind it.
     #[test]
-    fn the_palette_renders_in_the_bundled_fonts() {
+    fn the_palette_renders_in_colour() {
         let ctx = font_context();
-        let font = egui::FontId::proportional(14.0);
-        for (emoji, _) in REACTION_PALETTE {
-            assert!(
-                ctx.fonts_mut(|f| f.has_glyph(&font, *emoji)),
-                "no glyph for {emoji} in the bundled fonts"
-            );
+        for entry in REACTION_PALETTE {
+            let tones = std::iter::once(None).chain(SKIN_TONES.iter().map(|(t, _)| Some(*t)));
+            for tone in tones {
+                let emoji = entry.in_tone(tone);
+                assert!(can_draw(&ctx, &emoji), "no glyph for {emoji}");
+                assert_eq!(
+                    laid_out_alone(&ctx, &emoji),
+                    vec![true],
+                    "{emoji} is not one colour glyph"
+                );
+            }
         }
     }
 
-    /// And so does every glyph the interface itself draws. egui's bundled
-    /// emoji font covers far less than its name suggests, and a glyph it
-    /// cannot draw becomes an empty box with nothing said about it.
+    /// The emoji people actually type come out whole and in colour, sequences
+    /// included, while the text around them stays text.
+    #[test]
+    fn emoji_in_text_render_in_colour() {
+        let ctx = font_context();
+        for emoji in ["❤️", "🇳🇿", "👩🏽‍💻", "🏳️‍🌈", "👨‍👩‍👧‍👦"]
+        {
+            assert_eq!(
+                laid_out(&ctx, emoji),
+                vec![true],
+                "{emoji} is not one colour glyph"
+            );
+            assert_eq!(laid_out_alone(&ctx, emoji), vec![true], "{emoji} alone");
+        }
+        // A keycap starts with a digit, and the digit decides the font: in
+        // running text that is the text font. Drawn alone, as a reaction is,
+        // it is the picture.
+        assert_eq!(laid_out_alone(&ctx, "1️⃣"), vec![true]);
+        // Digits, `#` and `*` are in the emoji font for the sake of keycaps,
+        // but on their own they are text and must be drawn as text.
+        assert!(laid_out(&ctx, "a1#*").iter().all(|colour| !colour));
+        assert_eq!(laid_out(&ctx, "ok 👍"), vec![false, false, true]);
+    }
+
+    /// And so does every glyph the interface itself draws. A glyph no
+    /// installed font has becomes an empty box with nothing said about it.
     #[test]
     fn ui_glyphs_render() {
         let ctx = font_context();
@@ -5437,6 +5619,7 @@ mod tests {
             glyph::PLUS,
             glyph::BIN,
             glyph::POLL,
+            glyph::MENU,
             LOCKED_SERVER_PREFIX.trim(),
             RESTRICTED_PREFIX.trim(),
         ] {
@@ -5453,12 +5636,12 @@ mod tests {
     fn a_reaction_row_draws_and_reports_nothing_unclicked() {
         let tallies = vec![
             ReactionTally {
-                emoji: '★',
+                emoji: "👍".to_string(),
                 who: vec!["Ada".to_string()],
                 mine: true,
             },
             ReactionTally {
-                emoji: '♡',
+                emoji: "🇳🇿".to_string(),
                 who: vec!["Grace".to_string()],
                 mine: false,
             },
@@ -5485,7 +5668,7 @@ mod tests {
     #[test]
     fn the_chat_reaction_row_is_smaller_than_a_post_s() {
         let tallies = vec![ReactionTally {
-            emoji: '★',
+            emoji: "👍".to_string(),
             who: vec!["Ada".to_string()],
             mine: true,
         }];

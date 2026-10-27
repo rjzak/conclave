@@ -838,6 +838,7 @@ dependencies = [
  "domain",
  "eframe",
  "egui",
+ "epaint",
  "hex",
  "image",
  "mdns-sd",

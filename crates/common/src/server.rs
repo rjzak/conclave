@@ -215,7 +215,7 @@ pub enum ChatEvent {
         /// The message reacted to
         message: u32,
         /// The emoji
-        emoji: char,
+        emoji: String,
         /// Connection id of the person reacting, so each client can recognise
         /// its own reaction and count one person once
         user: u16,
@@ -444,7 +444,7 @@ pub enum ServerMessagesEncrypted {
         /// The message to react to
         message: u32,
         /// The emoji
-        emoji: char,
+        emoji: String,
         /// Whether to add the reaction or take it back
         add: bool,
     },
@@ -502,7 +502,7 @@ pub enum ServerMessagesEncrypted {
         /// The post to react to
         post: u32,
         /// The emoji
-        emoji: char,
+        emoji: String,
         /// Whether to add the reaction or take it back
         add: bool,
     },

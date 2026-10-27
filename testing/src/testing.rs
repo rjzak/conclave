@@ -1036,14 +1036,14 @@ async fn reactions_tally_emoji_and_name_who_left_them() {
             .unwrap_or_default()
     };
 
-    grace.react_forum_post(post, '★', true).await.unwrap();
+    grace.react_forum_post(post, "👍", true).await.unwrap();
     let seen = eventually("Grace's reaction", || {
         let seen = reactions(&ada);
         (!seen.is_empty()).then_some(seen)
     })
     .await;
     assert_eq!(seen.len(), 1);
-    assert_eq!(seen[0].emoji, '★');
+    assert_eq!(seen[0].emoji, "👍");
     assert_eq!(seen[0].who, vec!["Grace".to_string()]);
     // Grace's reaction is Grace's, and it is not Ada's.
     assert!(!seen[0].mine);
@@ -1056,16 +1056,16 @@ async fn reactions_tally_emoji_and_name_who_left_them() {
     );
 
     // A second person joining the same emoji is a second name on it.
-    ada.react_forum_post(post, '★', true).await.unwrap();
+    ada.react_forum_post(post, "👍", true).await.unwrap();
     let both = eventually("both reactions", || {
         reactions(&ada).into_iter().find(|r| r.count() == 2)
     })
     .await;
     assert!(both.mine);
-    assert_eq!(both.who_line(), "★ Grace and you");
+    assert_eq!(both.who_line(), "👍 Grace and you");
 
     // Taking one back leaves the other standing.
-    grace.react_forum_post(post, '★', false).await.unwrap();
+    grace.react_forum_post(post, "👍", false).await.unwrap();
     let left = eventually("Grace's reaction withdrawn", || {
         reactions(&ada).into_iter().find(|r| r.count() == 1)
     })
@@ -1073,27 +1073,54 @@ async fn reactions_tally_emoji_and_name_who_left_them() {
     // All that is left is Ada's own, so there is nobody else to name.
     assert!(left.mine);
     assert!(left.who.is_empty());
-    assert_eq!(left.who_line(), "★ you");
+    assert_eq!(left.who_line(), "👍 you");
 
     // The picker's palette is a shortcut, not the limit: an emoji that is not
     // on it is still a reaction, on the wire and in the database.
     assert!(
         !conclave_common::reaction::REACTION_PALETTE
             .iter()
-            .any(|(emoji, _)| *emoji == '👍'),
+            .any(|entry| entry.emoji == "👩🏽‍💻"),
         "picked for this test because the palette does not offer it"
     );
-    grace.react_forum_post(post, '👍', true).await.unwrap();
+    // A sequence, too: a person, a skin tone and a laptop joined into one.
+    grace.react_forum_post(post, "👩🏽‍💻", true).await.unwrap();
     let off_palette = eventually("an emoji from outside the palette", || {
-        reactions(&ada).into_iter().find(|r| r.emoji == '👍')
+        reactions(&ada).into_iter().find(|r| r.emoji == "👩🏽‍💻")
     })
     .await;
     assert_eq!(off_palette.who, vec!["Grace".to_string()]);
-    grace.react_forum_post(post, '👍', false).await.unwrap();
+    grace.react_forum_post(post, "👩🏽‍💻", false).await.unwrap();
     eventually("it coming back off", || {
         reactions(&ada)
             .into_iter()
-            .all(|r| r.emoji != '👍')
+            .all(|r| r.emoji != "👩🏽‍💻")
+            .then_some(())
+    })
+    .await;
+
+    // ❤️ and ❤ are the same emoji typed on different keyboards, and the same
+    // reaction: the second joins the first rather than standing beside it.
+    grace
+        .react_forum_post(post, "❤\u{FE0F}", true)
+        .await
+        .unwrap();
+    ada.react_forum_post(post, "❤", true).await.unwrap();
+    let hearts = eventually("one heart with two names on it", || {
+        reactions(&ada)
+            .into_iter()
+            .find(|r| r.emoji == "❤" && r.count() == 2)
+    })
+    .await;
+    assert!(hearts.mine);
+    grace.react_forum_post(post, "❤", false).await.unwrap();
+    ada.react_forum_post(post, "❤\u{FE0F}", false)
+        .await
+        .unwrap();
+    eventually("the hearts coming back off", || {
+        reactions(&ada)
+            .into_iter()
+            .all(|r| r.emoji != "❤")
             .then_some(())
     })
     .await;
@@ -1101,7 +1128,7 @@ async fn reactions_tally_emoji_and_name_who_left_them() {
     // A letter is not a reaction, and the server is not asked to take a
     // client's word for it: the client refuses before sending, and nothing
     // lands if it does.
-    assert!(grace.react_forum_post(post, 'x', true).await.is_err());
+    assert!(grace.react_forum_post(post, "x", true).await.is_err());
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert_eq!(reactions(&ada).len(), 1);
 
@@ -1127,7 +1154,7 @@ async fn reactions_tally_emoji_and_name_who_left_them() {
     })
     .await;
 
-    grace.chat_react(0, message, '♡', true).await.unwrap();
+    grace.chat_react(0, message, "🎉", true).await.unwrap();
 
     // Both ends count it, and each recognises whose it is. A client does not
     // count its own reaction until the server echoes it back to the room, so
@@ -1148,7 +1175,7 @@ async fn reactions_tally_emoji_and_name_who_left_them() {
         tallies(&ada).into_iter().next()
     })
     .await;
-    assert_eq!(on_adas_screen.emoji, '♡');
+    assert_eq!(on_adas_screen.emoji, "🎉");
     assert_eq!(on_adas_screen.who, vec!["Grace".to_string()]);
     assert!(!on_adas_screen.mine);
 
@@ -1158,18 +1185,18 @@ async fn reactions_tally_emoji_and_name_who_left_them() {
         tallies(&grace).into_iter().find(|r| r.mine)
     })
     .await;
-    assert_eq!(on_graces_screen.emoji, '♡');
+    assert_eq!(on_graces_screen.emoji, "🎉");
     assert_eq!(on_graces_screen.count(), 1);
 
     // The same reaction twice is still one reaction.
-    grace.chat_react(0, message, '♡', true).await.unwrap();
+    grace.chat_react(0, message, "🎉", true).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     let counted = tallies(&ada);
     assert_eq!(counted.len(), 1, "one emoji, not two: {counted:?}");
     assert_eq!(counted[0].count(), 1, "one person, counted once");
 
     // And taking it back leaves nothing behind.
-    grace.chat_react(0, message, '♡', false).await.unwrap();
+    grace.chat_react(0, message, "🎉", false).await.unwrap();
     eventually("the reaction being taken back", || {
         let me = ada.my_connection_id();
         ada.chat_room(0)?
@@ -1286,14 +1313,14 @@ async fn a_shared_display_name_does_not_share_reactions() {
     let star = |conn: &conclave_client::conn::ConclaveConnection| {
         conn.forum_posts(thread)
             .and_then(|posts| posts.into_iter().find(|p| p.id == post))
-            .and_then(|p| p.reactions.into_iter().find(|r| r.emoji == '★'))
+            .and_then(|p| p.reactions.into_iter().find(|r| r.emoji == "👍"))
     };
 
-    first.react_forum_post(post, '★', true).await.unwrap();
+    first.react_forum_post(post, "👍", true).await.unwrap();
     eventually("the first Ada's reaction", || star(&first)).await;
 
     // The second Ada asks for it to come off. It is not hers to take back.
-    second.react_forum_post(post, '★', false).await.unwrap();
+    second.react_forum_post(post, "👍", false).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     let mine = star(&first).expect("the first Ada's reaction still stands");
     assert_eq!(mine.count(), 1);
@@ -1306,13 +1333,13 @@ async fn a_shared_display_name_does_not_share_reactions() {
     assert_eq!(theirs.who, vec!["Ada".to_string()]);
 
     // Both reacting is two reactions from two people with one name.
-    second.react_forum_post(post, '★', true).await.unwrap();
+    second.react_forum_post(post, "👍", true).await.unwrap();
     let both = eventually("both Adas", || star(&first).filter(|r| r.count() == 2)).await;
     assert_eq!(both.who, vec!["Ada".to_string()]);
     assert!(both.mine);
 
     // The second Ada takes back her own, and only her own.
-    second.react_forum_post(post, '★', false).await.unwrap();
+    second.react_forum_post(post, "👍", false).await.unwrap();
     let left = eventually("one Ada left", || star(&first).filter(|r| r.count() == 1)).await;
     assert!(left.mine, "the reaction left standing is the first Ada's");
 
@@ -1342,15 +1369,15 @@ async fn a_shared_display_name_does_not_share_reactions() {
             .lines
             .iter()
             .flat_map(|line| line.reaction_tallies(me))
-            .find(|r| r.emoji == '★')
+            .find(|r| r.emoji == "👍")
     };
 
-    first.chat_react(0, message, '★', true).await.unwrap();
+    first.chat_react(0, message, "👍", true).await.unwrap();
     eventually("the reaction arriving", || chat_star(&second)).await;
 
     // Same again: the other Ada cannot take back a reaction she did not make,
     // because a reaction is the connection's, not the name's.
-    second.chat_react(0, message, '★', false).await.unwrap();
+    second.chat_react(0, message, "👍", false).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     // The first Ada counts her own reaction once the server echoes it back to
     // the room, which is a separate delivery from the one the second Ada got.
@@ -1692,7 +1719,7 @@ async fn direct_message_reactions_stay_inside_the_encryption() {
 
     // Bob reacts to her message. From his side it is not his own, so the
     // reference he sends says so, and she has to read it the other way round.
-    bob.react_dm(alice_id, id, false, '★', true).await.unwrap();
+    bob.react_dm(alice_id, id, false, "👍", true).await.unwrap();
 
     let hers = eventually("the reaction reaching alice", || {
         said(&alice, bob_id)
@@ -1701,28 +1728,30 @@ async fn direct_message_reactions_stay_inside_the_encryption() {
     })
     .await;
     assert_eq!(hers.len(), 1);
-    assert_eq!(hers[0].emoji, '★');
+    assert_eq!(hers[0].emoji, "👍");
     assert_eq!(hers[0].count(), 1);
     assert!(!hers[0].mine, "bob's reaction is not alice's");
-    assert_eq!(hers[0].who_line(), "★ bob");
+    assert_eq!(hers[0].who_line(), "👍 bob");
 
     // And Bob sees his own as his.
     let his = said(&bob, alice_id).unwrap().reaction_tallies("alice");
     assert!(his[0].mine);
-    assert_eq!(his[0].who_line(), "★ you");
+    assert_eq!(his[0].who_line(), "👍 you");
 
     // Alice joins the same emoji: two people, one reaction each.
-    alice.react_dm(bob_id, id, true, '★', true).await.unwrap();
+    alice.react_dm(bob_id, id, true, "👍", true).await.unwrap();
     let both = eventually("both reactions", || {
         said(&bob, alice_id)
             .map(|m| m.reaction_tallies("alice"))
             .filter(|t| t.first().is_some_and(|r| r.count() == 2))
     })
     .await;
-    assert_eq!(both[0].who_line(), "★ alice and you");
+    assert_eq!(both[0].who_line(), "👍 alice and you");
 
     // Bob takes his back; hers stands.
-    bob.react_dm(alice_id, id, false, '★', false).await.unwrap();
+    bob.react_dm(alice_id, id, false, "👍", false)
+        .await
+        .unwrap();
     let left = eventually("bob's reaction withdrawn", || {
         said(&alice, bob_id)
             .map(|m| m.reaction_tallies("bob"))
@@ -1742,7 +1771,7 @@ async fn direct_message_reactions_stay_inside_the_encryption() {
     .await;
     let bob_msg = bobs_own.id.expect("numbered");
     alice
-        .react_dm(bob_id, bob_msg, false, '♡', true)
+        .react_dm(bob_id, bob_msg, false, "🎉", true)
         .await
         .unwrap();
     let on_his = eventually("her reaction to his message", || {
@@ -1753,16 +1782,16 @@ async fn direct_message_reactions_stay_inside_the_encryption() {
             .filter(|t| !t.is_empty())
     })
     .await;
-    assert_eq!(on_his[0].emoji, '♡');
+    assert_eq!(on_his[0].emoji, "🎉");
     assert!(!on_his[0].mine, "hers, on his message");
 
-    // Her ★ on the first message is untouched by any of that.
+    // Her 👍 on the first message is untouched by any of that.
     let first = said(&bob, alice_id).unwrap().reaction_tallies("alice");
     assert_eq!(first.len(), 1);
-    assert_eq!(first[0].emoji, '★');
+    assert_eq!(first[0].emoji, "👍");
 
     // A letter is not a reaction, and nothing is sent when it is refused.
-    assert!(bob.react_dm(alice_id, id, false, 'x', true).await.is_err());
+    assert!(bob.react_dm(alice_id, id, false, "x", true).await.is_err());
 
     server_process.abort();
 }

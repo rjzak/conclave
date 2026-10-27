@@ -22,7 +22,7 @@ use conclave_common::net::{
 };
 use conclave_common::poll::{NewPoll, Poll, PollOption, PollVote};
 use conclave_common::reaction::{
-    MAX_REACTIONS_PER_ITEM, ReactionTally, tally_reactions, validate_emoji,
+    MAX_REACTIONS_PER_ITEM, ReactionTally, normalize_emoji, tally_reactions,
 };
 use conclave_common::server::{
     AuthRequest, ChatEvent, ChatTopic, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser,
@@ -3637,7 +3637,7 @@ impl State {
         connection_id: u16,
         room: u16,
         message: u32,
-        emoji: char,
+        emoji: String,
         add: bool,
         user: &ConnectedUser,
     ) {
@@ -3647,9 +3647,12 @@ impl State {
             .await
             .get(&room)
             .is_some_and(|set| set.contains(&connection_id));
-        if !is_member || validate_emoji(emoji).is_err() {
+        if !is_member {
             return;
         }
+        let Ok(emoji) = normalize_emoji(&emoji) else {
+            return;
+        };
         self.broadcast_to_room(
             room,
             &ClientMessagesEncrypted::ChatActivity(ChatEvent::Reaction {
@@ -4132,11 +4135,11 @@ impl State {
                     })?
                     .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()?;
 
-                let mut by_post: HashMap<u32, Vec<(char, String, bool)>> = HashMap::new();
+                let mut by_post: HashMap<u32, Vec<(String, String, bool)>> = HashMap::new();
                 for (post, emoji, who, mine) in rows {
-                    // The column is text; a reaction is one character of it.
-                    // Anything else was not written by this server.
-                    if let Some(emoji) = one_emoji(&emoji) {
+                    // A cell that is not one emoji was not written by this
+                    // server.
+                    if let Some(emoji) = stored_emoji(&emoji) {
                         by_post.entry(post).or_default().push((emoji, who, mine));
                     }
                 }
@@ -4170,7 +4173,7 @@ impl State {
                     })?
                     .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()?;
                 Ok(tally_reactions(rows.into_iter().filter_map(
-                    |(emoji, who, mine)| Some((one_emoji(&emoji)?, who, mine)),
+                    |(emoji, who, mine)| Some((stored_emoji(&emoji)?, who, mine)),
                 )))
             })
             .await
@@ -4192,12 +4195,11 @@ impl State {
     async fn forum_react(
         &self,
         post: u32,
-        emoji: char,
+        emoji: String,
         add: bool,
         user: &ConnectedUser,
     ) -> Result<u32> {
-        validate_emoji(emoji)?;
-        let emoji = emoji.to_string();
+        let emoji = normalize_emoji(&emoji)?;
 
         let thread: u32 = self
             .sqlite
@@ -5396,14 +5398,12 @@ impl Voter {
     }
 }
 
-/// The single emoji a `FORUM_POST_REACTION.emoji` cell holds, or `None` if the
-/// cell holds anything else. The column is text so the table reads plainly in a
-/// database browser; a reaction is one character of it, and a row that is not
-/// one was not written by this server.
-fn one_emoji(cell: &str) -> Option<char> {
-    let mut chars = cell.chars();
-    let emoji = chars.next()?;
-    chars.next().is_none().then_some(emoji)
+/// The emoji a `FORUM_POST_REACTION.emoji` cell holds, or `None` if the cell
+/// holds anything other than one emoji. The column is text so the table reads
+/// plainly in a database browser, and a row that is not one emoji was not
+/// written by this server.
+fn stored_emoji(cell: &str) -> Option<String> {
+    normalize_emoji(cell).ok()
 }
 
 /// Write a poll and its options for a thread being created. Runs inside the

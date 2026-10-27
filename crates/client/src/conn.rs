@@ -7,7 +7,7 @@ use conclave_common::forum::{
 };
 use conclave_common::net::{DefaultEncryptedStream, EncryptedWrite, SigningKey, VerifyingKey};
 use conclave_common::poll::{NewPoll, Poll, PollVote};
-use conclave_common::reaction::{ReactionTally, tally_reactions, validate_emoji};
+use conclave_common::reaction::{ReactionTally, normalize_emoji, tally_reactions};
 use conclave_common::server::{
     ChatEvent, ChatTopic, ChatroomInfo, ClientMessagesEncrypted, ConnectedUser, ServerInformation,
     ServerMessagesEncrypted, UserDetails,
@@ -50,7 +50,7 @@ const SEND_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10)
 #[derive(Clone, Debug)]
 pub struct ChatReaction {
     /// The emoji.
-    pub emoji: char,
+    pub emoji: String,
 
     /// Connection id of the person who reacted.
     pub user: u16,
@@ -94,7 +94,7 @@ impl ChatLine {
             Self::Message { reactions, .. } => tally_reactions(
                 reactions
                     .iter()
-                    .map(|r| (r.emoji, r.display_name.clone(), Some(r.user) == me)),
+                    .map(|r| (r.emoji.clone(), r.display_name.clone(), Some(r.user) == me)),
             ),
         }
     }
@@ -123,7 +123,7 @@ pub enum DmBody {
 #[derive(Clone, Debug)]
 pub struct DmReaction {
     /// The emoji.
-    pub emoji: char,
+    pub emoji: String,
 
     /// Whether this side put it there.
     pub mine: bool,
@@ -181,7 +181,7 @@ impl DmMessage {
         tally_reactions(
             self.reactions
                 .iter()
-                .map(|r| (r.emoji, peer.to_string(), r.mine)),
+                .map(|r| (r.emoji.clone(), peer.to_string(), r.mine)),
         )
     }
 }
@@ -1130,7 +1130,7 @@ impl ConclaveConnection {
         peer: u16,
         id: u32,
         from_me: bool,
-        emoji: char,
+        emoji: String,
         add: bool,
         mine: bool,
     ) {
@@ -1253,22 +1253,22 @@ impl ConclaveConnection {
     ///
     /// # Errors
     ///
-    /// Fails if `emoji` is not an emoji, if `peer` has left, leaving no key to
+    /// Fails if `emoji` is not one emoji, if `peer` has left, leaving no key to
     /// encrypt to, or on a network error.
     pub async fn react_dm(
         &self,
         peer: u16,
         message: u32,
         from_me: bool,
-        emoji: char,
+        emoji: &str,
         add: bool,
     ) -> Result<()> {
-        validate_emoji(emoji)?;
+        let emoji = normalize_emoji(emoji)?;
         let shared = self.peer_shared_key(peer).ok_or_else(|| {
             anyhow!("That user is no longer connected, so the reaction cannot be encrypted to them")
         })?;
         // Shown straight away, as with a message.
-        self.apply_dm_reaction(peer, message, from_me, emoji, add, true);
+        self.apply_dm_reaction(peer, message, from_me, emoji.clone(), add, true);
         let payload = DmPayload::Reaction {
             // Written from this side's point of view; the other side flips it.
             target: dm::DmMessageRef {
@@ -2102,10 +2102,10 @@ impl ConclaveConnection {
     ///
     /// # Errors
     ///
-    /// Returns an error if `emoji` is not an emoji. Network errors are
+    /// Returns an error if `emoji` is not one emoji. Network errors are
     /// possible.
-    pub async fn chat_react(&self, room: u16, message: u32, emoji: char, add: bool) -> Result<()> {
-        validate_emoji(emoji)?;
+    pub async fn chat_react(&self, room: u16, message: u32, emoji: &str, add: bool) -> Result<()> {
+        let emoji = normalize_emoji(emoji)?;
         self.send_request(
             &ServerMessagesEncrypted::ChatReact {
                 room,
@@ -2319,10 +2319,10 @@ impl ConclaveConnection {
     ///
     /// # Errors
     ///
-    /// Returns an error if `emoji` is not an emoji. Network errors are
+    /// Returns an error if `emoji` is not one emoji. Network errors are
     /// possible.
-    pub async fn react_forum_post(&self, post: u32, emoji: char, add: bool) -> Result<()> {
-        validate_emoji(emoji)?;
+    pub async fn react_forum_post(&self, post: u32, emoji: &str, add: bool) -> Result<()> {
+        let emoji = normalize_emoji(emoji)?;
         self.send_request(&ServerMessagesEncrypted::ForumReact { post, emoji, add }.to_vec())
             .await
     }
