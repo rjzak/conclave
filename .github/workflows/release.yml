@@ -53,21 +53,21 @@ jobs:
           mv target/release/conclave-server target/release/conclave-server-gui-linux-${{ matrix.platform.target }}
           mv target/release/conclave-client target/release/conclave-client-linux-${{ matrix.platform.target }}
       - name: Upload tracker
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conclave-tracker-gui-linux-${{ matrix.platform.target }}
           path: target/release/conclave-tracker-gui-linux-${{ matrix.platform.target }}
           if-no-files-found: error
           retention-days: 5
       - name: Upload server
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conclave-server-gui-linux-${{ matrix.platform.target }}
           path: target/release/conclave-server-gui-linux-${{ matrix.platform.target }}
           if-no-files-found: error
           retention-days: 5
       - name: Upload client
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conclave-client-linux-${{ matrix.platform.target }}
           path: target/release/conclave-client-linux-${{ matrix.platform.target }}
@@ -80,21 +80,21 @@ jobs:
           mv target/${{ matrix.platform.target }}-unknown-linux-musl/release/conclave-tracker target/${{ matrix.platform.target }}-unknown-linux-musl/release/conclave-tracker-linux-${{ matrix.platform.target }}
           mv target/${{ matrix.platform.target }}-unknown-linux-musl/release/conclave-server target/${{ matrix.platform.target }}-unknown-linux-musl/release/conclave-server-linux-${{ matrix.platform.target }}
       - name: Upload tracker
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conclave-tracker-linux-${{ matrix.platform.target }}
           path: target/${{ matrix.platform.target }}-unknown-linux-musl/release/conclave-tracker-linux-${{ matrix.platform.target }}
           if-no-files-found: error
           retention-days: 5
       - name: Upload server
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conclave-server-linux-${{ matrix.platform.target }}
           path: target/${{ matrix.platform.target }}-unknown-linux-musl/release/conclave-server-linux-${{ matrix.platform.target }}
           if-no-files-found: error
           retention-days: 5
       - name: Upload debs
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conclave-server-debian-${{ matrix.platform.target }}
           path: |
@@ -195,7 +195,7 @@ jobs:
           ditto -c -k --keepParent "target/macos/Conclave Tracker.app" conclave-tracker-macos-universal.zip
           ditto -c -k --keepParent "target/macos/Conclave Server.app" conclave-server-macos-universal.zip
       - name: Upload bundles
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conclave-macos
           path: conclave-*.zip
@@ -246,28 +246,28 @@ jobs:
             --for-notarization
           rcodesign_version: '0.29.0'
       - name: Upload tracker
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conclave-tracker-darwin-arm64
           path: target/release/conclave-tracker-darwin-arm64
           if-no-files-found: error
           retention-days: 5
       - name: Upload server
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conclave-server-darwin-arm64
           path: target/release/conclave-server-darwin-arm64
           if-no-files-found: error
           retention-days: 5
       - name: Upload tracker x86_64
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conclave-tracker-darwin-x86_64
           path: target/x86_64-apple-darwin/release/conclave-tracker-darwin-x86_64
           if-no-files-found: error
           retention-days: 5
       - name: Upload server x86_64
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conclave-server-darwin-x86_64
           path: target/x86_64-apple-darwin/release/conclave-server-darwin-x86_64
@@ -310,21 +310,21 @@ jobs:
           copy target/release/conclave-server.exe target/release/conclave-server-gui-${{ matrix.platform.target }}.exe
           copy target/release/conclave-client.exe target/release/conclave-client-${{ matrix.platform.target }}.exe
       - name: Upload conclave-tracker-gui-${{ matrix.platform.target }}.exe
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conclave-tracker-gui-${{ matrix.platform.target }}.exe
           path: target/release/conclave-tracker-gui-${{ matrix.platform.target }}.exe
           if-no-files-found: error
           retention-days: 5
       - name: Upload conclave-server-gui-${{ matrix.platform.target }}.exe
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conclave-server-gui-${{ matrix.platform.target }}.exe
           path: target/release/conclave-server-gui-${{ matrix.platform.target }}.exe
           if-no-files-found: error
           retention-days: 5
       - name: Upload conclave-client-${{ matrix.platform.target }}.exe
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conclave-client-${{ matrix.platform.target }}.exe
           path: target/release/conclave-client-${{ matrix.platform.target }}.exe
@@ -336,14 +336,14 @@ jobs:
           copy target/release/conclave-tracker.exe target/release/conclave-tracker-${{ matrix.platform.target }}.exe
           copy target/release/conclave-server.exe target/release/conclave-server-${{ matrix.platform.target }}.exe
       - name: Upload conclave-tracker-${{ matrix.platform.target }}.exe
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conclave-tracker-${{ matrix.platform.target }}.exe
           path: target/release/conclave-tracker-${{ matrix.platform.target }}.exe
           if-no-files-found: error
           retention-days: 5
       - name: Upload conclave-server-${{ matrix.platform.target }}.exe
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conclave-server-${{ matrix.platform.target }}.exe
           path: target/release/conclave-server-${{ matrix.platform.target }}.exe
