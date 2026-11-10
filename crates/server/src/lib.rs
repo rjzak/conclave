@@ -423,6 +423,7 @@ impl State {
     /// # Panics
     ///
     /// Panics if Multicast DNS is requested and fails to start
+    #[allow(clippy::too_many_lines)]
     pub fn new<P: AsRef<Path>>(
         name: String,
         description: String,
@@ -493,6 +494,11 @@ impl State {
             .journal_mode(JournalMode::Wal)
             .path(sqlite_path)
             .open_blocking()?;
+
+        sqlite.conn_blocking(|c| {
+            c.pragma_update(None, "foreign_keys", "ON")?;
+            c.pragma_update(None, "synchronous", "FULL")
+        })?;
 
         Ok((
             Self {
@@ -684,6 +690,11 @@ impl State {
             .journal_mode(JournalMode::Wal)
             .path(sqlite_path)
             .open_blocking()?;
+
+        sqlite.conn_blocking(|c| {
+            c.pragma_update(None, "foreign_keys", "ON")?;
+            c.pragma_update(None, "synchronous", "FULL")
+        })?;
 
         Ok(Self {
             name: Arc::new(std::sync::RwLock::new(name)),
