@@ -1576,16 +1576,22 @@ impl State {
         let root = self.share_directory.as_ref()?;
         // The filesystem holding the share is the disk whose mount point is the
         // deepest prefix of the share path.
-        let disks = sysinfo::Disks::new_with_refreshed_list();
-        let disk = disks
-            .list()
-            .iter()
-            .filter(|disk| root.starts_with(disk.mount_point()))
-            .max_by_key(|disk| disk.mount_point().as_os_str().len())?;
+        let (total_bytes, available_bytes) = if let Ok(disks) =
+            sysinfo::Disks::new_with_refreshed_list()
+            && let Some(disk) = disks
+                .iter()
+                .filter(|disk| root.starts_with(disk.mount_point()))
+                .max_by_key(|disk| disk.mount_point().as_os_str().len())
+        {
+            (disk.total_space(), disk.available_space())
+        } else {
+            (0, 0)
+        };
+
         Some(conclave_common::files::ShareInfo {
             path: root.display().to_string(),
-            total_bytes: disk.total_space(),
-            available_bytes: disk.available_space(),
+            total_bytes,
+            available_bytes,
         })
     }
 
@@ -4953,8 +4959,9 @@ impl State {
     fn mdns_service_info(&self) -> mdns_sd::Result<ServiceInfo> {
         use base64::Engine;
 
-        let host_name = if self.ip.is_unspecified() {
-            let networks = sysinfo::Networks::new_with_refreshed_list();
+        let host_name = if self.ip.is_unspecified()
+            && let Ok(networks) = sysinfo::Networks::new_with_refreshed_list()
+        {
             let mut found_ip = None;
             'outer: for (_, network) in &networks {
                 if network.total_packets_received() > 0 {
