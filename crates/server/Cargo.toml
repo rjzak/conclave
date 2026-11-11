@@ -27,7 +27,7 @@ chrono = { workspace = true, features = ["clock", "std"] }
 clap = { workspace = true, features = ["color", "derive", "help", "std", "string", "suggestions"] }
 dialoguer = { workspace = true, features = ["password"] }
 ed25519-dalek = { workspace = true, features = ["serde"] }
-eframe = { workspace = true, features = ["accesskit", "default_fonts", "wayland", "wgpu", "x11"], optional = true }
+eframe = { workspace = true, features = ["accesskit", "default_fonts", "system_fonts", "wayland", "wgpu", "x11"], optional = true }
 futures = { workspace = true, features = ["executor"] }
 hex = { workspace = true, features = ["alloc", "std"] }
 image = { workspace = true, features = ["png"], optional = true }

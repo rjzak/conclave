@@ -22,7 +22,7 @@ conclave-common = { workspace = true }
 anyhow = { workspace = true, features = ["std"] }
 clap = { workspace = true, features = ["color", "derive", "help", "std", "string", "suggestions"] }
 dashmap = { workspace = true, features = ["inline"] }
-eframe = { workspace = true, features = ["accesskit", "default_fonts", "wayland", "wgpu", "x11"], optional = true }
+eframe = { workspace = true, features = ["accesskit", "default_fonts", "system_fonts", "wayland", "wgpu", "x11"], optional = true }
 image = { workspace = true, features = ["png"], optional = true }
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive", "std"] }
