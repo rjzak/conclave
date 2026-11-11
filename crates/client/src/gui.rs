@@ -141,7 +141,7 @@ fn server_list_name(name: &str, anonymous_allowed: bool) -> String {
 /// server caps concurrent connections, and the bare count when it does not
 /// (`u16::MAX` is the advertisement's "no limit" sentinel).
 #[inline]
-fn server_list_users(connected: u32, max_users: u16) -> String {
+fn server_list_users(connected: u16, max_users: u16) -> String {
     if max_users == u16::MAX {
         connected.to_string()
     } else {

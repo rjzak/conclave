@@ -197,7 +197,7 @@ pub struct Advertise {
     pub anonymous: bool,
 
     /// Number of users currently connected to the server
-    pub users_connected: u32,
+    pub users_connected: u16,
 
     /// Maximum number of users allowed on the server
     pub max_users: u16,

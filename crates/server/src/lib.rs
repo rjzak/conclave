@@ -1800,7 +1800,7 @@ impl State {
             description: self.server_description(),
             version: VERSION.clone(),
             anonymous: self.allow_anonymous.load(Ordering::Relaxed),
-            users_connected: u32::try_from(self.connections.read().await.len()).unwrap_or_default(),
+            users_connected: u16::try_from(self.connections.read().await.len()).unwrap_or_default(),
             max_users: self.max_connections.load(Ordering::Relaxed),
             started: self.started,
             url: self.url.clone(),
