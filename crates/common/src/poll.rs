@@ -30,7 +30,7 @@
 //! admitting anonymous users to it.
 
 use anyhow::{Result, ensure};
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 
 /// Fewest options a poll may offer. A question with one answer is not a poll.
@@ -112,8 +112,8 @@ impl PollDuration {
 
     /// When a poll created at `from` would close.
     #[must_use]
-    pub fn closes_after(self, from: DateTime<Utc>) -> DateTime<Utc> {
-        from + Duration::seconds(i64::from(self.0))
+    pub fn closes_after(self, from: Timestamp) -> Timestamp {
+        from + SignedDuration::from_secs(i64::from(self.0))
     }
 }
 
@@ -229,7 +229,7 @@ pub struct Poll {
     pub multiple_choice: bool,
 
     /// When voting closes (UTC)
-    pub closes_at: DateTime<Utc>,
+    pub closes_at: Timestamp,
 
     /// Whether the creator let everyone see the tally before the close date
     pub public_results: bool,
@@ -245,7 +245,7 @@ pub struct Poll {
 impl Poll {
     /// Whether the poll is still taking votes as of `now`.
     #[must_use]
-    pub fn is_open(&self, now: DateTime<Utc>) -> bool {
+    pub fn is_open(&self, now: Timestamp) -> bool {
         now < self.closes_at
     }
 
@@ -264,7 +264,7 @@ impl Poll {
 
     /// Whether this viewer may still cast a ballot as of `now`.
     #[must_use]
-    pub fn can_vote(&self, now: DateTime<Utc>) -> bool {
+    pub fn can_vote(&self, now: Timestamp) -> bool {
         !self.voted && self.is_open(now)
     }
 }
@@ -346,14 +346,24 @@ mod tests {
                 },
             ],
             multiple_choice: false,
-            closes_at: Utc::now() + Duration::days(1),
+            closes_at: Timestamp::now() + SignedDuration::from_hours(24),
             public_results: false,
             total_voters: None,
             voted: true,
         };
         assert!(!withheld.results_visible());
         assert_eq!(withheld.total_votes(), None);
-        assert!(!withheld.can_vote(Utc::now()));
-        assert!(withheld.is_open(Utc::now()));
+        assert!(!withheld.can_vote(Timestamp::now()));
+        assert!(withheld.is_open(Timestamp::now()));
+    }
+
+    /// Timestamps cross the wire as UTC, whatever zone either end is in.
+    #[test]
+    fn timestamps_serialize_as_utc() {
+        let ts: Timestamp = "2024-03-05T01:07:08-05:00".parse().unwrap();
+        let bytes = postcard::to_allocvec(&ts).unwrap();
+        let text: String = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(text, "2024-03-05T06:07:08Z");
+        assert_eq!(postcard::from_bytes::<Timestamp>(&bytes).unwrap(), ts);
     }
 }

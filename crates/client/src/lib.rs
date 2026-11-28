@@ -678,7 +678,7 @@ impl Client {
         // Share our timezone as whole hours relative to GMT so peers can compute the
         // difference; keep a copy so the GUI shows offsets relative to us.
         let own_timezone: Option<i16> = share_time.then(|| {
-            let seconds = chrono::Local::now().offset().local_minus_utc();
+            let seconds = jiff::ZonedDateTime::now().offset().seconds();
             // Round to the nearest hour (halves away from zero).
             let hours = (seconds + if seconds >= 0 { 1800 } else { -1800 }) / 3600;
             i16::try_from(hours).unwrap_or(0)

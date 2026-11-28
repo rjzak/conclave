@@ -85,7 +85,7 @@ pub fn admin_ui(ui: &mut egui::Ui, conn: &ConclaveConnection, key: &str) {
     // than reusing the previous session's stale flag.
     let loaded_id = egui::Id::unique(format!(
         "admin_loaded:{key}:{}",
-        conn.connection_time.timestamp_millis()
+        conn.connection_time.as_millisecond()
     ));
     if !ui.data(|d| d.get_temp::<bool>(loaded_id).unwrap_or(false)) {
         ui.data_mut(|d| d.insert_temp(loaded_id, true));

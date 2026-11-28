@@ -19,7 +19,6 @@ anyhow = { workspace = true, features = ["std"] }
 arboard = { workspace = true, features = ["image-data", "wayland-data-control"] }
 base64 = { workspace = true, features = ["alloc"] }
 clap = { workspace = true, features = ["color", "derive", "help", "std", "string", "suggestions"] }
-chrono = { workspace = true, features = ["clock", "serde", "std"] }
 dashmap = { workspace = true, features = ["inline"] }
 domain = { workspace = true, features = ["resolv"] }
 eframe = { workspace = true, features = ["accesskit", "default_fonts", "serde", "system_fonts", "wayland", "wgpu", "x11"] }
@@ -27,6 +26,7 @@ egui = { workspace = true, features = ["default_fonts"] }
 epaint = { workspace = true, features = ["color_fonts"] }
 hex = { workspace = true, features = ["alloc"] }
 image = { workspace = true, features = ["jpeg", "png"] }
+jiff = { workspace = true, features = ["serde", "std"] }
 mdns-sd = { workspace = true }
 rfd = { workspace = true, features = ["xdg-portal", "wayland"] }
 semver = { workspace = true }

@@ -21,8 +21,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
-use chrono::Utc;
 use eframe::{Frame, egui};
+use jiff::tz::TimeZone;
+use jiff::{SignedDuration, Timestamp, ZonedDateTime};
 use sha2::{Digest, Sha256};
 use tracing::{error, info};
 
@@ -108,15 +109,18 @@ fn do_start_discovery(
     });
 }
 
-fn format_uptime(d: chrono::Duration) -> String {
-    let d = if d.num_seconds() < 0 {
-        chrono::Duration::zero()
-    } else {
-        d
-    };
-    let hours = d.num_hours();
-    let mins = d.num_minutes() % 60;
-    let secs = d.num_seconds() % 60;
+/// A UTC timestamp from the server, in the user's local time zone for display.
+/// Timestamps stay UTC everywhere else (wire and database); only the GUI
+/// converts, at the last moment.
+fn local_time(ts: Timestamp) -> ZonedDateTime {
+    ts.to_zoned_datetime(TimeZone::system())
+}
+
+fn format_uptime(d: SignedDuration) -> String {
+    let secs = d.as_secs().max(0);
+    let hours = secs / 3600;
+    let mins = (secs / 60) % 60;
+    let secs = secs % 60;
     if hours > 0 {
         format!("{hours}h {mins}m")
     } else if mins > 0 {
@@ -326,7 +330,7 @@ fn gating_for(topics: &[conclave_common::forum::ForumTopic], topic: u32) -> &[Gr
 /// Whether a user counts as idle (inactive for longer than the timeout), in
 /// which case their name is shown dulled.
 #[inline]
-fn is_idle(idle: chrono::Duration) -> bool {
+fn is_idle(idle: SignedDuration) -> bool {
     idle >= IDLE_TIMEOUT_MINUTES
 }
 
@@ -1388,9 +1392,13 @@ fn render_forum_posts(
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(&post.author_name).strong());
                 ui.label(
-                    egui::RichText::new(post.created_at.format("%Y-%m-%d %H:%M").to_string())
-                        .weak()
-                        .monospace(),
+                    egui::RichText::new(
+                        local_time(post.created_at)
+                            .strftime("%Y-%m-%d %H:%M")
+                            .to_string(),
+                    )
+                    .weak()
+                    .monospace(),
                 );
                 if let Some(signature) = &post.signature {
                     let valid = signature.verify(&post.body);
@@ -1697,7 +1705,7 @@ fn poll_tally(ui: &mut egui::Ui, poll: &Poll) {
 /// Draw a thread's poll: the ballot while this user may still vote, the tally
 /// once they may see it, and otherwise a note saying when they will.
 fn render_poll(ui: &mut egui::Ui, poll: &Poll, picked: &mut Vec<u32>, vote: &mut bool) {
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     ui.group(|ui| {
         ui.horizontal(|ui| {
@@ -1725,7 +1733,7 @@ fn render_poll(ui: &mut egui::Ui, poll: &Poll, picked: &mut Vec<u32>, vote: &mut
         }
 
         ui.horizontal(|ui| {
-            let closes = poll.closes_at.format("%Y-%m-%d %H:%M UTC");
+            let closes = local_time(poll.closes_at).strftime("%Y-%m-%d %H:%M %Z");
             ui.label(
                 egui::RichText::new(if poll.is_open(now) {
                     format!("Closes {closes}")
@@ -4353,7 +4361,7 @@ impl ConclaveGUI {
                                                     );
                                                     ui.label(
                                                         egui::RichText::new(
-                                                            time.format("%H:%M:%S").to_string(),
+                                                            time.strftime("%H:%M:%S").to_string(),
                                                         )
                                                         .weak()
                                                         .monospace(),
@@ -4566,7 +4574,7 @@ impl ConclaveGUI {
                                         ui.horizontal_wrapped(|ui| {
                                             ui.label(
                                                 egui::RichText::new(
-                                                    msg.time.format("%H:%M:%S").to_string(),
+                                                    msg.time.strftime("%H:%M:%S").to_string(),
                                                 )
                                                 .weak()
                                                 .monospace(),
@@ -5047,7 +5055,8 @@ impl ConclaveGUI {
                                                         } else {
                                                             "ies"
                                                         },
-                                                        th.last_activity.format("%Y-%m-%d %H:%M")
+                                                        local_time(th.last_activity)
+                                                            .strftime("%Y-%m-%d %H:%M")
                                                     ))
                                                     .weak()
                                                     .small(),
@@ -5572,7 +5581,7 @@ mod tests {
                 },
             ],
             multiple_choice,
-            closes_at: Utc::now() + chrono::Duration::days(2),
+            closes_at: Timestamp::now() + SignedDuration::from_hours(48),
             public_results: votes.is_some(),
             total_voters: votes.map(|_| 3),
             voted: has_voted,

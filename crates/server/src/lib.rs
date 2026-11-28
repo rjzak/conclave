@@ -8,7 +8,9 @@
 #![forbid(unsafe_code)]
 
 mod files;
+mod sqltime;
 
+use crate::sqltime::DbTimestamp;
 use conclave_common::admin::server::{
     AdminForumTopic, AdminUser, Chatroom, ClientAdminMessagesEncrypted, CreateGroup, Group,
     ServerAdminMessagesEncrypted, is_reserved_red,
@@ -46,8 +48,9 @@ use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use async_sqlite::rusqlite::fallible_iterator::FallibleIterator;
 use async_sqlite::rusqlite::{Batch, Connection, OptionalExtension, params};
 use async_sqlite::{Client, ClientBuilder, JournalMode};
-use chrono::{DateTime, Duration, Local, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use jiff::{SignedDuration, Timestamp};
+
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -225,7 +228,7 @@ struct ClientConnection {
     addr: Arc<SocketAddr>,
 
     /// When the connection was established, for computing its duration.
-    connected_at: DateTime<Utc>,
+    connected_at: Timestamp,
 
     /// Unix timestamp (seconds) of the user's last activity, for computing idle
     /// time. Shared so the per-client task can update it as messages arrive.
@@ -288,7 +291,7 @@ pub struct State {
     port: u16,
 
     /// When the server started
-    started: DateTime<Utc>,
+    started: Timestamp,
 
     /// Public key for verification
     public_key: VerifyingKey,
@@ -507,7 +510,7 @@ impl State {
                 url,
                 ip,
                 port,
-                started: Local::now().to_utc(),
+                started: Timestamp::now(),
                 public_key,
                 private_key,
                 sqlite,
@@ -702,7 +705,7 @@ impl State {
             url,
             ip,
             port,
-            started: Local::now().to_utc(),
+            started: Timestamp::now(),
             public_key,
             private_key,
             sqlite,
@@ -836,8 +839,8 @@ impl State {
     /// Returns duration since the server started
     #[inline]
     #[must_use]
-    pub fn since(&self) -> Duration {
-        Local::now().to_utc() - self.started
+    pub fn since(&self) -> SignedDuration {
+        Timestamp::now() - self.started
     }
 
     /// Reset the admin password
@@ -1026,7 +1029,7 @@ impl State {
                             row.get::<_, String>(1)?,
                             row.get::<_, bool>(2)?,
                             row.get::<_, bool>(3)?,
-                            row.get::<_, DateTime<Utc>>(4)?,
+                            row.get::<_, DbTimestamp>(4)?.0,
                         ))
                     })?
                     .collect::<async_sqlite::rusqlite::Result<Vec<_>>>()?;
@@ -2154,9 +2157,9 @@ impl State {
                                                 .next_connection_id
                                                 .fetch_add(1, Ordering::Relaxed);
                                             let cancel = Arc::new(Notify::new());
-                                            let now = Local::now().to_utc();
+                                            let now = Timestamp::now();
                                             let last_active =
-                                                Arc::new(AtomicI64::new(now.timestamp()));
+                                                Arc::new(AtomicI64::new(now.as_second()));
                                             let color = match user_id {
                                                 Some(uid) => self_clone.user_color(uid).await,
                                                 None => None,
@@ -2165,8 +2168,8 @@ impl State {
                                                 id,
                                                 display_name,
                                                 admin,
-                                                connected_since: Duration::default(),
-                                                idle: Duration::default(),
+                                                connected_since: SignedDuration::default(),
+                                                idle: SignedDuration::default(),
                                                 color,
                                                 user_id,
                                                 public_key: client_key,
@@ -3635,7 +3638,7 @@ impl State {
                 id: self.next_chat_message_id.fetch_add(1, Ordering::Relaxed),
                 display_name: user.display_name.clone(),
                 message,
-                at: Utc::now(),
+                at: Timestamp::now(),
             }),
             None,
         )
@@ -4076,8 +4079,8 @@ impl State {
                         topic: row.get(1)?,
                         subject: row.get(2)?,
                         author_name: row.get(3)?,
-                        created_at: row.get(4)?,
-                        last_activity: row.get(5)?,
+                        created_at: row.get::<_, DbTimestamp>(4)?.0,
+                        last_activity: row.get::<_, DbTimestamp>(5)?.0,
                         reply_count: row.get(6)?,
                         has_poll: row.get(7)?,
                     })
@@ -4106,8 +4109,8 @@ impl State {
                             topic: row.get(1)?,
                             subject: row.get(2)?,
                             author_name: row.get(3)?,
-                            created_at: row.get(4)?,
-                            last_activity: row.get(5)?,
+                            created_at: row.get::<_, DbTimestamp>(4)?.0,
+                            last_activity: row.get::<_, DbTimestamp>(5)?.0,
                             reply_count: row.get(6)?,
                             has_poll: row.get(7)?,
                         })
@@ -4559,7 +4562,7 @@ impl State {
     /// What never rides along, for anyone, is who voted for what: the database
     /// does not record it, so there is nothing here to leave out.
     async fn poll_for_viewer(&self, thread: u32, viewer: Voter) -> Option<Poll> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         self.sqlite
             .conn(move |conn| {
                 let Some((
@@ -4583,7 +4586,7 @@ impl State {
                                 row.get::<_, bool>(3)?,
                                 row.get::<_, Option<u32>>(4)?,
                                 row.get::<_, Vec<u8>>(5)?,
-                                row.get::<_, DateTime<Utc>>(6)?,
+                                row.get::<_, DbTimestamp>(6)?.0,
                             ))
                         },
                     )
@@ -4705,7 +4708,7 @@ impl State {
         ensure!(!options.is_empty(), "Pick an option before voting");
         ensure!(options.len() == picked, "The same option was picked twice");
 
-        let (thread, multiple_choice, closes_at, valid): (u32, bool, DateTime<Utc>, Vec<u32>) = {
+        let (thread, multiple_choice, closes_at, valid): (u32, bool, Timestamp, Vec<u32>) = {
             let chosen = options.clone();
             self.sqlite
                 .conn(move |conn| {
@@ -4716,7 +4719,7 @@ impl State {
                             Ok((
                                 row.get::<_, u32>(0)?,
                                 row.get::<_, bool>(1)?,
-                                row.get::<_, DateTime<Utc>>(2)?,
+                                row.get::<_, DbTimestamp>(2)?.0,
                             ))
                         },
                     )?;
@@ -4731,7 +4734,7 @@ impl State {
                 .await?
         };
 
-        ensure!(Utc::now() < closes_at, "This poll has closed");
+        ensure!(Timestamp::now() < closes_at, "This poll has closed");
         ensure!(
             valid.len() == options.len(),
             "That option does not belong to this poll"
@@ -4848,8 +4851,8 @@ impl State {
 
     /// Get a list of connected users
     pub async fn connected_users(&self) -> Vec<ConnectedUser> {
-        let now = Local::now().to_utc();
-        let now_ts = now.timestamp();
+        let now = Timestamp::now();
+        let now_ts = now.as_second();
         self.connections
             .read()
             .await
@@ -4858,7 +4861,7 @@ impl State {
                 let mut user = (*conn.user).clone();
                 user.connected_since = now - conn.connected_at;
                 let idle_secs = (now_ts - conn.last_active.load(Ordering::Relaxed)).max(0);
-                user.idle = Duration::seconds(idle_secs);
+                user.idle = SignedDuration::from_secs(idle_secs);
                 user
             })
             .collect()
@@ -4867,9 +4870,9 @@ impl State {
     /// Record user activity on a connection. If the user had been idle past the
     /// timeout, refresh the roster so their name un-greys promptly.
     async fn mark_active(&self, last_active: &AtomicI64) {
-        let now = Local::now().to_utc().timestamp();
+        let now = Timestamp::now().as_second();
         let previous = last_active.swap(now, Ordering::Relaxed);
-        if now - previous >= IDLE_TIMEOUT_MINUTES.num_seconds() {
+        if now - previous >= IDLE_TIMEOUT_MINUTES.as_secs() {
             self.broadcast_user_list().await;
         }
     }
@@ -5434,7 +5437,7 @@ fn insert_poll(
     author_user: Option<u32>,
     author_key: &[u8],
 ) -> async_sqlite::rusqlite::Result<()> {
-    let closes_at = poll.duration.closes_after(Utc::now());
+    let closes_at = poll.duration.closes_after(Timestamp::now());
     conn.execute(
         "INSERT INTO FORUM_POLL(thread, question, multiple_choice, public_results, \
                                 author_user, author_key, closes_at) \
@@ -5446,7 +5449,7 @@ fn insert_poll(
             poll.public_results,
             author_user,
             author_key,
-            closes_at
+            DbTimestamp(closes_at)
         ],
     )?;
     let poll_id = conn.last_insert_rowid();
@@ -5485,7 +5488,7 @@ fn row_to_forum_post(
         author_name: row.get(4)?,
         body: row.get(5)?,
         markdown: row.get(6)?,
-        created_at: row.get(9)?,
+        created_at: row.get::<_, DbTimestamp>(9)?.0,
         signature,
         // Filled in afterwards: what a reaction looks like depends on who is
         // reading it, and a row does not know that.
@@ -5525,9 +5528,9 @@ mod tests {
     use conclave_common::tracker::TrackerProtocol::AdvertiseServer;
     use conclave_common::tracker::{Advertise, TrackerProtocol};
 
+    use jiff::Timestamp;
     use std::net::{IpAddr, Ipv4Addr};
-
-    use chrono::{Duration, Utc};
+    use std::time::Duration;
     use tokio::net::TcpStream;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5547,7 +5550,7 @@ mod tests {
             state_clone.serve().await.expect("Failed to start tracker");
         });
         assert!(!tracker.is_finished());
-        tokio::time::sleep(Duration::seconds(1).to_std().unwrap()).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
 
         {
             let mut stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
@@ -5584,7 +5587,7 @@ mod tests {
             anonymous: false,
             users_connected: 0,
             max_users: u16::MAX,
-            started: Utc::now(),
+            started: Timestamp::now(),
             url: String::new(),
             key: server_verifying,
         })
@@ -5593,7 +5596,7 @@ mod tests {
         .unwrap();
 
         // Give the tracker a moment to register the advertiser.
-        tokio::time::sleep(Duration::milliseconds(300).to_std().unwrap()).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
 
         {
             let mut stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))
@@ -5617,7 +5620,7 @@ mod tests {
 
         // Closing the advertiser's connection removes the server immediately.
         drop(advertiser);
-        tokio::time::sleep(Duration::milliseconds(10).to_std().unwrap()).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
 
         {
             let mut stream = TcpStream::connect(format!("127.0.0.1:{PORT}"))

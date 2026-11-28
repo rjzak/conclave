@@ -21,9 +21,8 @@ conclave-common = { workspace = true }
 # External
 anyhow = { workspace = true, features = ["std"] }
 argon2 = { workspace = true, features = ["alloc", "getrandom", "password-hash", "zeroize"] }
-async-sqlite = { workspace = true, features = ["bundled", "chrono", "fallible_uint"] }
+async-sqlite = { workspace = true, features = ["bundled", "fallible_uint"] }
 base64 = { workspace = true, features = ["alloc"] }
-chrono = { workspace = true, features = ["clock", "std"] }
 clap = { workspace = true, features = ["color", "derive", "help", "std", "string", "suggestions"] }
 dialoguer = { workspace = true, features = ["password"] }
 ed25519-dalek = { workspace = true, features = ["serde"] }
@@ -31,6 +30,7 @@ eframe = { workspace = true, features = ["accesskit", "default_fonts", "system_f
 futures = { workspace = true, features = ["executor"] }
 hex = { workspace = true, features = ["alloc", "std"] }
 image = { workspace = true, features = ["png"], optional = true }
+jiff = { workspace = true, features = ["serde", "std"] }
 mdns-sd = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive", "std"] }

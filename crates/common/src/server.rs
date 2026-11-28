@@ -9,8 +9,8 @@ use crate::reaction::ReactionTally;
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Duration, Utc};
 pub use ed25519_dalek::VerifyingKey;
+use jiff::{SignedDuration, Timestamp};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -201,7 +201,7 @@ pub enum ChatEvent {
         /// Message text
         message: String,
         /// When the server received the message (UTC)
-        at: DateTime<Utc>,
+        at: Timestamp,
     },
 
     /// A user put an emoji on a message, or took one back.
@@ -269,7 +269,7 @@ impl From<(&str, &str)> for UserAuthentication {
 
 /// Minutes of inactivity after which a user is considered idle (and their name
 /// is greyed out in the clients).
-pub const IDLE_TIMEOUT_MINUTES: Duration = Duration::minutes(30);
+pub const IDLE_TIMEOUT_MINUTES: SignedDuration = SignedDuration::from_mins(30);
 
 /// Information about a connected user
 #[derive(Clone, Debug, Hash, Deserialize, Serialize)]
@@ -285,10 +285,10 @@ pub struct ConnectedUser {
     pub admin: bool,
 
     /// Time since the user connected
-    pub connected_since: Duration,
+    pub connected_since: SignedDuration,
 
     /// Time since the user was last active (sent anything but a keep-alive).
-    pub idle: Duration,
+    pub idle: SignedDuration,
 
     /// Name colour, mixed from the user's groups' colours (`None` if the user
     /// belongs to no coloured groups).

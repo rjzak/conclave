@@ -20,8 +20,8 @@ use crate::net::{SigningKey, VerifyingKey};
 use crate::poll::NewPoll;
 use crate::reaction::ReactionTally;
 
-use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Signer, Verifier};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// A forum topic (board) the user is allowed to see.
@@ -58,10 +58,10 @@ pub struct ForumThreadInfo {
     pub author_name: String,
 
     /// When the thread was created (UTC)
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 
     /// When the most recent post in the thread was made (UTC)
-    pub last_activity: DateTime<Utc>,
+    pub last_activity: Timestamp,
 
     /// Number of replies (posts excluding the opening post)
     pub reply_count: u32,
@@ -132,7 +132,7 @@ pub struct ForumPost {
     pub markdown: bool,
 
     /// When the post was made (UTC)
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 
     /// The author's signature over the body, if they signed it
     pub signature: Option<ForumSignature>,

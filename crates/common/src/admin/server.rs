@@ -2,8 +2,8 @@
 
 use crate::files::{DirAcl, ShareInfo};
 use crate::tracker::{Tracker, TrackerWithKey};
+use jiff::Timestamp;
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Client to Server administrative messages
@@ -243,7 +243,7 @@ pub struct AdminUser {
     pub readonly: bool,
 
     /// Account creation date
-    pub created: DateTime<Utc>,
+    pub created: Timestamp,
 
     /// Groups for which the account has membership
     pub groups: Vec<String>,

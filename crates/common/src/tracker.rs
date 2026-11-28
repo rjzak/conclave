@@ -10,8 +10,8 @@ use std::net::IpAddr;
 
 use anyhow::{anyhow, bail};
 use base64::Engine;
-use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::VerifyingKey;
+use jiff::{SignedDuration, Timestamp};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -203,7 +203,7 @@ pub struct Advertise {
     pub max_users: u16,
 
     /// When the server started so the client may calculate uptime.
-    pub started: DateTime<Utc>,
+    pub started: Timestamp,
 
     /// URL of the server as advertised using the unencrypted port so the client can get
     /// the server's public key and has a chance to verify it.
@@ -219,8 +219,8 @@ impl Advertise {
     /// the start time in the future.
     #[inline]
     #[must_use]
-    pub fn uptime(&self) -> Duration {
-        (Utc::now() - self.started).max(Duration::zero())
+    pub fn uptime(&self) -> SignedDuration {
+        (Timestamp::now() - self.started).max(SignedDuration::ZERO)
     }
 
     /// Serialize with Postcard.

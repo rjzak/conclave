@@ -702,20 +702,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chrono"
-version = "0.4.45"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
-dependencies = [
- "iana-time-zone",
- "js-sys",
- "num-traits",
- "serde",
- "wasm-bindgen",
- "windows-link 0.2.1",
-]
-
-[[package]]
 name = "cipher"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -833,7 +819,6 @@ dependencies = [
  "anyhow",
  "arboard",
  "base64",
- "chrono",
  "clap",
  "conclave-common",
  "dashmap",
@@ -843,6 +828,7 @@ dependencies = [
  "epaint",
  "hex",
  "image",
+ "jiff",
  "mdns-sd",
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
@@ -867,11 +853,11 @@ dependencies = [
  "anyhow",
  "base64",
  "chacha20poly1305",
- "chrono",
  "ed25519-dalek",
  "hex",
  "hkdf",
  "home",
+ "jiff",
  "ml-dsa",
  "ml-kem",
  "percent-encoding",
@@ -895,7 +881,6 @@ dependencies = [
  "argon2",
  "async-sqlite",
  "base64",
- "chrono",
  "clap",
  "conclave-common",
  "conclave-tracker",
@@ -905,6 +890,7 @@ dependencies = [
  "futures",
  "hex",
  "image",
+ "jiff",
  "mdns-sd",
  "semver",
  "serde",
@@ -2087,30 +2073,6 @@ dependencies = [
  "ctutils",
  "typenum",
  "zeroize",
-]
-
-[[package]]
-name = "iana-time-zone"
-version = "0.1.65"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e31bc9ad994ba00e440a8aa5c9ef0ec67d5cb5e5cb0cc7f8b744a35b389cc470"
-dependencies = [
- "android_system_properties",
- "core-foundation-sys",
- "iana-time-zone-haiku",
- "js-sys",
- "log",
- "wasm-bindgen",
- "windows-core 0.62.2",
-]
-
-[[package]]
-name = "iana-time-zone-haiku"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
-dependencies = [
- "cc",
 ]
 
 [[package]]
@@ -3602,7 +3564,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
 dependencies = [
  "bitflags 2.13.2",
- "chrono",
  "fallible-iterator",
  "fallible-streaming-iterator",
  "libsqlite3-sys",

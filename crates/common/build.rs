@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use chrono::Utc;
-
 fn main() {
     println!("cargo::rustc-env=CONCLAVE_VERSION={}", version());
     println!(
         "cargo::rustc-env=CONCLAVE_BUILD_DATE={}",
-        Utc::now().format("%Y-%m-%d")
+        jiff::Timestamp::now().strftime("%Y-%m-%d")
     );
 }
 

@@ -30,12 +30,13 @@ type FileListing = (String, Vec<FileEntry>);
 type NamedAcl = (String, DirAcl);
 
 use anyhow::{Result, anyhow};
-use chrono::{DateTime, Duration, Local};
 use conclave_common::admin::server::{
     AdminForumTopic, AdminUser, Chatroom, ClientAdminMessagesEncrypted, CreateGroup, CreateUser,
     Group, GroupMembership, ServerAdminMessagesEncrypted, ServerLimits,
 };
 use conclave_common::tracker::{Tracker, TrackerWithKey};
+use jiff::tz::TimeZone;
+use jiff::{SignedDuration, Timestamp, ZonedDateTime};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
@@ -68,7 +69,7 @@ pub enum ChatLine {
     /// A message posted by a user.
     Message {
         /// Local time the message was received.
-        time: DateTime<Local>,
+        time: ZonedDateTime,
         /// The server's id for this message, which reactions name. Unique only
         /// within this run of the server, which is as long as chat lasts.
         id: u32,
@@ -134,7 +135,7 @@ pub struct DmReaction {
 #[derive(Clone, Debug)]
 pub struct DmMessage {
     /// Local time the message was sent or received.
-    pub time: DateTime<Local>,
+    pub time: ZonedDateTime,
 
     /// Whether this side sent the message (`true`) or received it (`false`).
     pub from_me: bool,
@@ -155,7 +156,7 @@ impl DmMessage {
     /// An entry nothing can react to: a notice, or a file transfer.
     fn entry(from_me: bool, body: DmBody) -> Self {
         Self {
-            time: Local::now(),
+            time: ZonedDateTime::now(),
             from_me,
             id: None,
             body,
@@ -166,7 +167,7 @@ impl DmMessage {
     /// Something one side said, numbered by that side so a reaction can name it.
     fn said(from_me: bool, id: u32, text: String) -> Self {
         Self {
-            time: Local::now(),
+            time: ZonedDateTime::now(),
             from_me,
             id: Some(id),
             body: DmBody::Text(text),
@@ -436,7 +437,7 @@ pub struct ConclaveConnection {
     pub(crate) listen_handle: Arc<JoinHandle<()>>,
 
     /// When the connection was established
-    pub(crate) connection_time: DateTime<Local>,
+    pub(crate) connection_time: Timestamp,
 
     /// This viewer's own shared timezone (whole hours relative to GMT sent at
     /// connect), so the GUI can show other users' offsets relative to us.
@@ -498,7 +499,7 @@ impl ConclaveConnection {
             listen_handle: Arc::new(tokio::spawn(tokio::time::sleep(
                 tokio::time::Duration::from_millis(1),
             ))),
-            connection_time: Local::now(),
+            connection_time: Timestamp::now(),
             own_timezone,
             local_id: NEXT_LOCAL_ID.fetch_add(1, Ordering::Relaxed),
         };
@@ -979,7 +980,7 @@ impl ConclaveConnection {
                     .or_default()
                     .lines
                     .push(ChatLine::Message {
-                        time: at.with_timezone(&Local),
+                        time: at.to_zoned_datetime(TimeZone::system()),
                         id,
                         display_name,
                         message,
@@ -1030,7 +1031,7 @@ impl ConclaveConnection {
                 topic,
             } => {
                 // Stamp the local time so the log shows when the topic changed.
-                let time = Local::now().format("%H:%M:%S");
+                let time = ZonedDateTime::now().strftime("%H:%M:%S");
                 let entry = rooms.entry(room).or_default();
                 let line = if topic.trim().is_empty() {
                     entry.topic = None;
@@ -2870,7 +2871,7 @@ impl ConclaveConnection {
     /// When the connection was established, if still connected.
     #[inline]
     #[must_use]
-    pub fn connected_since(&self) -> Option<&DateTime<Local>> {
+    pub fn connected_since(&self) -> Option<&Timestamp> {
         self.listen_handle
             .is_finished()
             .not()
@@ -2880,11 +2881,11 @@ impl ConclaveConnection {
     /// Connection duration, if still connected.
     #[inline]
     #[must_use]
-    pub fn connection_duration(&self) -> Option<Duration> {
+    pub fn connection_duration(&self) -> Option<SignedDuration> {
         self.listen_handle
             .is_finished()
             .not()
-            .then_some(self.connection_time.signed_duration_since(Local::now()))
+            .then(|| Timestamp::now() - self.connection_time)
     }
 
     /// Send a disconnect message to the server and close the connection.
